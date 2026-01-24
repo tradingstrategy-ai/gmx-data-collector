@@ -303,12 +303,12 @@ class DataCollector:
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
     async def collect_all_symbols(
-        self, full: bool = False, concurrency: int = 10
+        self, full: bool = False, concurrency: int = 1
     ) -> None:
         """Collect data for all supported symbols with parallel processing.
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
-        :param concurrency: Number of symbols to process concurrently (default: 10)
+        :param concurrency: Number of symbols to process concurrently (default: 1, use --concurrency for parallel)
         """
         # Discover all GMX tokens
         console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
@@ -423,9 +423,9 @@ def cli(
         help="Fetch latest data from GMX API",
     ),
     concurrency: int = typer.Option(
-        10,
+        1,
         "--concurrency",
-        help="Number of symbols to process in parallel (default: 10)",
+        help="Number of symbols to process in parallel (default: 1 for sequential, set higher for parallel)",
         min=1,
         max=50,
     ),

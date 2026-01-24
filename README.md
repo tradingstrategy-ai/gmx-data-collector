@@ -16,7 +16,7 @@ This tool provides **maximum coverage** for GMX token price history by intellige
   - ~50 tokens with full historical data (Chainlink + GMX)
   - ~47 tokens with recent data (GMX only, last ~6 months)
 - ✨ **High Performance**: HyperSync for 100-2000x speedup over traditional RPC
-- ⚡ **Parallel Processing**: 10-50x speedup with concurrent symbol collection and timeframe fetching
+- ⚡ **Parallel Processing**: Optional 10-50x speedup with `--concurrency` flag (defaults to sequential)
 - 🏎️ **Simultaneous Multi-Endpoint Queries**: Race multiple HyperSync endpoints for best latency
 - 🛡️ **Robust Error Handling**: Timeout protection, multi-token support, automatic rate limit handling
 - 📊 **Multi-Timeframe**: OHLCV candles at 1m, 5m, 15m, 1H, 4H, 1D
@@ -101,12 +101,12 @@ poetry run gmx_historical_data \
 ### Collect All Tokens
 
 ```bash
-# Full historical collection for all supported tokens (default: 10 parallel)
+# Full historical collection for all supported tokens (sequential by default)
 poetry run gmx_historical_data \
     --full \
     --output-dir ./data
 
-# High-throughput mode: 20 symbols in parallel
+# High-throughput mode: 20 symbols in parallel (optional speedup)
 poetry run gmx_historical_data \
     --full \
     --concurrency 20 \
@@ -324,12 +324,15 @@ data/
 - ~800K-1.6M `getRoundData()` calls needed
 - Even with batching: hours to days
 
-**Our approach (HyperSync + Parallel Processing):**
+**Our approach (HyperSync + Optional Parallel Processing):**
 - **HyperSync**: 100-2000x speedup over traditional RPC
-- **Parallel Symbol Collection**: 10-50x speedup (configurable with `--concurrency`)
+- **Parallel Symbol Collection**: Optional 10-50x speedup with `--concurrency` flag (defaults to sequential)
 - **Parallel Timeframe Fetching**: 3-6x speedup per symbol (all 6 timeframes concurrently)
 - **Multi-Token Support**: 3x throughput with 3 HyperSync API tokens
-- **Full collection of ~97 tokens**: 10-30 minutes (vs hours with sequential)
+- **Full collection of ~97 tokens**:
+  - Sequential (default): ~3-6 hours
+  - Parallel (--concurrency 10): ~10-30 minutes
+  - Parallel (--concurrency 20, 3 tokens): ~5-15 minutes
 
 **Optimizations:**
 - Automatic token discovery from GMX API
@@ -340,9 +343,9 @@ data/
 
 **Example Performance:**
 ```bash
-# Sequential (old): ~3-6 hours for 97 tokens
-# Parallel (concurrency=10): ~10-30 minutes for 97 tokens
-# Parallel (concurrency=20, 3 tokens): ~5-15 minutes for 97 tokens
+# Sequential (default): ~3-6 hours for 97 tokens
+# Enable parallel with --concurrency 10: ~10-30 minutes for 97 tokens
+# High-throughput --concurrency 20 + 3 tokens: ~5-15 minutes for 97 tokens
 ```
 
 ## HyperSync Setup (Optional but Recommended)
@@ -400,7 +403,7 @@ optional arguments:
   --use-gmx-api         Fetch latest data from GMX API (default: enabled)
   --no-gmx-api          Skip GMX API, use only Chainlink data
   --concurrency CONCURRENCY
-                        Number of symbols to process in parallel (default: 10, max: 50)
+                        Number of symbols to process in parallel (default: 1 for sequential, max: 50)
 ```
 
 ## Troubleshooting
@@ -426,16 +429,16 @@ python -c "from gmx_historical_data import get_all_symbols; print(get_all_symbol
 export HYPERSYNC_API_TOKEN="your_token"
 ```
 
-**Optimal performance:**
+**Optimal performance (optional parallel processing):**
 ```bash
-# Use multiple HyperSync tokens + high concurrency
+# Use multiple HyperSync tokens + enable parallel processing
 export HYPERSYNC_API_TOKEN="token1,token2,token3"
 poetry run gmx_historical_data --full --concurrency 20
 ```
 
 **If you hit connection limits:**
 ```bash
-# Reduce concurrency for slower/unstable connections
+# Use lower concurrency or stick with sequential (default: 1)
 poetry run gmx_historical_data --full --concurrency 5
 ```
 
@@ -451,8 +454,9 @@ The tool automatically handles rate limits with:
 # Add more HyperSync API tokens (up to 5 recommended)
 export HYPERSYNC_API_TOKEN="tok1,tok2,tok3,tok4,tok5"
 
-# Or reduce concurrency to stay under rate limits
+# Or reduce concurrency (or use sequential default)
 poetry run gmx_historical_data --full --concurrency 5
+# Sequential (default): poetry run gmx_historical_data --full
 ```
 
 ### Timeout Errors
@@ -463,8 +467,9 @@ poetry run gmx_historical_data --full --concurrency 5
 
 **If you see frequent timeouts:**
 ```bash
-# Reduce concurrency to prevent overwhelming APIs
-poetry run gmx_historical_data --full --concurrency 5
+# Use sequential processing (default) or lower concurrency
+poetry run gmx_historical_data --full  # Sequential (default)
+poetry run gmx_historical_data --full --concurrency 5  # Low concurrency
 
 # Or check your network connection stability
 ```
