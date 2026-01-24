@@ -172,7 +172,7 @@ python scripts/plot_historical_data.py BTC --timeframe 1h --data-dir ./data
 # Plot ARB raw tick data
 python scripts/plot_historical_data.py ARB --raw --data-dir ./data
 
-# Plot ALL available symbols (generates plots for all 18 tokens)
+# Plot ALL collected symbols (automatically discovers symbols in data directory)
 python scripts/plot_historical_data.py --all --data-dir ./data
 
 # Custom output directory
