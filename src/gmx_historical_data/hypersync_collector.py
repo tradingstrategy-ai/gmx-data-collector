@@ -40,21 +40,58 @@ class CollectionStats:
 
 
 class HyperSyncCollector:
-    """Collect Chainlink events using HyperSync.
+    """Collect Chainlink events using HyperSync with multi-token support.
 
     :param endpoint: HyperSync endpoint URL
-    :param api_token: Optional API token for authenticated access
+    :param api_tokens: API token(s) for authenticated access (string or list)
     """
 
-    def __init__(self, endpoint: str, api_token: str | None = None):
-        """Initialize HyperSync collector.
+    def __init__(
+        self,
+        endpoint: str,
+        api_tokens: str | list[str] | None = None,
+        max_concurrent_requests: int = 5,
+    ):
+        """Initialize HyperSync collector with multi-token support and rate limiting.
 
         :param endpoint: HyperSync endpoint URL (e.g., 'https://arbitrum.hypersync.xyz')
-        :param api_token: Optional API token for HyperSync
+        :param api_tokens: API token(s) - single token, comma-separated string, or list
+        :param max_concurrent_requests: Maximum concurrent HyperSync requests (default: 5)
         """
-        config = ClientConfig(url=endpoint, bearer_token=api_token)
-        self.client = hypersync.HypersyncClient(config)
+        self.endpoint = endpoint
         self.decoder = EventDecoder()
+
+        # Parse API tokens
+        if api_tokens is None:
+            self.tokens = [None]
+        elif isinstance(api_tokens, str):
+            # Support comma-separated tokens
+            self.tokens = [t.strip() for t in api_tokens.split(",") if t.strip()]
+            if not self.tokens:
+                self.tokens = [None]
+        else:
+            self.tokens = api_tokens if api_tokens else [None]
+
+        # Create multiple clients (one per token) for round-robin
+        self.clients = []
+        for token in self.tokens:
+            config = ClientConfig(url=endpoint, bearer_token=token)
+            self.clients.append(hypersync.HypersyncClient(config))
+
+        # Current client index for round-robin
+        self.current_client_idx = 0
+
+        # Legacy single client for backward compatibility
+        self.client = self.clients[0]
+
+        # Semaphore for rate limiting concurrent requests
+        self.request_semaphore = asyncio.Semaphore(max_concurrent_requests)
+
+    def _get_next_client(self):
+        """Get next client in round-robin rotation."""
+        client = self.clients[self.current_client_idx]
+        self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
+        return client
 
     def build_query(
         self,
@@ -113,24 +150,66 @@ class HyperSyncCollector:
         query: Query,
         max_retries: int = 5,
         initial_backoff: float = 1.0,
+        timeout: float = 300.0,
     ):
-        """Execute HyperSync query with exponential backoff retry logic.
+        """Execute HyperSync query with exponential backoff retry logic and timeout.
+
+        Uses round-robin rotation of API tokens to handle rate limits.
+        Semaphore-based rate limiting controls concurrent request volume.
 
         :param query: HyperSync query to execute
         :param max_retries: Maximum number of retry attempts
         :param initial_backoff: Initial backoff time in seconds
+        :param timeout: Timeout in seconds for each query attempt (default: 300s = 5min)
         :return: HyperSync response
         :raises: Last exception if all retries fail
         """
         last_exception = None
         backoff = initial_backoff
+        tokens_tried = 0
 
         for attempt in range(max_retries + 1):
+            # Get next client in round-robin (rotates through all available tokens)
+            client = self._get_next_client()
+
             try:
-                response = await self.client.get(query)
-                return response
+                # Use semaphore to limit concurrent requests
+                async with self.request_semaphore:
+                    # Add timeout to prevent hanging queries
+                    response = await asyncio.wait_for(
+                        client.get(query),
+                        timeout=timeout
+                    )
+                    return response
+
+            except asyncio.TimeoutError as e:
+                last_exception = e
+                if attempt < max_retries:
+                    print(f"  [Retry {attempt + 1}/{max_retries}] HyperSync query timeout after {timeout}s")
+                    print(f"  Retrying in {backoff:.1f}s...")
+                    await asyncio.sleep(backoff)
+                    backoff *= 2  # Exponential backoff
+                else:
+                    print(f"  All {max_retries} retry attempts failed (timeout)")
+
             except Exception as e:
                 last_exception = e
+                error_str = str(e).lower()
+
+                # Check for rate limit errors (429)
+                is_rate_limit = "429" in error_str or "rate limit" in error_str or "too many requests" in error_str
+
+                if is_rate_limit and len(self.clients) > 1:
+                    tokens_tried += 1
+                    if tokens_tried < len(self.clients):
+                        # Try next token immediately (no backoff)
+                        print(f"  [Token rotation {tokens_tried}/{len(self.clients)}] Rate limit hit, trying next API token...")
+                        continue
+                    else:
+                        # All tokens exhausted, apply backoff
+                        print(f"  [All {len(self.clients)} tokens rate limited] Applying backoff...")
+                        tokens_tried = 0  # Reset for next retry cycle
+
                 if attempt < max_retries:
                     print(f"  [Retry {attempt + 1}/{max_retries}] HyperSync query failed: {e}")
                     print(f"  Retrying in {backoff:.1f}s...")

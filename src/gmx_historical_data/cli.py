@@ -86,15 +86,41 @@ class DataCollector:
         console.print()
         console.print(Panel(f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED))
 
-        # Step 1: Fetch GMX data (all timeframes)
+        # Step 1: Fetch GMX data (all timeframes in parallel)
         console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
         gmx_candles = {}
 
         if self.use_gmx_api and self.gmx_fetcher:
-            for timeframe in TIMEFRAMES:
-                gmx_period = map_timeframe_to_gmx_period(timeframe)
-                gmx_df = self.gmx_fetcher.fetch_gmx_candles(symbol, period=gmx_period)
+            # Create async tasks for parallel timeframe fetching
+            async def fetch_timeframe(tf: str, timeout: float = 120.0):
+                """Fetch GMX data for a single timeframe with timeout.
 
+                :param tf: Timeframe string
+                :param timeout: Timeout in seconds (default: 120s = 2min)
+                """
+                gmx_period = map_timeframe_to_gmx_period(tf)
+                try:
+                    df = await asyncio.wait_for(
+                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
+                        timeout=timeout
+                    )
+                    return tf, df
+                except asyncio.TimeoutError:
+                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
+                    import pandas as pd
+                    return tf, pd.DataFrame()  # Return empty DataFrame on timeout
+
+            # Execute all timeframe fetches in parallel
+            timeframe_tasks = [fetch_timeframe(tf) for tf in TIMEFRAMES]
+            results = await asyncio.gather(*timeframe_tasks, return_exceptions=True)
+
+            # Process results
+            for result in results:
+                if isinstance(result, Exception):
+                    console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
+                    continue
+
+                timeframe, gmx_df = result
                 if not gmx_df.empty:
                     earliest, latest = gmx_df["timestamp"].min(), gmx_df["timestamp"].max()
                     console.print(f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]")
@@ -217,10 +243,11 @@ class DataCollector:
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
-    async def collect_all_symbols(self, full: bool = False) -> None:
-        """Collect data for all supported symbols.
+    async def collect_all_symbols(self, full: bool = False, concurrency: int = 10) -> None:
+        """Collect data for all supported symbols with parallel processing.
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
+        :param concurrency: Number of symbols to process concurrently (default: 10)
         """
         # Discover all GMX tokens
         console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
@@ -232,18 +259,32 @@ class DataCollector:
         failed = 0
         failed_symbols = []
 
-        console.print(f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols...[/bold]")
+        console.print(f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]")
 
-        for i, symbol in enumerate(symbols, 1):
-            console.print(f"\n[bold blue][{i}/{total}][/bold blue] Processing {symbol}...")
-            try:
-                await self.collect_symbol(symbol, full=full)
-                successful += 1
-            except Exception as e:
-                console.print(f"[red]✗ Error processing {symbol}: {e}[/red]")
-                failed += 1
-                failed_symbols.append(symbol)
-                continue
+        # Process symbols in batches for controlled parallelism
+        for batch_start in range(0, len(symbols), concurrency):
+            batch_end = min(batch_start + concurrency, len(symbols))
+            batch = symbols[batch_start:batch_end]
+
+            console.print(f"\n[bold cyan]Batch {batch_start//concurrency + 1}: Processing {len(batch)} symbols ({batch_start+1}-{batch_end}/{total})[/bold cyan]")
+
+            # Create tasks for parallel execution
+            tasks = []
+            for symbol in batch:
+                tasks.append(self.collect_symbol(symbol, full=full))
+
+            # Execute batch in parallel, capturing exceptions
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process results
+            for symbol, result in zip(batch, results):
+                if isinstance(result, Exception):
+                    console.print(f"  [red]✗ {symbol}: {result}[/red]")
+                    failed += 1
+                    failed_symbols.append(symbol)
+                else:
+                    console.print(f"  [green]✓ {symbol}: Success[/green]")
+                    successful += 1
 
         # Create summary table
         summary_table = Table(title="Collection Summary", box=box.ROUNDED, show_header=False)
@@ -290,7 +331,7 @@ def cli(
         None,
         "--hypersync-token",
         envvar="HYPERSYNC_API_TOKEN",
-        help="HyperSync API token (or set HYPERSYNC_API_TOKEN env var)",
+        help="HyperSync API token(s) - comma-separated for multiple tokens (or set HYPERSYNC_API_TOKEN env var)",
     ),
     start_block: Optional[int] = typer.Option(
         None,
@@ -306,6 +347,13 @@ def cli(
         True,
         "--use-gmx-api/--no-gmx-api",
         help="Fetch latest data from GMX API",
+    ),
+    concurrency: int = typer.Option(
+        10,
+        "--concurrency",
+        help="Number of symbols to process in parallel (default: 10)",
+        min=1,
+        max=50,
     ),
 ) -> None:
     """Collect GMX historical price data.
@@ -371,7 +419,7 @@ def cli(
         if symbol:
             asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
         else:
-            asyncio.run(collector.collect_all_symbols(full=full))
+            asyncio.run(collector.collect_all_symbols(full=full, concurrency=concurrency))
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Collection interrupted by user[/yellow]")
         raise typer.Exit(1)
