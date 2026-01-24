@@ -1,31 +1,44 @@
 # GMX Historical Data Collection
 
-Collect historical price data for GMX tokens by querying Chainlink oracle events on Arbitrum using HyperSync.
+Collect complete historical price data for **all ~97 GMX tokens** using a hybrid approach: GMX API for recent data, Chainlink oracles for historical backfill.
 
 ## Overview
 
-GMX provides real-time data with limited history (1-2 months). This tool collects years of historical price data by querying Chainlink `AnswerUpdated` events directly from the Arbitrum blockchain via **HyperSync** (100-2000x faster than RPC).
+This tool provides **maximum coverage** for GMX token price history by intelligently combining two data sources:
+- **GMX API**: Latest ~6 months of high-quality OHLCV data
+- **Chainlink Oracles**: Historical data back to 2021 (where feeds exist)
+- **HyperSync**: 100-2000x faster than RPC for blockchain event queries
 
 ### Features
 
-- ✨ **High Performance**: Uses HyperSync for 100-2000x speedup over traditional RPC
-- 📊 **Multi-Timeframe**: Generates OHLCV candles at 1m, 5m, 15m, 1H, 4H, 1D
-- 💾 **Efficient Storage**: Compressed Parquet files with partitioning
+- 🎯 **Maximum Token Coverage**: All ~97 GMX-supported tokens automatically discovered
+- 🔗 **Hybrid Data Sources**:
+  - ~50 tokens with full historical data (Chainlink + GMX)
+  - ~47 tokens with recent data (GMX only, last ~6 months)
+- ✨ **High Performance**: HyperSync for 100-2000x speedup over traditional RPC
+- 📊 **Multi-Timeframe**: OHLCV candles at 1m, 5m, 15m, 1H, 4H, 1D
+- 💾 **Efficient Storage**: Compressed Parquet files with smart partitioning
 - 🔄 **Incremental Updates**: Resume from checkpoints for ongoing collection
-- 📈 **18 Tokens**: Supports all GMX tokens with active Chainlink feeds (ETH, BTC, ARB, etc.)
-- 🔗 **Dual Data Sources**: Combines GMX API (latest data) with Chainlink oracles (historical data) for complete coverage
+- 🤖 **Smart Symbol Mapping**: Automatic fuzzy matching between GMX and Chainlink symbols
 
-### Data Coverage
+### Data Coverage Strategy
 
-- **Complete Historical Coverage**:
-  - Chainlink oracle data from the very first oracle update for each token
-    - ETH: July 13, 2021 (early Arbitrum deployment)
-    - Most tokens: August 2021 (Chainlink mainnet launch)
-    - ARB: March 24, 2023 (Arbitrum token launch)
-  - GMX API data for the latest ~6 months (July 2025 onwards)
-  - Automatically combines both sources for seamless coverage
-- **Tokens**: 18 GMX-supported tokens with Chainlink feeds on Arbitrum
-- **Update Frequency**: ~1-2 price updates per hour from Chainlink (more during high volatility)
+**GMX-First Approach:**
+1. Fetch recent data from GMX API (latest ~6 months, all timeframes)
+2. Identify data gap (if any historical data is missing)
+3. Backfill gap with Chainlink oracle events (2021→GMX start)
+4. Combine seamlessly: Chainlink (historical) + GMX (recent)
+
+**Coverage by Token:**
+- **Tokens with Chainlink Feeds (~50)**: Complete history from 2021+ to present
+  - ETH, BTC: July 2021 (early Arbitrum deployment)
+  - Most DeFi tokens: August 2021 (Chainlink mainnet launch)
+  - ARB: March 2023 (Arbitrum token launch)
+  - Recent tokens: Varies by Chainlink feed deployment
+- **Tokens GMX-only (~47)**: Last ~6 months from GMX API
+- **Update Frequency**:
+  - GMX: High-resolution OHLCV (exact frequency varies by timeframe)
+  - Chainlink: ~1-2 updates/hour (more during high volatility)
 
 ## Installation
 
@@ -188,19 +201,31 @@ data/
 
 ## Supported Tokens
 
-| Symbol | Name | Chainlink Feed |
-|--------|------|----------------|
-| ETH | Ethereum | 0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612 |
-| BTC | Bitcoin | 0x6ce185860a4963106506C203335A2910413708e9 |
-| ARB | Arbitrum | 0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6 |
-| LINK | Chainlink | 0x86E53CF1B870786351Da77A57575e79CB55812CB |
-| UNI | Uniswap | 0x9C917083fDb403ab5ADbEC26Ee294f6EcAda2720 |
-| AAVE | Aave | 0xaD1d5344AaDE45F43E596773Bcc4c423EAbdD034 |
-| SOL | Solana | 0x24ceA4b8ce57cdA5058b924B9B9987992450590c |
-| AVAX | Avalanche | 0x8bf61728eeDCE2F32c456454d87B5d6eD6150208 |
-| ... | ... | ... |
+**Coverage:** ~97 GMX tokens with maximum data availability
 
-*Full list: 20+ tokens in `src/gmx_historical_data/chainlink_feeds.py`*
+### Data Availability Strategy
+
+| Category | Token Count | Data Coverage | Historical Depth |
+|----------|-------------|---------------|------------------|
+| **Tokens with Chainlink Feeds** | ~50 tokens | Full History | 2021+ (Chainlink) + Latest (GMX API) |
+| **Tokens GMX-only** | ~47 tokens | Recent Only | Last ~6 months (GMX API only) |
+| **Total Coverage** | **~97 tokens** | **Maximum** | **Hybrid (optimal for each token)** |
+
+### Sample Tokens with Chainlink Feeds (Full Historical Data)
+
+| Category | Tokens |
+|----------|--------|
+| **Major Crypto** | ETH, BTC, WBTC, WETH |
+| **Stablecoins** | USDC, USDT, DAI, FRAX |
+| **Layer 1s** | ARB, SOL, AVAX, BNB, MATIC, OP |
+| **DeFi** | AAVE, UNI, LINK, GMX, CRV, COMP, MKR, SNX, SUSHI, YFI, BAL, 1INCH, LDO |
+| **Liquid Staking** | WSTETH, STETH, RETH, CBETH |
+| **Meme** | DOGE, SHIB, PEPE, WIF, BONK |
+| **Additional** | FTM, ATOM, NEAR, FIL, APE, LTC, BCH, XRP, RDNT, PENDLE |
+
+*Complete list with feed addresses: `src/gmx_historical_data/chainlink_feeds_complete.py`*
+
+**Note:** The tool automatically discovers all GMX-supported tokens and collects maximum available history for each.
 
 ## Data Schemas
 

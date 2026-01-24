@@ -16,7 +16,10 @@ from web3 import Web3
 console = Console()
 
 from gmx_historical_data.config import CollectionConfig, TIMEFRAMES
-from gmx_historical_data.chainlink_feeds import get_feed_address, get_all_symbols
+from gmx_historical_data.chainlink_feeds_complete import (
+    get_feed_address_for_gmx_symbol,
+    find_chainlink_symbol,
+)
 from gmx_historical_data.aggregator_discovery import AggregatorDiscovery
 from gmx_historical_data.hypersync_collector import HyperSyncCollector
 from gmx_historical_data.storage import ParquetStorage
@@ -27,6 +30,8 @@ from gmx_historical_data.gmx_api_integration import (
     combine_gmx_and_chainlink_data,
     map_timeframe_to_gmx_period,
 )
+from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
+from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 
 
 class DataCollector:
@@ -59,6 +64,12 @@ class DataCollector:
         else:
             self.gmx_fetcher = None
 
+        # GMX token discovery
+        self.gmx_discovery = GMXTokenDiscovery(chain="arbitrum")
+
+        # Gap analyzer
+        self.gap_analyzer = DataGapAnalyzer()
+
         # Ensure directories exist
         config.ensure_directories()
 
@@ -67,7 +78,7 @@ class DataCollector:
         symbol: str,
         full: bool = False,
     ) -> None:
-        """Collect data for a single symbol.
+        """Collect data for a single symbol using GMX-first approach.
 
         :param symbol: Token symbol (e.g., 'ETH')
         :param full: If True, collect from genesis; if False, resume from checkpoint
@@ -75,96 +86,11 @@ class DataCollector:
         console.print()
         console.print(Panel(f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED))
 
-        # Get Chainlink proxy address
-        try:
-            proxy_address = get_feed_address(symbol)
-            console.print(f"  [dim]Chainlink proxy:[/dim] [yellow]{proxy_address}[/yellow]")
-        except KeyError as e:
-            console.print(f"[red]✗ Error: {e}[/red]")
-            return
-
-        # Discover aggregator address
-        discovery = AggregatorDiscovery(self.web3)
-        try:
-            aggregator_info = discovery.get_aggregator_info(proxy_address)
-            aggregator_address = aggregator_info["current_aggregator"]
-            console.print(f"  [dim]Current aggregator:[/dim] [yellow]{aggregator_address}[/yellow]")
-            console.print(f"  [dim]Phase ID:[/dim] {aggregator_info['current_phase']}")
-        except Exception as e:
-            error_msg = f"Chainlink aggregator discovery failed - feed may not be active on Arbitrum"
-            console.print(f"[red]✗ {error_msg}[/red]")
-            raise ValueError(error_msg) from e
-
-        # Determine start block
-        if full:
-            start_block = self.config.start_block or 0
-            console.print(f"  [dim]Mode:[/dim] Full collection from block [cyan]{start_block}[/cyan]")
-        else:
-            start_block = self.checkpoint_mgr.get_resume_block(symbol, default=0)
-            console.print(f"  [dim]Mode:[/dim] Resuming from block [cyan]{start_block}[/cyan]")
-
-        # Collect events
-        console.print(f"\n[bold]Querying HyperSync...[/bold]")
-        try:
-            events, stats = await self.hypersync.collect_all_events(
-                aggregator_addresses=[aggregator_address],
-                start_block=start_block,
-                end_block=self.config.end_block,
-                auto_detect_start=False,  # HyperSync is efficient from block 0
-            )
-        except Exception as e:
-            console.print(f"[red]Error collecting events: {e}[/red]")
-            return
-
-        if not events:
-            console.print("[yellow]No events found.[/yellow]")
-            return
-
-        # Show first oracle update info
-        first_event = min(events, key=lambda e: e.block_number)
-        first_date = datetime.datetime.fromtimestamp(first_event.timestamp, tz=datetime.timezone.utc)
-
-        # Create statistics table
-        table = Table(title="Collection Statistics", box=box.ROUNDED, show_header=False)
-        table.add_column("Metric", style="dim")
-        table.add_column("Value", style="cyan")
-
-        table.add_row("First oracle update", f"{first_date.strftime('%Y-%m-%d %H:%M:%S UTC')} (block {first_event.block_number})")
-        table.add_row("Total events", f"{stats.total_events:,}")
-        table.add_row("Blocks scanned", f"{stats.blocks_scanned:,}")
-        table.add_row("Block range", f"{stats.start_block:,} → {stats.end_block:,}")
-        table.add_row("Aggregators found", str(stats.aggregators_found))
-
-        console.print()
-        console.print(table)
-
-        # Save raw events
-        console.print("\n[bold]Saving raw events...[/bold]")
-        if full:
-            output_path = self.storage.save_raw_events(events, symbol, partition_id=0)
-        else:
-            output_path = self.storage.append_raw_events(events, symbol)
-        console.print(f"  [green]✓[/green] Saved to: [dim]{output_path}[/dim]")
-
-        # Update checkpoint
-        last_event = max(events, key=lambda e: e.block_number)
-        checkpoint = self.checkpoint_mgr.update_checkpoint(
-            symbol=symbol,
-            last_block=last_event.block_number,
-            last_timestamp=last_event.timestamp,
-            events_added=len(events),
-        )
-        console.print(f"  [green]✓[/green] Checkpoint updated: [cyan]{checkpoint.total_events:,}[/cyan] total events")
-
-        # Resample to OHLCV
-        console.print("\n[bold]Resampling to OHLCV candles...[/bold]")
-        raw_df = self.storage.read_raw_events(symbol)
-        chainlink_candles = self.resampler.resample_all_timeframes(raw_df, symbol)
-
-        # Fetch GMX data if enabled
+        # Step 1: Fetch GMX data (all timeframes)
+        console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
         gmx_candles = {}
+
         if self.use_gmx_api and self.gmx_fetcher:
-            console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
             for timeframe in TIMEFRAMES:
                 gmx_period = map_timeframe_to_gmx_period(timeframe)
                 gmx_df = self.gmx_fetcher.fetch_gmx_candles(symbol, period=gmx_period)
@@ -176,7 +102,97 @@ class DataCollector:
                 else:
                     console.print(f"  [yellow]○[/yellow] {timeframe}: No GMX data available")
 
-        # Combine GMX and Chainlink data
+        if not gmx_candles:
+            console.print(f"[yellow]No GMX data available for {symbol}[/yellow]")
+            return
+
+        # Step 2: Find Chainlink feed (if exists)
+        console.print(f"\n[bold]Checking for Chainlink feed...[/bold]")
+        chainlink_symbol = find_chainlink_symbol(symbol)
+        chainlink_feed_address = get_feed_address_for_gmx_symbol(symbol) if chainlink_symbol else None
+
+        if chainlink_feed_address:
+            console.print(f"  [green]✓[/green] Found Chainlink feed: [yellow]{chainlink_feed_address}[/yellow]")
+            console.print(f"  [dim]Mapped symbol:[/dim] {symbol} → {chainlink_symbol}")
+        else:
+            console.print(f"  [yellow]○[/yellow] No Chainlink feed found - using GMX data only")
+
+        # Step 3: Calculate gap and backfill with Chainlink
+        chainlink_candles = {}
+
+        if chainlink_feed_address:
+            # Use 1h candles to determine the gap (representative)
+            gmx_1h = gmx_candles.get("1h")
+
+            if gmx_1h is not None:
+                backfill_start, backfill_end = self.gap_analyzer.calculate_gap(
+                    gmx_df=gmx_1h,
+                    chainlink_available=True
+                )
+
+                console.print(f"\n[bold]Analyzing data gap...[/bold]")
+                if backfill_end is not None:
+                    gmx_earliest = gmx_1h["timestamp"].min()
+                    console.print(f"  [dim]GMX coverage starts:[/dim] {gmx_earliest}")
+                    console.print(f"  [dim]Backfill needed:[/dim] Genesis → {gmx_earliest}")
+                else:
+                    console.print(f"  [green]✓[/green] No gap - GMX data covers full history")
+
+                # Collect Chainlink data to fill the gap
+                if backfill_start is not None:
+                    console.print(f"\n[bold]Backfilling with Chainlink data...[/bold]")
+
+                    # Discover aggregator address
+                    discovery = AggregatorDiscovery(self.web3)
+                    try:
+                        aggregator_info = discovery.get_aggregator_info(chainlink_feed_address)
+                        aggregator_address = aggregator_info["current_aggregator"]
+                        console.print(f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]")
+                    except Exception as e:
+                        console.print(f"[red]✗ Aggregator discovery failed: {e}[/red]")
+                        chainlink_feed_address = None  # Disable Chainlink backfill
+
+                    if chainlink_feed_address:
+                        # Determine start block
+                        if full:
+                            start_block = self.config.start_block or 0
+                        else:
+                            start_block = self.checkpoint_mgr.get_resume_block(symbol, default=0)
+
+                        # Convert backfill_end timestamp to block
+                        end_block = None  # Will query up to backfill_end timestamp
+
+                        # Collect Chainlink events
+                        try:
+                            events, stats = await self.hypersync.collect_all_events(
+                                aggregator_addresses=[aggregator_address],
+                                start_block=start_block,
+                                end_block=end_block,
+                                auto_detect_start=False,
+                            )
+
+                            if events:
+                                # Filter events to only those before GMX coverage
+                                events = [e for e in events if e.timestamp <= backfill_end]
+
+                                console.print(f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events")
+
+                                # Save raw events
+                                if full:
+                                    output_path = self.storage.save_raw_events(events, symbol, partition_id=0)
+                                else:
+                                    output_path = self.storage.append_raw_events(events, symbol)
+
+                                # Resample to OHLCV
+                                raw_df = self.storage.read_raw_events(symbol)
+                                chainlink_candles = self.resampler.resample_all_timeframes(raw_df, symbol)
+
+                                console.print(f"  [green]✓[/green] Resampled to OHLCV candles")
+
+                        except Exception as e:
+                            console.print(f"[red]✗ Chainlink collection failed: {e}[/red]")
+
+        # Step 4: Combine and save
         console.print("\n[bold]Saving combined candles...[/bold]")
         for timeframe in TIMEFRAMES:
             chainlink_df = chainlink_candles.get(timeframe)
@@ -206,7 +222,11 @@ class DataCollector:
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
         """
-        symbols = get_all_symbols()
+        # Discover all GMX tokens
+        console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
+        symbols = self.gmx_discovery.get_supported_symbols()
+        console.print(f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens")
+
         total = len(symbols)
         successful = 0
         failed = 0
