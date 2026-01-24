@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "gmx-historical-data"
+version = "0.0.1"
+description = ""
+authors = ["Saikat <saikat@tradingstrategy.ai>"]
+readme = "README.md"
+packages = [{include = "gmx_historical_data", from = "src"}]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+hypersync = ">=0.8.5"
+web3 = ">=7.14.0"
+pyarrow = ">=23.0.0"
+pandas = ">=3.0.0"
+eth-abi = ">=5.2.0"
+matplotlib = ">=3.10.8"
+web3-ethereum-defi = ">=0.39.0"
+typer = ">=0.15.1"
+rich = ">=13.9.4"
+
+[tool.poetry.scripts]
+gmx_historical_data = "gmx_historical_data.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "ruff (>=0.14.14,<0.15.0)"
+]
