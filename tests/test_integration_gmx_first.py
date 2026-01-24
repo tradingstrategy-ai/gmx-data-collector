@@ -14,8 +14,7 @@ from gmx_historical_data import (
 
 
 @pytest.mark.skipif(
-    not os.getenv("JSON_RPC_ARBITRUM"),
-    reason="Requires JSON_RPC_ARBITRUM env var"
+    not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var"
 )
 def test_gmx_first_flow():
     """Test the complete GMX-first data collection flow."""
@@ -35,15 +34,16 @@ def test_gmx_first_flow():
 
     # Step 3: Test gap analysis (mock GMX data)
     dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
-    gmx_df = pd.DataFrame({
-        "timestamp": dates,
-        "close": [2000.0] * len(dates),
-    })
+    gmx_df = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "close": [2000.0] * len(dates),
+        }
+    )
 
     analyzer = DataGapAnalyzer()
     backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df,
-        chainlink_available=True
+        gmx_df=gmx_df, chainlink_available=True
     )
 
     assert backfill_start == 0
@@ -52,4 +52,6 @@ def test_gmx_first_flow():
     print(f"\nGMX-first flow test passed:")
     print(f"  - Discovered {len(symbols)} GMX tokens")
     print(f"  - Found Chainlink feed for ETH: {feed_address}")
-    print(f"  - Gap analysis: backfill from block {backfill_start} to timestamp {backfill_end}")
+    print(
+        f"  - Gap analysis: backfill from block {backfill_start} to timestamp {backfill_end}"
+    )

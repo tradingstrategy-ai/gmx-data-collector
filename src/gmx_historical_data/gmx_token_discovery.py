@@ -15,6 +15,7 @@ class GMXToken:
     :param decimals: Token decimals
     :param is_stable: Whether this is a stablecoin
     """
+
     symbol: str
     address: str
     decimals: int
@@ -39,7 +40,9 @@ class GMXTokenDiscovery:
         :param chain: Blockchain network
         """
         if chain not in self.API_ENDPOINTS:
-            raise ValueError(f"Unsupported chain: {chain}. Must be one of {list(self.API_ENDPOINTS.keys())}")
+            raise ValueError(
+                f"Unsupported chain: {chain}. Must be one of {list(self.API_ENDPOINTS.keys())}"
+            )
 
         self.chain = chain
         self.base_url = self.API_ENDPOINTS[chain]
@@ -62,7 +65,9 @@ class GMXTokenDiscovery:
             elif isinstance(data, list):
                 tokens = data
             else:
-                raise ValueError(f"Expected dict with 'tokens' key or list, got {type(data)}")
+                raise ValueError(
+                    f"Expected dict with 'tokens' key or list, got {type(data)}"
+                )
 
             if not isinstance(tokens, list):
                 raise ValueError(f"Expected list of tokens, got {type(tokens)}")

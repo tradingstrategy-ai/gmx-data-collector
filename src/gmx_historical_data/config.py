@@ -19,7 +19,9 @@ class CollectionConfig:
     :param end_block: Optional ending block number for collection
     """
 
-    hypersync_endpoint: str = "https://arbitrum.hypersync.xyz,https://42161.hypersync.xyz"
+    hypersync_endpoint: str = (
+        "https://arbitrum.hypersync.xyz,https://42161.hypersync.xyz"
+    )
     hypersync_api_token: str | None = None
     output_dir: Path = Path("./data")
     rpc_url: str = ""  # Must be set by user

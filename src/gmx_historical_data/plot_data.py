@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""Plot historical data to verify collection worked correctly.
-
-DEPRECATED: Use `poetry run plot-gmx-data` instead of this script.
-
-This script is kept for backward compatibility but will be removed in a future version.
-The plotting functionality has been moved to a Poetry script for easier access.
-
-New usage:
-    poetry run plot-gmx-data ETH
-    poetry run plot-gmx-data --all
-"""
+"""Plot historical data to verify collection worked correctly."""
 
 from pathlib import Path
 from typing import Optional
@@ -307,16 +297,16 @@ def cli(
 
     Examples:
         # Plot ETH with all timeframes
-        python scripts/plot_historical_data.py ETH
+        plot-gmx-data ETH
 
         # Plot BTC 1h candles only
-        python scripts/plot_historical_data.py BTC --timeframe 1h
+        plot-gmx-data BTC --timeframe 1h
 
         # Plot ETH raw tick data
-        python scripts/plot_historical_data.py ETH --raw
+        plot-gmx-data ETH --raw
 
-        # Plot all available symbols
-        python scripts/plot_historical_data.py --all
+        # Plot all collected symbols
+        plot-gmx-data --all
     """
     # Validate arguments
     if not symbol and not all_symbols:

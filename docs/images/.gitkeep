@@ -1,0 +1,4 @@
+# Placeholder for example plot images
+# Generate actual plots using:
+#   poetry run gmx_historical_data --full
+#   poetry run plot-gmx-data <SYMBOL> --timeframe <TIMEFRAME>

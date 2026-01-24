@@ -97,7 +97,12 @@ class HyperSyncCollector:
             for token in self.tokens:
                 config = ClientConfig(url=endpoint, bearer_token=token)
                 self.clients.append(hypersync.HypersyncClient(config))
-                self.client_configs.append({"endpoint": endpoint, "token": token[:8] + "..." if token else None})
+                self.client_configs.append(
+                    {
+                        "endpoint": endpoint,
+                        "token": token[:8] + "..." if token else None,
+                    }
+                )
 
         # Current client index for round-robin
         self.current_client_idx = 0
@@ -114,7 +119,9 @@ class HyperSyncCollector:
         self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
         return client
 
-    async def _query_single_client(self, client, client_idx: int, query: Query, timeout: float):
+    async def _query_single_client(
+        self, client, client_idx: int, query: Query, timeout: float
+    ):
         """Query a single client with timeout.
 
         :param client: HyperSync client
@@ -126,12 +133,11 @@ class HyperSyncCollector:
         """
         try:
             async with self.request_semaphore:
-                response = await asyncio.wait_for(
-                    client.get(query),
-                    timeout=timeout
-                )
+                response = await asyncio.wait_for(client.get(query), timeout=timeout)
                 config = self.client_configs[client_idx]
-                print(f"  ✓ Response from {config['endpoint']} (token: {config['token']})")
+                print(
+                    f"  ✓ Response from {config['endpoint']} (token: {config['token']})"
+                )
                 return response, client_idx
         except Exception as e:
             config = self.client_configs[client_idx]
@@ -262,7 +268,9 @@ class HyperSyncCollector:
                 # Simultaneous query mode: race all endpoints
                 if self.use_simultaneous_queries and len(self.clients) > 1:
                     if attempt == 0:
-                        print(f"  Racing {len(self.clients)} endpoint+token combinations...")
+                        print(
+                            f"  Racing {len(self.clients)} endpoint+token combinations..."
+                        )
                     response = await self._execute_simultaneous_query(query, timeout)
                     return response
 
@@ -273,15 +281,16 @@ class HyperSyncCollector:
                 async with self.request_semaphore:
                     # Add timeout to prevent hanging queries
                     response = await asyncio.wait_for(
-                        client.get(query),
-                        timeout=timeout
+                        client.get(query), timeout=timeout
                     )
                     return response
 
             except asyncio.TimeoutError as e:
                 last_exception = e
                 if attempt < max_retries:
-                    print(f"  [Retry {attempt + 1}/{max_retries}] HyperSync query timeout after {timeout}s")
+                    print(
+                        f"  [Retry {attempt + 1}/{max_retries}] HyperSync query timeout after {timeout}s"
+                    )
                     print(f"  Retrying in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
                     backoff *= 2  # Exponential backoff
@@ -293,21 +302,31 @@ class HyperSyncCollector:
                 error_str = str(e).lower()
 
                 # Check for rate limit errors (429)
-                is_rate_limit = "429" in error_str or "rate limit" in error_str or "too many requests" in error_str
+                is_rate_limit = (
+                    "429" in error_str
+                    or "rate limit" in error_str
+                    or "too many requests" in error_str
+                )
 
                 if is_rate_limit and len(self.clients) > 1:
                     tokens_tried += 1
                     if tokens_tried < len(self.clients):
                         # Try next token immediately (no backoff)
-                        print(f"  [Token rotation {tokens_tried}/{len(self.clients)}] Rate limit hit, trying next API token...")
+                        print(
+                            f"  [Token rotation {tokens_tried}/{len(self.clients)}] Rate limit hit, trying next API token..."
+                        )
                         continue
                     else:
                         # All tokens exhausted, apply backoff
-                        print(f"  [All {len(self.clients)} tokens rate limited] Applying backoff...")
+                        print(
+                            f"  [All {len(self.clients)} tokens rate limited] Applying backoff..."
+                        )
                         tokens_tried = 0  # Reset for next retry cycle
 
                 if attempt < max_retries:
-                    print(f"  [Retry {attempt + 1}/{max_retries}] HyperSync query failed: {e}")
+                    print(
+                        f"  [Retry {attempt + 1}/{max_retries}] HyperSync query failed: {e}"
+                    )
                     print(f"  Retrying in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
                     backoff *= 2  # Exponential backoff
@@ -404,13 +423,13 @@ class HyperSyncCollector:
         # Search in chunks until we find events
         for _ in range(20):  # Limit to 20 chunks (~20M blocks)
             query = self.build_query(
-                aggregator_addresses,
-                current_block,
-                current_block + chunk_size
+                aggregator_addresses, current_block, current_block + chunk_size
             )
 
             try:
-                response = await self._execute_query_with_retry(query, max_retries=max_retries)
+                response = await self._execute_query_with_retry(
+                    query, max_retries=max_retries
+                )
 
                 if response.data.logs:
                     # Found events! Return the first one
@@ -421,7 +440,9 @@ class HyperSyncCollector:
                 current_block += chunk_size
 
             except Exception as e:
-                print(f"  Warning: Error searching blocks {current_block}-{current_block + chunk_size}: {e}")
+                print(
+                    f"  Warning: Error searching blocks {current_block}-{current_block + chunk_size}: {e}"
+                )
                 break
 
         return None

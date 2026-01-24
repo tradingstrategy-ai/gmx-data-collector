@@ -160,28 +160,57 @@ poetry run gmx_historical_data \
 
 ### Plot Historical Data
 
-The plotting script generates beautiful charts and saves them to a dedicated `plots/` directory to keep your workspace clean.
+Visualize your collected data with the built-in plotting tool. Generates beautiful charts and saves them to `./plots/` directory.
 
 ```bash
 # Plot ETH with all timeframes (saves to ./plots/)
-python scripts/plot_historical_data.py ETH --data-dir ./data
+poetry run plot-gmx-data ETH --data-dir ./data
 
 # Plot BTC 1h candles only
-python scripts/plot_historical_data.py BTC --timeframe 1h --data-dir ./data
+poetry run plot-gmx-data BTC --timeframe 1h --data-dir ./data
 
 # Plot ARB raw tick data
-python scripts/plot_historical_data.py ARB --raw --data-dir ./data
+poetry run plot-gmx-data ARB --raw --data-dir ./data
 
 # Plot ALL collected symbols (automatically discovers symbols in data directory)
-python scripts/plot_historical_data.py --all --data-dir ./data
+poetry run plot-gmx-data --all --data-dir ./data
 
 # Custom output directory
-python scripts/plot_historical_data.py ETH --data-dir ./data --output-dir ./my_plots
+poetry run plot-gmx-data ETH --data-dir ./data --output-dir ./my_plots
 ```
 
-**Output:** All plots are saved to `./plots/` by default (or your custom `--output-dir`).
+**Output:** All plots saved to `./plots/` by default (or your custom `--output-dir`).
 
 **Available timeframes:** 1min, 5min, 15min, 1h, 4h, 1D
+
+### Example Plots
+
+After collecting data, generate visualizations:
+
+```bash
+# Collect data for example tokens
+poetry run gmx_historical_data --full --symbol ETH
+poetry run gmx_historical_data --full --symbol BTC
+poetry run gmx_historical_data --full --symbol ARB
+
+# Generate example plots
+poetry run plot-gmx-data ETH --timeframe 1h
+poetry run plot-gmx-data BTC --timeframe 1D
+poetry run plot-gmx-data ARB --timeframe 4h
+```
+
+**Expected Output:**
+
+- **ETH/USD** - Complete historical coverage from Chainlink (July 2021) + GMX API (recent)
+- **BTC/USD** - Full price history demonstrating hybrid Chainlink + GMX approach
+- **ARB/USD** - Arbitrum token since launch (March 2023) with combined data sources
+
+Each plot shows:
+- OHLC candlestick data
+- Close price with high-low range overlay
+- Percentage returns over time
+
+Plots saved to: `./plots/ETH_1h_candles.png`, `./plots/BTC_1D_candles.png`, `./plots/ARB_4h_candles.png`
 
 ### Read Data Programmatically
 
@@ -459,12 +488,13 @@ src/gmx_historical_data/
 ├── storage.py                     # Parquet storage
 ├── checkpoint.py                  # Resume state management
 ├── resampler.py                   # OHLCV resampling
-└── cli.py                         # Command-line interface (parallel processing)
-
-scripts/
-├── collect_historical_data.py  # Main entry point
-└── plot_historical_data.py     # Visualization tool
+├── cli.py                         # Data collection CLI (parallel processing)
+└── plot_data.py                   # Plotting CLI (visualization tool)
 ```
+
+**Poetry Scripts:**
+- `gmx_historical_data` → Data collection tool
+- `plot-gmx-data` → Visualization tool
 
 ### Run Tests
 ```bash

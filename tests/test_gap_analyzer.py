@@ -9,15 +9,16 @@ def test_calculate_gap_with_chainlink_available():
     """Test gap calculation when Chainlink feed exists."""
     # Create mock GMX data (starts 2024-07-01)
     dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
-    gmx_df = pd.DataFrame({
-        "timestamp": dates,
-        "close": [2000.0] * len(dates),  # Dummy prices
-    })
+    gmx_df = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "close": [2000.0] * len(dates),  # Dummy prices
+        }
+    )
 
     analyzer = DataGapAnalyzer()
     backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df,
-        chainlink_available=True
+        gmx_df=gmx_df, chainlink_available=True
     )
 
     # Should backfill from beginning to just before GMX start
@@ -32,15 +33,16 @@ def test_calculate_gap_with_chainlink_available():
 def test_calculate_gap_no_chainlink():
     """Test gap when Chainlink feed doesn't exist."""
     dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
-    gmx_df = pd.DataFrame({
-        "timestamp": dates,
-        "close": [2000.0] * len(dates),
-    })
+    gmx_df = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "close": [2000.0] * len(dates),
+        }
+    )
 
     analyzer = DataGapAnalyzer()
     backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df,
-        chainlink_available=False
+        gmx_df=gmx_df, chainlink_available=False
     )
 
     # No backfill needed
@@ -54,8 +56,7 @@ def test_calculate_gap_empty_gmx_data():
 
     analyzer = DataGapAnalyzer()
     backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df,
-        chainlink_available=True
+        gmx_df=gmx_df, chainlink_available=True
     )
 
     # Should collect all historical data

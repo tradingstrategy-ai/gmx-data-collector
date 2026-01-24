@@ -84,7 +84,11 @@ class DataCollector:
         :param full: If True, collect from genesis; if False, resume from checkpoint
         """
         console.print()
-        console.print(Panel(f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED))
+        console.print(
+            Panel(
+                f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED
+            )
+        )
 
         # Step 1: Fetch GMX data (all timeframes in parallel)
         console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
@@ -101,13 +105,18 @@ class DataCollector:
                 gmx_period = map_timeframe_to_gmx_period(tf)
                 try:
                     df = await asyncio.wait_for(
-                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
-                        timeout=timeout
+                        asyncio.to_thread(
+                            self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
+                        ),
+                        timeout=timeout,
                     )
                     return tf, df
                 except asyncio.TimeoutError:
-                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
+                    console.print(
+                        f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
+                    )
                     import pandas as pd
+
                     return tf, pd.DataFrame()  # Return empty DataFrame on timeout
 
             # Execute all timeframe fetches in parallel
@@ -122,11 +131,18 @@ class DataCollector:
 
                 timeframe, gmx_df = result
                 if not gmx_df.empty:
-                    earliest, latest = gmx_df["timestamp"].min(), gmx_df["timestamp"].max()
-                    console.print(f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]")
+                    earliest, latest = (
+                        gmx_df["timestamp"].min(),
+                        gmx_df["timestamp"].max(),
+                    )
+                    console.print(
+                        f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]"
+                    )
                     gmx_candles[timeframe] = gmx_df
                 else:
-                    console.print(f"  [yellow]○[/yellow] {timeframe}: No GMX data available")
+                    console.print(
+                        f"  [yellow]○[/yellow] {timeframe}: No GMX data available"
+                    )
 
         if not gmx_candles:
             console.print(f"[yellow]No GMX data available for {symbol}[/yellow]")
@@ -135,13 +151,19 @@ class DataCollector:
         # Step 2: Find Chainlink feed (if exists)
         console.print(f"\n[bold]Checking for Chainlink feed...[/bold]")
         chainlink_symbol = find_chainlink_symbol(symbol)
-        chainlink_feed_address = get_feed_address_for_gmx_symbol(symbol) if chainlink_symbol else None
+        chainlink_feed_address = (
+            get_feed_address_for_gmx_symbol(symbol) if chainlink_symbol else None
+        )
 
         if chainlink_feed_address:
-            console.print(f"  [green]✓[/green] Found Chainlink feed: [yellow]{chainlink_feed_address}[/yellow]")
+            console.print(
+                f"  [green]✓[/green] Found Chainlink feed: [yellow]{chainlink_feed_address}[/yellow]"
+            )
             console.print(f"  [dim]Mapped symbol:[/dim] {symbol} → {chainlink_symbol}")
         else:
-            console.print(f"  [yellow]○[/yellow] No Chainlink feed found - using GMX data only")
+            console.print(
+                f"  [yellow]○[/yellow] No Chainlink feed found - using GMX data only"
+            )
 
         # Step 3: Calculate gap and backfill with Chainlink
         chainlink_candles = {}
@@ -152,17 +174,20 @@ class DataCollector:
 
             if gmx_1h is not None:
                 backfill_start, backfill_end = self.gap_analyzer.calculate_gap(
-                    gmx_df=gmx_1h,
-                    chainlink_available=True
+                    gmx_df=gmx_1h, chainlink_available=True
                 )
 
                 console.print(f"\n[bold]Analyzing data gap...[/bold]")
                 if backfill_end is not None:
                     gmx_earliest = gmx_1h["timestamp"].min()
                     console.print(f"  [dim]GMX coverage starts:[/dim] {gmx_earliest}")
-                    console.print(f"  [dim]Backfill needed:[/dim] Genesis → {gmx_earliest}")
+                    console.print(
+                        f"  [dim]Backfill needed:[/dim] Genesis → {gmx_earliest}"
+                    )
                 else:
-                    console.print(f"  [green]✓[/green] No gap - GMX data covers full history")
+                    console.print(
+                        f"  [green]✓[/green] No gap - GMX data covers full history"
+                    )
 
                 # Collect Chainlink data to fill the gap
                 if backfill_start is not None:
@@ -171,9 +196,13 @@ class DataCollector:
                     # Discover aggregator address
                     discovery = AggregatorDiscovery(self.web3)
                     try:
-                        aggregator_info = discovery.get_aggregator_info(chainlink_feed_address)
+                        aggregator_info = discovery.get_aggregator_info(
+                            chainlink_feed_address
+                        )
                         aggregator_address = aggregator_info["current_aggregator"]
-                        console.print(f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]")
+                        console.print(
+                            f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]"
+                        )
                     except Exception as e:
                         console.print(f"[red]✗ Aggregator discovery failed: {e}[/red]")
                         chainlink_feed_address = None  # Disable Chainlink backfill
@@ -183,7 +212,9 @@ class DataCollector:
                         if full:
                             start_block = self.config.start_block or 0
                         else:
-                            start_block = self.checkpoint_mgr.get_resume_block(symbol, default=0)
+                            start_block = self.checkpoint_mgr.get_resume_block(
+                                symbol, default=0
+                            )
 
                         # Convert backfill_end timestamp to block
                         end_block = None  # Will query up to backfill_end timestamp
@@ -199,24 +230,40 @@ class DataCollector:
 
                             if events:
                                 # Filter events to only those before GMX coverage
-                                events = [e for e in events if e.timestamp <= backfill_end]
+                                events = [
+                                    e for e in events if e.timestamp <= backfill_end
+                                ]
 
-                                console.print(f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events")
+                                console.print(
+                                    f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events"
+                                )
 
                                 # Save raw events
                                 if full:
-                                    output_path = self.storage.save_raw_events(events, symbol, partition_id=0)
+                                    output_path = self.storage.save_raw_events(
+                                        events, symbol, partition_id=0
+                                    )
                                 else:
-                                    output_path = self.storage.append_raw_events(events, symbol)
+                                    output_path = self.storage.append_raw_events(
+                                        events, symbol
+                                    )
 
                                 # Resample to OHLCV
                                 raw_df = self.storage.read_raw_events(symbol)
-                                chainlink_candles = self.resampler.resample_all_timeframes(raw_df, symbol)
+                                chainlink_candles = (
+                                    self.resampler.resample_all_timeframes(
+                                        raw_df, symbol
+                                    )
+                                )
 
-                                console.print(f"  [green]✓[/green] Resampled to OHLCV candles")
+                                console.print(
+                                    f"  [green]✓[/green] Resampled to OHLCV candles"
+                                )
 
                         except Exception as e:
-                            console.print(f"[red]✗ Chainlink collection failed: {e}[/red]")
+                            console.print(
+                                f"[red]✗ Chainlink collection failed: {e}[/red]"
+                            )
 
         # Step 4: Combine and save
         console.print("\n[bold]Saving combined candles...[/bold]")
@@ -228,22 +275,36 @@ class DataCollector:
             if chainlink_df is not None and gmx_df is not None and not gmx_df.empty:
                 combined_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
                 candle_path = self.storage.save_candles(combined_df, timeframe, symbol)
-                earliest, latest = combined_df["timestamp"].min(), combined_df["timestamp"].max()
-                console.print(f"  [green]✓[/green] {timeframe}: [cyan]{len(combined_df):,}[/cyan] total candles [dim]({earliest} to {latest})[/dim]")
+                earliest, latest = (
+                    combined_df["timestamp"].min(),
+                    combined_df["timestamp"].max(),
+                )
+                console.print(
+                    f"  [green]✓[/green] {timeframe}: [cyan]{len(combined_df):,}[/cyan] total candles [dim]({earliest} to {latest})[/dim]"
+                )
             elif chainlink_df is not None:
                 # Only Chainlink data
                 candle_path = self.storage.save_candles(chainlink_df, timeframe, symbol)
-                earliest, latest = chainlink_df["timestamp"].min(), chainlink_df["timestamp"].max()
-                console.print(f"  [green]✓[/green] {timeframe}: [cyan]{len(chainlink_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]")
+                earliest, latest = (
+                    chainlink_df["timestamp"].min(),
+                    chainlink_df["timestamp"].max(),
+                )
+                console.print(
+                    f"  [green]✓[/green] {timeframe}: [cyan]{len(chainlink_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]"
+                )
             elif gmx_df is not None and not gmx_df.empty:
                 # Only GMX data
                 candle_path = self.storage.save_candles(gmx_df, timeframe, symbol)
                 earliest, latest = gmx_df["timestamp"].min(), gmx_df["timestamp"].max()
-                console.print(f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]")
+                console.print(
+                    f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]"
+                )
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
-    async def collect_all_symbols(self, full: bool = False, concurrency: int = 10) -> None:
+    async def collect_all_symbols(
+        self, full: bool = False, concurrency: int = 10
+    ) -> None:
         """Collect data for all supported symbols with parallel processing.
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
@@ -252,21 +313,27 @@ class DataCollector:
         # Discover all GMX tokens
         console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
         symbols = self.gmx_discovery.get_supported_symbols()
-        console.print(f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens")
+        console.print(
+            f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
+        )
 
         total = len(symbols)
         successful = 0
         failed = 0
         failed_symbols = []
 
-        console.print(f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]")
+        console.print(
+            f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]"
+        )
 
         # Process symbols in batches for controlled parallelism
         for batch_start in range(0, len(symbols), concurrency):
             batch_end = min(batch_start + concurrency, len(symbols))
             batch = symbols[batch_start:batch_end]
 
-            console.print(f"\n[bold cyan]Batch {batch_start//concurrency + 1}: Processing {len(batch)} symbols ({batch_start+1}-{batch_end}/{total})[/bold cyan]")
+            console.print(
+                f"\n[bold cyan]Batch {batch_start // concurrency + 1}: Processing {len(batch)} symbols ({batch_start + 1}-{batch_end}/{total})[/bold cyan]"
+            )
 
             # Create tasks for parallel execution
             tasks = []
@@ -287,14 +354,21 @@ class DataCollector:
                     successful += 1
 
         # Create summary table
-        summary_table = Table(title="Collection Summary", box=box.ROUNDED, show_header=False)
+        summary_table = Table(
+            title="Collection Summary", box=box.ROUNDED, show_header=False
+        )
         summary_table.add_column("Status", style="bold")
         summary_table.add_column("Count", justify="right")
 
-        summary_table.add_row("[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]")
+        summary_table.add_row(
+            "[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]"
+        )
         summary_table.add_row("[red]✗ Failed[/red]", f"[red]{failed}/{total}[/red]")
         if failed_symbols:
-            summary_table.add_row("[yellow]Failed symbols[/yellow]", f"[yellow]{', '.join(failed_symbols)}[/yellow]")
+            summary_table.add_row(
+                "[yellow]Failed symbols[/yellow]",
+                f"[yellow]{', '.join(failed_symbols)}[/yellow]",
+            )
 
         console.print()
         console.print(summary_table)
@@ -390,7 +464,7 @@ def cli(
             "[bold]To fix this:[/bold]\n"
             "  1. Get a free API token from: [cyan]https://envio.dev/[/cyan]\n"
             "  2. Set the environment variable:\n"
-            "     [yellow]export HYPERSYNC_API_TOKEN=\"your_token_here\"[/yellow]\n"
+            '     [yellow]export HYPERSYNC_API_TOKEN="your_token_here"[/yellow]\n'
             "  3. Or use --hypersync-token argument\n\n"
             "[dim]If you only want GMX API data (last ~6 months), you can skip\n"
             "Chainlink historical data collection.[/dim]",
@@ -419,7 +493,9 @@ def cli(
         if symbol:
             asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
         else:
-            asyncio.run(collector.collect_all_symbols(full=full, concurrency=concurrency))
+            asyncio.run(
+                collector.collect_all_symbols(full=full, concurrency=concurrency)
+            )
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Collection interrupted by user[/yellow]")
         raise typer.Exit(1)
