@@ -40,26 +40,44 @@ class CollectionStats:
 
 
 class HyperSyncCollector:
-    """Collect Chainlink events using HyperSync with multi-token support.
+    """Collect Chainlink events using HyperSync with multi-endpoint and multi-token support.
 
-    :param endpoint: HyperSync endpoint URL
+    :param endpoints: HyperSync endpoint URL(s) - string, comma-separated, or list
     :param api_tokens: API token(s) for authenticated access (string or list)
+    :param use_simultaneous_queries: If True, query all endpoints simultaneously (race condition)
     """
 
     def __init__(
         self,
-        endpoint: str,
+        endpoints: str | list[str],
         api_tokens: str | list[str] | None = None,
         max_concurrent_requests: int = 5,
+        use_simultaneous_queries: bool = True,
     ):
-        """Initialize HyperSync collector with multi-token support and rate limiting.
+        """Initialize HyperSync collector with multi-endpoint and multi-token support.
 
-        :param endpoint: HyperSync endpoint URL (e.g., 'https://arbitrum.hypersync.xyz')
+        :param endpoints: Endpoint URL(s) - single, comma-separated string, or list
+                         (e.g., 'https://arbitrum.hypersync.xyz,https://42161.hypersync.xyz')
         :param api_tokens: API token(s) - single token, comma-separated string, or list
         :param max_concurrent_requests: Maximum concurrent HyperSync requests (default: 5)
+        :param use_simultaneous_queries: Query all endpoints simultaneously for best latency (default: True)
         """
-        self.endpoint = endpoint
         self.decoder = EventDecoder()
+        self.use_simultaneous_queries = use_simultaneous_queries
+
+        # Parse endpoints
+        if isinstance(endpoints, str):
+            # Support comma-separated endpoints
+            self.endpoints = [e.strip() for e in endpoints.split(",") if e.strip()]
+            if not self.endpoints:
+                raise ValueError("At least one endpoint URL required")
+        else:
+            self.endpoints = endpoints if endpoints else []
+            if not self.endpoints:
+                raise ValueError("At least one endpoint URL required")
+
+        # Keep first endpoint for backward compatibility
+        self.endpoint = self.endpoints[0]
 
         # Parse API tokens
         if api_tokens is None:
@@ -72,11 +90,14 @@ class HyperSyncCollector:
         else:
             self.tokens = api_tokens if api_tokens else [None]
 
-        # Create multiple clients (one per token) for round-robin
+        # Create clients for all endpoint x token combinations
         self.clients = []
-        for token in self.tokens:
-            config = ClientConfig(url=endpoint, bearer_token=token)
-            self.clients.append(hypersync.HypersyncClient(config))
+        self.client_configs = []  # Track which endpoint+token each client uses
+        for endpoint in self.endpoints:
+            for token in self.tokens:
+                config = ClientConfig(url=endpoint, bearer_token=token)
+                self.clients.append(hypersync.HypersyncClient(config))
+                self.client_configs.append({"endpoint": endpoint, "token": token[:8] + "..." if token else None})
 
         # Current client index for round-robin
         self.current_client_idx = 0
@@ -92,6 +113,72 @@ class HyperSyncCollector:
         client = self.clients[self.current_client_idx]
         self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
         return client
+
+    async def _query_single_client(self, client, client_idx: int, query: Query, timeout: float):
+        """Query a single client with timeout.
+
+        :param client: HyperSync client
+        :param client_idx: Client index for logging
+        :param query: Query to execute
+        :param timeout: Timeout in seconds
+        :return: (response, client_idx) tuple on success
+        :raises: Exception on failure
+        """
+        try:
+            async with self.request_semaphore:
+                response = await asyncio.wait_for(
+                    client.get(query),
+                    timeout=timeout
+                )
+                config = self.client_configs[client_idx]
+                print(f"  ✓ Response from {config['endpoint']} (token: {config['token']})")
+                return response, client_idx
+        except Exception as e:
+            config = self.client_configs[client_idx]
+            # Don't print errors here - let caller handle them
+            raise
+
+    async def _execute_simultaneous_query(
+        self,
+        query: Query,
+        timeout: float = 300.0,
+    ):
+        """Execute query on all endpoints+tokens simultaneously, return first success.
+
+        This provides better latency (fastest endpoint wins) and redundancy.
+
+        :param query: Query to execute
+        :param timeout: Timeout per query attempt
+        :return: HyperSync response from first successful endpoint
+        :raises: Exception if all endpoints fail
+        """
+        # Create tasks for all clients
+        tasks = []
+        for idx, client in enumerate(self.clients):
+            task = self._query_single_client(client, idx, query, timeout)
+            tasks.append(task)
+
+        # Race all clients - return first success
+        exceptions = []
+        for coro in asyncio.as_completed(tasks):
+            try:
+                response, client_idx = await coro
+                # Cancel remaining tasks
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                return response
+            except Exception as e:
+                exceptions.append(e)
+                # Continue to next completion
+                continue
+
+        # All failed - raise last exception
+        if exceptions:
+            print(f"  All {len(self.clients)} endpoints failed")
+            raise exceptions[-1]
+        else:
+            raise RuntimeError("No clients available")
 
     def build_query(
         self,
@@ -154,7 +241,9 @@ class HyperSyncCollector:
     ):
         """Execute HyperSync query with exponential backoff retry logic and timeout.
 
-        Uses round-robin rotation of API tokens to handle rate limits.
+        If use_simultaneous_queries=True: Races all endpoints simultaneously (best latency)
+        If use_simultaneous_queries=False: Uses round-robin rotation of API tokens
+
         Semaphore-based rate limiting controls concurrent request volume.
 
         :param query: HyperSync query to execute
@@ -169,10 +258,17 @@ class HyperSyncCollector:
         tokens_tried = 0
 
         for attempt in range(max_retries + 1):
-            # Get next client in round-robin (rotates through all available tokens)
-            client = self._get_next_client()
-
             try:
+                # Simultaneous query mode: race all endpoints
+                if self.use_simultaneous_queries and len(self.clients) > 1:
+                    if attempt == 0:
+                        print(f"  Racing {len(self.clients)} endpoint+token combinations...")
+                    response = await self._execute_simultaneous_query(query, timeout)
+                    return response
+
+                # Round-robin mode: try one client at a time
+                client = self._get_next_client()
+
                 # Use semaphore to limit concurrent requests
                 async with self.request_semaphore:
                     # Add timeout to prevent hanging queries
