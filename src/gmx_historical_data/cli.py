@@ -22,9 +22,11 @@ from gmx_historical_data.chainlink_feeds_complete import (
 )
 from gmx_historical_data.aggregator_discovery import AggregatorDiscovery
 from gmx_historical_data.hypersync_collector import HyperSyncCollector
+from gmx_historical_data.chainlink_rpc_collector import ChainlinkRPCCollector
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.checkpoint import CheckpointManager
 from gmx_historical_data.resampler import OHLCVResampler
+from gmx_historical_data.event_decoder import ChainlinkEvent
 from gmx_historical_data.gmx_api_integration import (
     GMXDataFetcher,
     combine_gmx_and_chainlink_data,
@@ -54,6 +56,7 @@ class DataCollector:
             config.hypersync_endpoint,
             config.hypersync_api_token,
         )
+        self.rpc_collector = ChainlinkRPCCollector(self.web3)
         self.storage = ParquetStorage(config.output_dir)
         self.checkpoint_mgr = CheckpointManager(config.checkpoints_dir)
         self.resampler = OHLCVResampler(decimals=8)
@@ -219,8 +222,9 @@ class DataCollector:
                         # Convert backfill_end timestamp to block
                         end_block = None  # Will query up to backfill_end timestamp
 
-                        # Collect Chainlink events
+                        # Collect Chainlink events (HyperSync with RPC fallback)
                         try:
+                            console.print(f"  [dim]Trying HyperSync first...[/dim]")
                             events, stats = await self.hypersync.collect_all_events(
                                 aggregator_addresses=[aggregator_address],
                                 start_block=start_block,
@@ -235,7 +239,7 @@ class DataCollector:
                                 ]
 
                                 console.print(
-                                    f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events"
+                                    f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events via HyperSync"
                                 )
 
                                 # Save raw events
@@ -262,8 +266,73 @@ class DataCollector:
 
                         except Exception as e:
                             console.print(
-                                f"[red]✗ Chainlink collection failed: {e}[/red]"
+                                f"  [yellow]⚠ HyperSync failed: {e}[/yellow]"
                             )
+                            console.print(
+                                f"  [cyan]Falling back to RPC collection...[/cyan]"
+                            )
+
+                            # RPC Fallback
+                            try:
+                                # Collect rounds via RPC
+                                rounds = self.rpc_collector.collect_historical_rounds(
+                                    aggregator_address=aggregator_address,
+                                    start_timestamp=None,  # Collect all available
+                                    end_timestamp=int(backfill_end.timestamp()) if backfill_end else None,
+                                    max_rounds=100000,  # Generous limit
+                                )
+
+                                if rounds:
+                                    # Convert rounds to events
+                                    events = []
+                                    for round_data in rounds:
+                                        event = ChainlinkEvent(
+                                            block_number=0,  # Not available from RPC
+                                            block_timestamp=round_data.updated_at,
+                                            transaction_hash="",  # Not available from RPC
+                                            log_index=0,
+                                            round_id=round_data.round_id,
+                                            price=round_data.answer,
+                                            timestamp=round_data.updated_at,
+                                            symbol=symbol,
+                                            aggregator_address=aggregator_address,
+                                        )
+                                        events.append(event)
+
+                                    console.print(
+                                        f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink events via RPC"
+                                    )
+
+                                    # Save raw events
+                                    if full:
+                                        output_path = self.storage.save_raw_events(
+                                            events, symbol, partition_id=0
+                                        )
+                                    else:
+                                        output_path = self.storage.append_raw_events(
+                                            events, symbol
+                                        )
+
+                                    # Resample to OHLCV
+                                    raw_df = self.storage.read_raw_events(symbol)
+                                    chainlink_candles = (
+                                        self.resampler.resample_all_timeframes(
+                                            raw_df, symbol
+                                        )
+                                    )
+
+                                    console.print(
+                                        f"  [green]✓[/green] Resampled to OHLCV candles"
+                                    )
+                                else:
+                                    console.print(
+                                        f"  [red]✗ RPC collection returned no data[/red]"
+                                    )
+
+                            except Exception as rpc_error:
+                                console.print(
+                                    f"  [red]✗ RPC fallback also failed: {rpc_error}[/red]"
+                                )
 
         # Step 4: Combine and save
         console.print("\n[bold]Saving combined candles...[/bold]")
