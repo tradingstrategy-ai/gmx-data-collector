@@ -161,14 +161,15 @@ class HyperSyncCollector:
         # Create tasks for all clients
         tasks = []
         for idx, client in enumerate(self.clients):
-            task = self._query_single_client(client, idx, query, timeout)
+            coro = self._query_single_client(client, idx, query, timeout)
+            task = asyncio.create_task(coro)
             tasks.append(task)
 
         # Race all clients - return first success
         exceptions = []
-        for coro in asyncio.as_completed(tasks):
+        for completed_task in asyncio.as_completed(tasks):
             try:
-                response, client_idx = await coro
+                response, client_idx = await completed_task
                 # Cancel remaining tasks
                 for task in tasks:
                     if not task.done():
