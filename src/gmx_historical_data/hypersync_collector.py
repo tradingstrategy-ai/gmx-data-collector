@@ -5,7 +5,6 @@ querying blockchain events directly through an optimized indexing system.
 """
 
 import asyncio
-from typing import Iterator
 from dataclasses import dataclass
 import hypersync
 from hypersync import (
@@ -139,7 +138,7 @@ class HyperSyncCollector:
                     f"  ✓ Response from {config['endpoint']} (token: {config['token']})"
                 )
                 return response, client_idx
-        except Exception as e:
+        except Exception:
             config = self.client_configs[client_idx]
             # Don't print errors here - let caller handle them
             raise

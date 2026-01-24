@@ -1,9 +1,6 @@
 """Command-line interface for GMX historical data collection."""
 
-import sys
-import os
 import asyncio
-import datetime
 from pathlib import Path
 from typing import Optional
 import typer
@@ -26,7 +23,7 @@ from gmx_historical_data.chainlink_rpc_collector import ChainlinkRPCCollector
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.checkpoint import CheckpointManager
 from gmx_historical_data.resampler import OHLCVResampler
-from gmx_historical_data.event_decoder import ChainlinkEvent
+from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_api_integration import (
     GMXDataFetcher,
     combine_gmx_and_chainlink_data,
@@ -244,11 +241,11 @@ class DataCollector:
 
                                 # Save raw events
                                 if full:
-                                    output_path = self.storage.save_raw_events(
+                                    self.storage.save_raw_events(
                                         events, symbol, partition_id=0
                                     )
                                 else:
-                                    output_path = self.storage.append_raw_events(
+                                    self.storage.append_raw_events(
                                         events, symbol
                                     )
 
@@ -286,7 +283,7 @@ class DataCollector:
                                     # Convert rounds to events
                                     events = []
                                     for round_data in rounds:
-                                        event = ChainlinkEvent(
+                                        event = AnswerUpdatedEvent(
                                             block_number=0,  # Not available from RPC
                                             block_timestamp=round_data.updated_at,
                                             transaction_hash="",  # Not available from RPC
@@ -305,11 +302,11 @@ class DataCollector:
 
                                     # Save raw events
                                     if full:
-                                        output_path = self.storage.save_raw_events(
+                                        self.storage.save_raw_events(
                                             events, symbol, partition_id=0
                                         )
                                     else:
-                                        output_path = self.storage.append_raw_events(
+                                        self.storage.append_raw_events(
                                             events, symbol
                                         )
 
@@ -343,7 +340,7 @@ class DataCollector:
             # Combine if both sources have data
             if chainlink_df is not None and gmx_df is not None and not gmx_df.empty:
                 combined_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
-                candle_path = self.storage.save_candles(combined_df, timeframe, symbol)
+                self.storage.save_candles(combined_df, timeframe, symbol)
                 earliest, latest = (
                     combined_df["timestamp"].min(),
                     combined_df["timestamp"].max(),
@@ -353,7 +350,7 @@ class DataCollector:
                 )
             elif chainlink_df is not None:
                 # Only Chainlink data
-                candle_path = self.storage.save_candles(chainlink_df, timeframe, symbol)
+                self.storage.save_candles(chainlink_df, timeframe, symbol)
                 earliest, latest = (
                     chainlink_df["timestamp"].min(),
                     chainlink_df["timestamp"].max(),
@@ -363,7 +360,7 @@ class DataCollector:
                 )
             elif gmx_df is not None and not gmx_df.empty:
                 # Only GMX data
-                candle_path = self.storage.save_candles(gmx_df, timeframe, symbol)
+                self.storage.save_candles(gmx_df, timeframe, symbol)
                 earliest, latest = gmx_df["timestamp"].min(), gmx_df["timestamp"].max()
                 console.print(
                     f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]"

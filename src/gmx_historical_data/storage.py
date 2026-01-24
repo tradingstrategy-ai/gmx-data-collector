@@ -231,14 +231,3 @@ class ParquetStorage:
         # Create new partition
         new_partition = max_partition + 1
         return self.save_raw_events(events, symbol, new_partition)
-
-    def get_latest_block(self, symbol: str) -> int | None:
-        """Get the latest block number for a symbol.
-
-        :param symbol: Token symbol
-        :return: Latest block number or None if no data
-        """
-        df = self.read_raw_events(symbol)
-        if df.empty:
-            return None
-        return int(df["block_number"].max())

@@ -14,8 +14,6 @@ from rich import box
 
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.config import TIMEFRAMES
-from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.chainlink_feeds_complete import get_all_symbols
 
 console = Console()
 

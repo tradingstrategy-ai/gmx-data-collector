@@ -9,7 +9,6 @@ discover all historical aggregator addresses for complete data coverage.
 import time
 from web3 import Web3
 from web3.exceptions import ContractLogicError, BadFunctionCallOutput
-from eth_abi import decode
 
 
 class AggregatorDiscovery:
@@ -64,7 +63,6 @@ class AggregatorDiscovery:
                 return contract_function.call()
             except (ContractLogicError, BadFunctionCallOutput, Exception) as e:
                 last_error = e
-                error_msg = str(e).lower()
 
                 # Don't retry if it's a contract logic error (wrong ABI, wrong address)
                 if isinstance(e, ContractLogicError):
@@ -100,38 +98,6 @@ class AggregatorDiscovery:
         proxy = self.web3.eth.contract(address=proxy_address, abi=self.PROXY_ABI)
         return self._call_with_retry(proxy.functions.phaseId())
 
-    def discover_all_aggregators(
-        self,
-        proxy_address: str,
-        start_block: int = 0,
-        end_block: int | None = None,
-    ) -> list[str]:
-        """Discover all historical aggregator addresses by analyzing events.
-
-        This method finds all unique aggregator addresses that have emitted
-        AnswerUpdated events. This is more reliable than trying to track
-        phase changes, as it directly observes which contracts were active.
-
-        :param proxy_address: Chainlink proxy contract address
-        :param start_block: Starting block number for search
-        :param end_block: Ending block number (None = latest)
-        :return: List of unique aggregator addresses (checksummed)
-        """
-        if end_block is None:
-            end_block = self.web3.eth.block_number
-
-        # Get current aggregator as a starting point
-        current_aggregator = self.get_current_aggregator(proxy_address)
-
-        # Note: HyperSync will be used for the actual event collection
-        # This method is primarily for documentation and validation
-        # For production, we'll rely on HyperSync's event filtering
-        # which will naturally discover all aggregators
-
-        # For now, return just the current aggregator
-        # The full discovery will happen via HyperSync event collection
-        return [current_aggregator]
-
     def get_aggregator_info(self, proxy_address: str) -> dict:
         """Get comprehensive information about a feed's aggregators.
 
@@ -146,21 +112,3 @@ class AggregatorDiscovery:
             "current_aggregator": current_aggregator,
             "current_phase": current_phase,
         }
-
-
-def discover_aggregators_for_feed(
-    web3: Web3,
-    proxy_address: str,
-    start_block: int = 0,
-    end_block: int | None = None,
-) -> list[str]:
-    """Convenience function to discover aggregators for a feed.
-
-    :param web3: Web3 instance connected to Arbitrum
-    :param proxy_address: Chainlink proxy contract address
-    :param start_block: Starting block number for search
-    :param end_block: Ending block number (None = latest)
-    :return: List of unique aggregator addresses
-    """
-    discovery = AggregatorDiscovery(web3)
-    return discovery.discover_all_aggregators(proxy_address, start_block, end_block)

@@ -5,7 +5,6 @@ various timeframes with forward-fill for gaps during low volatility.
 """
 
 import pandas as pd
-import pyarrow as pa
 
 from gmx_historical_data.config import TIMEFRAMES
 from gmx_historical_data.event_decoder import scale_price
@@ -110,45 +109,3 @@ class OHLCVResampler:
                 results[timeframe] = ohlc
 
         return results
-
-    def combine_symbols(
-        self,
-        dataframes: list[pd.DataFrame],
-    ) -> pd.DataFrame:
-        """Combine OHLCV data from multiple symbols.
-
-        :param dataframes: List of OHLCV DataFrames with 'symbol' column
-        :return: Combined DataFrame
-        """
-        if not dataframes:
-            return pd.DataFrame()
-
-        # Filter out empty DataFrames
-        dataframes = [df for df in dataframes if not df.empty]
-
-        if not dataframes:
-            return pd.DataFrame()
-
-        # Concatenate all DataFrames
-        combined = pd.concat(dataframes, ignore_index=True)
-
-        # Sort by timestamp and symbol
-        combined = combined.sort_values(["timestamp", "symbol"])
-
-        return combined
-
-
-def resample_raw_events(
-    df: pd.DataFrame,
-    symbol: str,
-    decimals: int = 8,
-) -> dict[str, pd.DataFrame]:
-    """Convenience function to resample raw events.
-
-    :param df: Raw events DataFrame from ParquetStorage
-    :param symbol: Token symbol
-    :param decimals: Chainlink feed decimals (default: 8)
-    :return: Dictionary mapping timeframe -> OHLCV DataFrame
-    """
-    resampler = OHLCVResampler(decimals=decimals)
-    return resampler.resample_all_timeframes(df, symbol)

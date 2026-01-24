@@ -84,18 +84,3 @@ class GMXTokenDiscovery:
         """
         tokens = self.fetch_all_tokens()
         return [token["symbol"] for token in tokens]
-
-    def get_token_by_symbol(self, symbol: str) -> dict[str, Any] | None:
-        """Find token metadata by symbol.
-
-        :param symbol: Token symbol (case-insensitive)
-        :return: Token dict or None if not found
-        """
-        symbol = symbol.upper()
-        tokens = self.fetch_all_tokens()
-
-        for token in tokens:
-            if token["symbol"].upper() == symbol:
-                return token
-
-        return None

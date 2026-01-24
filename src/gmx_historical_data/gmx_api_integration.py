@@ -88,15 +88,6 @@ class GMXDataFetcher:
             print(f"  Warning: Could not fetch GMX candles for {symbol}: {e}")
             return pd.DataFrame()
 
-    def get_supported_periods(self) -> list[str]:
-        """Get list of supported timeframe periods.
-
-        :return: List of period strings (e.g., ['1h', '4h', '1D'])
-        """
-        # GMX API supports these common periods
-        # Based on testing and typical exchange offerings
-        return ["1m", "5m", "15m", "1h", "4h", "1D"]
-
 
 def combine_gmx_and_chainlink_data(
     gmx_df: pd.DataFrame,

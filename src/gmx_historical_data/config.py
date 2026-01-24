@@ -64,9 +64,3 @@ TIMEFRAMES = ["1min", "5min", "15min", "1h", "4h", "1D"]
 ANSWER_UPDATED_TOPIC = (
     "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
 )
-
-# Arbitrum One mainnet launch: August 31, 2021
-# Chainlink Price Feeds went live: August 12, 2021
-# First significant block with activity: ~100,000
-# Start from a safe early block to capture all oracle history
-ARBITRUM_CHAINLINK_START_BLOCK = 100_000  # ~August 2021
