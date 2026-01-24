@@ -14,9 +14,33 @@ from rich import box
 
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.config import TIMEFRAMES
-from gmx_historical_data.chainlink_feeds import get_all_symbols
+from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
+from gmx_historical_data.chainlink_feeds_complete import get_all_symbols
 
 console = Console()
+
+
+def get_available_symbols(storage: ParquetStorage) -> list[str]:
+    """Get list of symbols with data in storage directory.
+
+    Scans the candles directory to find which symbols have been collected.
+
+    :param storage: ParquetStorage instance
+    :return: List of symbol names
+    """
+    symbols = []
+    candles_dir = storage.candles_dir
+
+    if candles_dir.exists():
+        # Each symbol has its own directory
+        for symbol_dir in candles_dir.iterdir():
+            if symbol_dir.is_dir():
+                # Check if directory has any parquet files
+                parquet_files = list(symbol_dir.glob("*.parquet"))
+                if parquet_files:
+                    symbols.append(symbol_dir.name)
+
+    return sorted(symbols)
 
 
 def plot_raw_events(
@@ -44,7 +68,9 @@ def plot_raw_events(
     df["price_scaled"] = df["price"] / 1e8
 
     console.print(f"  [cyan]Found {len(df):,} events[/cyan]")
-    console.print(f"  [dim]Date range: {df['datetime'].min()} to {df['datetime'].max()}[/dim]")
+    console.print(
+        f"  [dim]Date range: {df['datetime'].min()} to {df['datetime'].max()}[/dim]"
+    )
     console.print(
         f"  [dim]Price range: ${df['price_scaled'].min():.2f} to ${df['price_scaled'].max():.2f}[/dim]"
     )
@@ -96,12 +122,18 @@ def plot_candles(
     df = storage.read_candles(timeframe, symbol)
 
     if df.empty:
-        console.print(f"  [yellow]No candle data found for {symbol} at {timeframe}[/yellow]")
+        console.print(
+            f"  [yellow]No candle data found for {symbol} at {timeframe}[/yellow]"
+        )
         return
 
     console.print(f"  [cyan]Found {len(df):,} candles[/cyan]")
-    console.print(f"  [dim]Date range: {df['timestamp'].min()} to {df['timestamp'].max()}[/dim]")
-    console.print(f"  [dim]Price range: ${df['low'].min():.2f} to ${df['high'].max():.2f}[/dim]")
+    console.print(
+        f"  [dim]Date range: {df['timestamp'].min()} to {df['timestamp'].max()}[/dim]"
+    )
+    console.print(
+        f"  [dim]Price range: ${df['low'].min():.2f} to ${df['high'].max():.2f}[/dim]"
+    )
 
     # Plot candlestick-style (using OHLC bars)
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
@@ -258,7 +290,7 @@ def cli(
     all_symbols: bool = typer.Option(
         False,
         "--all",
-        help="Plot all available symbols",
+        help="Plot all symbols found in data directory",
     ),
 ) -> None:
     """Plot GMX historical data from Parquet files.
@@ -287,7 +319,9 @@ def cli(
 
     # Validate timeframe
     if timeframe and timeframe not in TIMEFRAMES:
-        console.print(f"[red]Error: Invalid timeframe '{timeframe}'. Must be one of: {', '.join(TIMEFRAMES)}[/red]")
+        console.print(
+            f"[red]Error: Invalid timeframe '{timeframe}'. Must be one of: {', '.join(TIMEFRAMES)}[/red]"
+        )
         raise typer.Exit(1)
 
     # Create output directory
@@ -296,17 +330,28 @@ def cli(
     storage = ParquetStorage(data_dir)
 
     console.print()
-    console.print(Panel(
-        f"[bold]GMX Historical Data Plotter[/bold]\n"
-        f"[dim]Data directory:[/dim] {data_dir}\n"
-        f"[dim]Output directory:[/dim] {output_dir}",
-        box=box.ROUNDED,
-    ))
+    console.print(
+        Panel(
+            f"[bold]GMX Historical Data Plotter[/bold]\n"
+            f"[dim]Data directory:[/dim] {data_dir}\n"
+            f"[dim]Output directory:[/dim] {output_dir}",
+            box=box.ROUNDED,
+        )
+    )
 
     if all_symbols:
-        # Get all available symbols
-        symbols = get_all_symbols()
-        console.print(f"\n[bold]Plotting [cyan]{len(symbols)}[/cyan] symbols...[/bold]")
+        # Get all symbols that have been collected (scan data directory)
+        symbols = get_available_symbols(storage)
+
+        if not symbols:
+            console.print("[yellow]No symbols found in data directory.[/yellow]")
+            console.print(f"[dim]Looking in: {data_dir / 'candles' / 'arbitrum'}[/dim]")
+            console.print("\n[bold]Run data collection first:[/bold]")
+            console.print("  [cyan]poetry run gmx_historical_data --full[/cyan]")
+            raise typer.Exit(1)
+
+        console.print(f"\n[bold]Found [cyan]{len(symbols)}[/cyan] symbols with collected data[/bold]")
+        console.print(f"[dim]Symbols: {', '.join(symbols[:10])}{' ...' if len(symbols) > 10 else ''}[/dim]")
 
         successful = 0
         failed = 0
@@ -330,7 +375,9 @@ def cli(
 
                 progress.update(task, advance=1)
 
-        console.print(f"\n[green]✓ Successfully plotted: {successful}/{len(symbols)}[/green]")
+        console.print(
+            f"\n[green]✓ Successfully plotted: {successful}/{len(symbols)}[/green]"
+        )
         if failed > 0:
             console.print(f"[red]✗ Failed: {failed}/{len(symbols)}[/red]")
 
