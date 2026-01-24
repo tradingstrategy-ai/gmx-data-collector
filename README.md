@@ -17,6 +17,7 @@ This tool provides **maximum coverage** for GMX token price history by intellige
   - ~47 tokens with recent data (GMX only, last ~6 months)
 - ✨ **High Performance**: HyperSync for 100-2000x speedup over traditional RPC
 - ⚡ **Parallel Processing**: 10-50x speedup with concurrent symbol collection and timeframe fetching
+- 🏎️ **Simultaneous Multi-Endpoint Queries**: Race multiple HyperSync endpoints for best latency
 - 🛡️ **Robust Error Handling**: Timeout protection, multi-token support, automatic rate limit handling
 - 📊 **Multi-Timeframe**: OHLCV candles at 1m, 5m, 15m, 1H, 4H, 1D
 - 💾 **Efficient Storage**: Compressed Parquet files with smart partitioning
