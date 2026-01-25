@@ -15,7 +15,7 @@ from web3 import Web3
 
 console = Console()
 
-from gmx_historical_data.config import CollectionConfig, TIMEFRAMES, GMX_V2_GENESIS_BLOCK
+from gmx_historical_data.config import CollectionConfig, TIMEFRAMES, GMX_V2_GENESIS_BLOCK, EXCLUDED_SYMBOLS
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
 from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
@@ -442,6 +442,11 @@ class DataCollector:
             for market_address, market_events in events_by_market.items():
                 symbol = address_to_symbol[market_address]
 
+                # Skip excluded symbols
+                if symbol in EXCLUDED_SYMBOLS:
+                    console.print(f"\n[dim]Skipping {symbol} (excluded)[/dim]")
+                    continue
+
                 console.print(f"\n[bold cyan]Processing {symbol}[/bold cyan]")
                 console.print(f"  Events: {len(market_events)}")
 
@@ -491,10 +496,19 @@ class DataCollector:
             # Existing oracle-based collection mode
             # Discover all GMX tokens
             console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
-            symbols = self.gmx_discovery.get_supported_symbols()
+            all_symbols = self.gmx_discovery.get_supported_symbols()
+
+            # Filter out excluded symbols
+            symbols = [s for s in all_symbols if s not in EXCLUDED_SYMBOLS]
+            excluded_count = len(all_symbols) - len(symbols)
+
             console.print(
                 f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
             )
+            if excluded_count > 0:
+                console.print(
+                    f"  [dim]Excluded {excluded_count} deprecated/problematic symbol(s)[/dim]"
+                )
 
             total = len(symbols)
             successful = 0
@@ -675,11 +689,18 @@ def cli(
     # Run collection
     try:
         if symbol:
+            # Check if symbol is excluded
+            symbol_upper = symbol.upper()
+            if symbol_upper in EXCLUDED_SYMBOLS:
+                console.print(f"[yellow]Warning: {symbol_upper} is excluded (deprecated/problematic)[/yellow]")
+                console.print(f"[dim]Skipping collection for {symbol_upper}[/dim]")
+                raise typer.Exit(0)
+
             if use_events:
                 console.print("[red]Error: Single symbol collection with --use-events is not supported. Use collect_all_symbols instead.[/red]")
                 raise typer.Exit(1)
             else:
-                asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
+                asyncio.run(collector.collect_symbol(symbol_upper, full=full))
         else:
             asyncio.run(
                 collector.collect_all_symbols(
