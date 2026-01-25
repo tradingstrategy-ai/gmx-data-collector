@@ -50,7 +50,10 @@ class CollectionConfig:
         return self.output_dir / "checkpoints"
 
     def ensure_directories(self):
-        """Create all required directories if they don't exist."""
+        """Create all required directories if they don't exist.
+
+        Creates raw_data_dir, candles_dir, and checkpoints_dir with parent directories.
+        """
         self.raw_data_dir.mkdir(parents=True, exist_ok=True)
         self.candles_dir.mkdir(parents=True, exist_ok=True)
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
@@ -64,3 +67,6 @@ TIMEFRAMES = ["1min", "5min", "15min", "1h", "4h", "1D"]
 ANSWER_UPDATED_TOPIC = (
     "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
 )
+
+# GMX V2 EventEmitter contract address (Arbitrum)
+EVENT_EMITTER_ADDRESS = "0xC8ee91A54287DB53897056e12D9819156D3822Fb"
