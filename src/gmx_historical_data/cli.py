@@ -2,7 +2,9 @@
 
 import asyncio
 from pathlib import Path
+import traceback
 from typing import Optional
+import pandas as pd
 import typer
 from rich.console import Console
 from rich.panel import Panel
@@ -118,8 +120,6 @@ class DataCollector:
                     console.print(
                         f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
                     )
-                    import pandas as pd
-
                     return tf, pd.DataFrame()  # Return empty DataFrame on timeout
 
             # Execute all timeframe fetches in parallel
@@ -371,6 +371,90 @@ class DataCollector:
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
+    async def collect_via_events(
+        self,
+        symbol: str,
+    ) -> None:
+        """Collect historical data for a symbol using event indexing.
+
+        :param symbol: Token symbol to collect
+        """
+        console.print(f"\n[bold cyan]Collecting data for {symbol} via events[/bold cyan]")
+
+        # Initialize event collector
+        event_collector = GMXEventCollector(
+            hypersync_endpoint=self.config.hypersync_endpoint,
+            rpc_url=self.config.rpc_url,
+            api_token=self.config.hypersync_api_token,
+        )
+
+        # Initialize market mapper
+        mapper = GMXMarketMapper(self.web3)
+
+        # Get all markets and find matching symbol
+        try:
+            market_mapping = mapper.get_market_symbol_mapping()
+        except RuntimeError as e:
+            console.print(f"  [red]✗ Failed to get market mapping: {e}[/red]")
+            return
+
+        # Build reverse mapping for efficient lookup
+        symbol_to_market = {sym.upper(): addr for addr, sym in market_mapping.items()}
+        market_address = symbol_to_market.get(symbol.upper())
+
+        if not market_address:
+            console.print(f"  [yellow]✗ No market found for {symbol}[/yellow]")
+            return
+
+        console.print(f"  [green]✓[/green] Found market: {market_address}")
+
+        # Determine block range
+        start_block = self.config.start_block or 0
+        end_block = self.config.end_block
+
+        console.print(f"  Collecting events from block {start_block} to {end_block or 'latest'}...")
+
+        # Collect events
+        all_events = await event_collector.collect_position_events(
+            start_block=start_block,
+            end_block=end_block,
+        )
+
+        # Filter events for this market
+        market_events = [event for event in all_events if event.market.lower() == market_address.lower()]
+
+        console.print(f"  [green]✓[/green] Collected {len(market_events)} events for {symbol}")
+
+        if len(market_events) == 0:
+            console.print(f"  [yellow]⚠ No events found, skipping OHLCV generation[/yellow]")
+            return
+
+        # Generate OHLCV for each timeframe
+        for timeframe in TIMEFRAMES:
+            console.print(f"  Generating {timeframe} candles...")
+
+            ohlcv = aggregate_events_to_ohlcv(
+                events=market_events,
+                timeframe=timeframe,
+                symbol=symbol,
+            )
+
+            if len(ohlcv) == 0:
+                console.print(f"    [yellow]⚠ No candles generated for {timeframe}[/yellow]")
+                continue
+
+            # Save to parquet
+            self.storage.save_candles(ohlcv, timeframe, symbol)
+
+            earliest = ohlcv["timestamp"].min()
+            latest = ohlcv["timestamp"].max()
+            console.print(
+                f"    [green]✓[/green] {timeframe}: {len(ohlcv)} candles "
+                f"({earliest} to {latest})"
+            )
+
+        console.print(f"[green]✓ Collection complete for {symbol}[/green]\n")
+
     async def collect_all_symbols(
         self,
         full: bool = False,
@@ -384,55 +468,76 @@ class DataCollector:
         :param use_events: Use event-based collection instead of oracle-based
         """
         if use_events:
-            # TODO: Implement event-based collection in Task 6
-            # Will use GMXEventCollector, GMXMarketMapper, and aggregate_events_to_ohlcv
-            raise NotImplementedError(
-                "Event-based collection (--use-events) is not yet implemented. "
-                "This feature is under development. Use oracle-based collection (default) for now."
-            )
+            # Event-based collection mode
+            console.print("[cyan]Using event-based collection (indexing position events)[/cyan]\n")
 
-        # Discover all GMX tokens
-        console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
-        symbols = self.gmx_discovery.get_supported_symbols()
-        console.print(
-            f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
-        )
-
-        total = len(symbols)
-        successful = 0
-        failed = 0
-        failed_symbols = []
-
-        console.print(
-            f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]"
-        )
-
-        # Process symbols in batches for controlled parallelism
-        for batch_start in range(0, len(symbols), concurrency):
-            batch_end = min(batch_start + concurrency, len(symbols))
-            batch = symbols[batch_start:batch_end]
-
+            # Discover all GMX tokens
+            console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
+            symbols = self.gmx_discovery.get_supported_symbols()
             console.print(
-                f"\n[bold cyan]Batch {batch_start // concurrency + 1}: Processing {len(batch)} symbols ({batch_start + 1}-{batch_end}/{total})[/bold cyan]"
+                f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
             )
 
-            # Create tasks for parallel execution
-            tasks = []
-            for symbol in batch:
-                tasks.append(self.collect_symbol(symbol, full=full))
+            total = len(symbols)
+            successful = 0
+            failed = 0
+            failed_symbols = []
 
-            # Execute batch in parallel, capturing exceptions
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Process results
-            for symbol, result in zip(batch, results):
-                if isinstance(result, Exception):
-                    console.print(f"  [red]✗ {symbol}: {result}[/red]")
+            # Sequential collection (events are already from all markets)
+            for symbol in symbols:
+                try:
+                    await self.collect_via_events(symbol)
+                    successful += 1
+                except Exception as e:
+                    console.print(f"[red]✗ Failed to collect {symbol}: {e}[/red]")
                     failed += 1
                     failed_symbols.append(symbol)
-                else:
-                    console.print(f"  [green]✓ {symbol}: Success[/green]")
-                    successful += 1
+                    continue
+
+        else:
+            # Existing oracle-based collection mode
+            # Discover all GMX tokens
+            console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
+            symbols = self.gmx_discovery.get_supported_symbols()
+            console.print(
+                f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
+            )
+
+            total = len(symbols)
+            successful = 0
+            failed = 0
+            failed_symbols = []
+
+            console.print(
+                f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]"
+            )
+
+            # Process symbols in batches for controlled parallelism
+            for batch_start in range(0, len(symbols), concurrency):
+                batch_end = min(batch_start + concurrency, len(symbols))
+                batch = symbols[batch_start:batch_end]
+
+                console.print(
+                    f"\n[bold cyan]Batch {batch_start // concurrency + 1}: Processing {len(batch)} symbols ({batch_start + 1}-{batch_end}/{total})[/bold cyan]"
+                )
+
+                # Create tasks for parallel execution
+                tasks = []
+                for symbol in batch:
+                    tasks.append(self.collect_symbol(symbol, full=full))
+
+                # Execute batch in parallel, capturing exceptions
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                # Process results
+                for symbol, result in zip(batch, results):
+                    if isinstance(result, Exception):
+                        console.print(f"  [red]✗ {symbol}: {result}[/red]")
+                        failed += 1
+                        failed_symbols.append(symbol)
+                    else:
+                        console.print(f"  [green]✓ {symbol}: Success[/green]")
+                        successful += 1
 
         # Create summary table
         summary_table = Table(
@@ -577,7 +682,10 @@ def cli(
     # Run collection
     try:
         if symbol:
-            asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
+            if use_events:
+                asyncio.run(collector.collect_via_events(symbol.upper()))
+            else:
+                asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
         else:
             asyncio.run(
                 collector.collect_all_symbols(
@@ -591,8 +699,6 @@ def cli(
         raise typer.Exit(1)
     except Exception as e:
         console.print(f"\n\n[red bold]Error: {e}[/red bold]")
-        import traceback
-
         traceback.print_exc()
         raise typer.Exit(1)
 

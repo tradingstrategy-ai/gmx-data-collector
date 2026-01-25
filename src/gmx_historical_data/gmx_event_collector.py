@@ -28,18 +28,20 @@ class GMXEventCollector:
 
     :param hypersync_endpoint: HyperSync API endpoint
     :param rpc_url: Arbitrum RPC URL for Web3 operations
+    :param api_token: Optional HyperSync API token for authentication
     """
 
     def __init__(
         self,
         hypersync_endpoint: str,
         rpc_url: str,
+        api_token: str | None = None,
     ):
         self.hypersync_endpoint = hypersync_endpoint
         self.web3 = Web3(Web3.HTTPProvider(rpc_url))
 
         # Initialize HyperSync client
-        config = ClientConfig(url=hypersync_endpoint)
+        config = ClientConfig(url=hypersync_endpoint, bearer_token=api_token)
         self.client = HypersyncClient(config)
 
     def build_query(
