@@ -429,6 +429,15 @@ class DataCollector:
             console.print(f"  [yellow]⚠ No events found, skipping OHLCV generation[/yellow]")
             return
 
+        # Save raw events
+        if market_events:
+            events_path = self.storage.save_position_events(
+                market_events,
+                symbol,
+                partition_id=0,
+            )
+            console.print(f"  [green]✓[/green] Saved raw events to {events_path}")
+
         # Generate OHLCV for each timeframe
         for timeframe in TIMEFRAMES:
             console.print(f"  Generating {timeframe} candles...")

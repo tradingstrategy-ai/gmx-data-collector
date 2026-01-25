@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pandas as pd
 
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
+from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
 
 # Raw events schema
@@ -39,6 +40,25 @@ OHLCV_SCHEMA = pa.schema(
     ]
 )
 
+# Position events schema
+POSITION_EVENTS_SCHEMA = pa.schema([
+    ("block_number", pa.uint64()),
+    ("block_timestamp", pa.uint64()),
+    ("transaction_hash", pa.string()),
+    ("log_index", pa.uint32()),
+    ("event_name", pa.string()),
+    ("market", pa.string()),
+    ("account", pa.string()),
+    ("is_long", pa.bool_()),
+    ("execution_price", pa.string()),  # 30 decimals, stored as string (too large for int64)
+    ("size_delta_usd", pa.string()),   # 30 decimals, stored as string
+    ("size_delta_in_tokens", pa.string()),  # Stored as string
+    ("price_impact_usd", pa.string()),  # 30 decimals, stored as string (can be negative)
+    ("position_key", pa.string()),
+    ("collateral_token", pa.string()),
+    ("symbol", pa.string()),
+])
+
 
 class ParquetStorage:
     """Manage Parquet storage for event data and candles.
@@ -54,6 +74,14 @@ class ParquetStorage:
         self.base_dir = Path(base_dir)
         self.raw_dir = self.base_dir / "raw" / "arbitrum"
         self.candles_dir = self.base_dir / "candles" / "arbitrum"
+
+    @property
+    def events_dir(self) -> Path:
+        """Directory for raw position events.
+
+        :return: Path to events directory
+        """
+        return self.base_dir / "events" / "arbitrum"
 
     def _ensure_dir(self, path: Path) -> Path:
         """Ensure directory exists.
@@ -231,3 +259,61 @@ class ParquetStorage:
         # Create new partition
         new_partition = max_partition + 1
         return self.save_raw_events(events, symbol, new_partition)
+
+    def save_position_events(
+        self,
+        events: list[GMXPositionEvent],
+        symbol: str,
+        partition_id: int = 0,
+    ) -> Path:
+        """Save position events to partitioned Parquet file.
+
+        :param events: List of position events
+        :param symbol: Token symbol
+        :param partition_id: Partition ID for file organization
+        :return: Path to saved Parquet file
+        """
+        if not events:
+            raise ValueError("Cannot save empty events list")
+
+        # Create symbol directory
+        symbol_dir = self._ensure_dir(self.events_dir / symbol)
+        partition_dir = self._ensure_dir(symbol_dir / f"partition={partition_id}")
+
+        # Convert events to DataFrame
+        # GMX uses 30-decimal precision (10^30) which exceeds int64 max (9.2 × 10^18).
+        # Store as strings to preserve exact precision without data loss.
+        data = {
+            "block_number": [e.block_number for e in events],
+            "block_timestamp": [e.block_timestamp for e in events],
+            "transaction_hash": [e.transaction_hash for e in events],
+            "log_index": [e.log_index for e in events],
+            "event_name": [e.event_name for e in events],
+            "market": [e.market for e in events],
+            "account": [e.account for e in events],
+            "is_long": [e.is_long for e in events],
+            "execution_price": [str(e.execution_price) for e in events],
+            "size_delta_usd": [str(e.size_delta_usd) for e in events],
+            "size_delta_in_tokens": [str(e.size_delta_in_tokens) for e in events],
+            "price_impact_usd": [str(e.price_impact_usd) for e in events],
+            "position_key": [e.position_key for e in events],
+            "collateral_token": [e.collateral_token for e in events],
+            # Symbol is added at storage time (not from the event dataclass)
+            "symbol": [symbol] * len(events),
+        }
+
+        df = pd.DataFrame(data)
+
+        # Convert to Arrow table with schema
+        table = pa.Table.from_pandas(df, schema=POSITION_EVENTS_SCHEMA)
+
+        # Write to Parquet with compression
+        output_path = partition_dir / "data.parquet"
+        pq.write_table(
+            table,
+            output_path,
+            compression="zstd",
+            compression_level=22,
+        )
+
+        return output_path
