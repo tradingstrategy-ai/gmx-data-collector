@@ -13,6 +13,9 @@ from web3 import Web3
 console = Console()
 
 from gmx_historical_data.config import CollectionConfig, TIMEFRAMES
+from gmx_historical_data.gmx_event_collector import GMXEventCollector
+from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
+from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
 from gmx_historical_data.chainlink_feeds_complete import (
     get_feed_address_for_gmx_symbol,
     find_chainlink_symbol,
@@ -369,13 +372,25 @@ class DataCollector:
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
     async def collect_all_symbols(
-        self, full: bool = False, concurrency: int = 1
+        self,
+        full: bool = False,
+        concurrency: int = 1,
+        use_events: bool = False,
     ) -> None:
         """Collect data for all supported symbols with parallel processing.
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
         :param concurrency: Number of symbols to process concurrently (default: 1, use --concurrency for parallel)
+        :param use_events: Use event-based collection instead of oracle-based
         """
+        if use_events:
+            # TODO: Implement event-based collection in Task 6
+            # Will use GMXEventCollector, GMXMarketMapper, and aggregate_events_to_ohlcv
+            raise NotImplementedError(
+                "Event-based collection (--use-events) is not yet implemented. "
+                "This feature is under development. Use oracle-based collection (default) for now."
+            )
+
         # Discover all GMX tokens
         console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
         symbols = self.gmx_discovery.get_supported_symbols()
@@ -488,6 +503,11 @@ def cli(
         "--use-gmx-api/--no-gmx-api",
         help="Fetch latest data from GMX API",
     ),
+    use_events: bool = typer.Option(
+        False,
+        "--use-events",
+        help="Use event-based collection (index GMX position events) instead of oracle-based",
+    ),
     concurrency: int = typer.Option(
         1,
         "--concurrency",
@@ -560,7 +580,11 @@ def cli(
             asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
         else:
             asyncio.run(
-                collector.collect_all_symbols(full=full, concurrency=concurrency)
+                collector.collect_all_symbols(
+                    full=full,
+                    concurrency=concurrency,
+                    use_events=use_events,
+                )
             )
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Collection interrupted by user[/yellow]")
