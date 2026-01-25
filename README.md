@@ -1,6 +1,6 @@
 # GMX Historical Data Collection
 
-Collect complete historical price data for **all ~97 GMX tokens** using a hybrid approach: GMX API for recent data, Chainlink oracles for historical backfill.
+Collect complete historical price data for **all 118 GMX tokens** using a hybrid approach: GMX API for recent data, Chainlink oracles for historical backfill.
 
 ## Overview
 
@@ -11,18 +11,12 @@ This tool provides **maximum coverage** for GMX token price history by intellige
 
 ### Features
 
-- 🎯 **Maximum Token Coverage**: All ~97 GMX-supported tokens automatically discovered
-- 🔗 **Hybrid Data Sources**:
-  - ~50 tokens with full historical data (Chainlink + GMX)
-  - ~47 tokens with recent data (GMX only, last ~6 months)
-- ✨ **High Performance**: HyperSync for 100-2000x speedup over traditional RPC
-- ⚡ **Parallel Processing**: Optional 10-50x speedup with `--concurrency` flag (defaults to sequential)
-- 🏎️ **Simultaneous Multi-Endpoint Queries**: Race multiple HyperSync endpoints for best latency
-- 🛡️ **Robust Error Handling**: Timeout protection, multi-token support, automatic rate limit handling
-- 📊 **Multi-Timeframe**: OHLCV candles at 1m, 5m, 15m, 1H, 4H, 1D
-- 💾 **Efficient Storage**: Compressed Parquet files with smart partitioning
-- 🔄 **Incremental Updates**: Resume from checkpoints for ongoing collection
-- 🤖 **Smart Symbol Mapping**: Automatic fuzzy matching between GMX and Chainlink symbols
+- 🎯 **Universal Coverage**: Event-based collection for all 118 GMX tokens
+- ⚡ **HyperSync Integration**: 100-2000x faster than RPC queries
+- 📊 **OHLCV Generation**: Multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d)
+- 💾 **Parquet Storage**: Efficient columnar format with zstd compression
+- 🔄 **Dual Collection Modes**: Events (recommended) or Oracles (legacy)
+- 🧪 **Battle-Tested**: Comprehensive test suite
 
 ### Data Coverage Strategy
 
@@ -83,6 +77,48 @@ This tool provides **maximum coverage** for GMX token price history by intellige
    # Multiple tokens (recommended for high throughput)
    export HYPERSYNC_API_TOKEN="token1,token2,token3"
    ```
+
+## Collection Modes
+
+GMX Historical Data supports two collection modes:
+
+### 1. Event-Based Collection (Recommended for all tokens)
+
+Indexes GMX PositionIncrease/Decrease events directly from the blockchain:
+
+```bash
+# Collect all tokens via events
+poetry run gmx_historical_data --full --use-events
+
+# Specify block range (example: roughly Aug 2023 - Dec 2023)
+poetry run gmx_historical_data --use-events --start-block 150000000 --end-block 180000000
+```
+
+**Advantages:**
+- ✅ Works for ALL 118 GMX tokens (including synthetics like BONK, SUI, TON)
+- ✅ Authentic execution prices from real trades
+- ✅ No API credentials needed
+- ✅ Complete history since GMX V2 launch (Aug 2023)
+
+### 2. Oracle-Based Collection (Legacy)
+
+Uses Chainlink Price Feeds + GMX API:
+
+```bash
+# Default mode (no --use-events flag)
+poetry run gmx_historical_data --full
+```
+
+**Limitations:**
+- ❌ Only ~50 tokens with Chainlink feeds
+- ❌ Synthetic tokens require paid Chainlink Data Streams API
+- ✅ Longer history for old tokens (since 2021)
+
+### Which Mode Should You Use?
+
+- **Need all 118 tokens (including synthetics)?** → Use event-based mode
+- **Need historical data before August 2023?** → Use oracle-based mode for supported tokens
+- **Unsure?** → Start with event-based mode (works for all tokens, simpler setup)
 
 ## Usage
 
@@ -263,7 +299,7 @@ data/
 
 ## Supported Tokens
 
-**Coverage:** ~97 GMX tokens with maximum data availability
+**Coverage:** 118 GMX tokens with maximum data availability
 
 ### Data Availability Strategy
 
@@ -271,7 +307,7 @@ data/
 |----------|-------------|---------------|------------------|
 | **Tokens with Chainlink Feeds** | ~50 tokens | Full History | 2021+ (Chainlink) + Latest (GMX API) |
 | **Tokens GMX-only** | ~47 tokens | Recent Only | Last ~6 months (GMX API only) |
-| **Total Coverage** | **~97 tokens** | **Maximum** | **Hybrid (optimal for each token)** |
+| **Total Coverage** | **118 tokens** | **Maximum** | **Hybrid (optimal for each token)** |
 
 ### Sample Tokens with Chainlink Feeds (Full Historical Data)
 
@@ -329,7 +365,7 @@ data/
 - **Parallel Symbol Collection**: Optional 10-50x speedup with `--concurrency` flag (defaults to sequential)
 - **Parallel Timeframe Fetching**: 3-6x speedup per symbol (all 6 timeframes concurrently)
 - **Multi-Token Support**: 3x throughput with 3 HyperSync API tokens
-- **Full collection of ~97 tokens**:
+- **Full collection of 118 tokens**:
   - Sequential (default): ~3-6 hours
   - Parallel (--concurrency 10): ~10-30 minutes
   - Parallel (--concurrency 20, 3 tokens): ~5-15 minutes
@@ -343,9 +379,9 @@ data/
 
 **Example Performance:**
 ```bash
-# Sequential (default): ~3-6 hours for 97 tokens
-# Enable parallel with --concurrency 10: ~10-30 minutes for 97 tokens
-# High-throughput --concurrency 20 + 3 tokens: ~5-15 minutes for 97 tokens
+# Sequential (default): ~3-6 hours for 118 tokens
+# Enable parallel with --concurrency 10: ~10-30 minutes for 118 tokens
+# High-throughput --concurrency 20 + 3 tokens: ~5-15 minutes for 118 tokens
 ```
 
 ## HyperSync Setup (Optional but Recommended)
