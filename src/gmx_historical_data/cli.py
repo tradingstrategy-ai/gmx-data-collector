@@ -1,6 +1,7 @@
 """Command-line interface for GMX historical data collection."""
 
 import asyncio
+from collections import defaultdict
 from pathlib import Path
 import traceback
 from typing import Optional
@@ -371,98 +372,6 @@ class DataCollector:
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
-    async def collect_via_events(
-        self,
-        symbol: str,
-    ) -> None:
-        """Collect historical data for a symbol using event indexing.
-
-        :param symbol: Token symbol to collect
-        """
-        console.print(f"\n[bold cyan]Collecting data for {symbol} via events[/bold cyan]")
-
-        # Initialize event collector
-        event_collector = GMXEventCollector(
-            hypersync_endpoint=self.config.hypersync_endpoint,
-            rpc_url=self.config.rpc_url,
-            api_token=self.config.hypersync_api_token,
-        )
-
-        # Initialize market mapper
-        mapper = GMXMarketMapper(self.web3)
-
-        # Get all markets and find matching symbol
-        try:
-            market_mapping = mapper.get_market_symbol_mapping()
-        except RuntimeError as e:
-            console.print(f"  [red]✗ Failed to get market mapping: {e}[/red]")
-            return
-
-        # Build reverse mapping for efficient lookup
-        symbol_to_market = {sym.upper(): addr for addr, sym in market_mapping.items()}
-        market_address = symbol_to_market.get(symbol.upper())
-
-        if not market_address:
-            console.print(f"  [yellow]✗ No market found for {symbol}[/yellow]")
-            return
-
-        console.print(f"  [green]✓[/green] Found market: {market_address}")
-
-        # Determine block range
-        start_block = self.config.start_block or 0
-        end_block = self.config.end_block
-
-        console.print(f"  Collecting events from block {start_block} to {end_block or 'latest'}...")
-
-        # Collect events
-        all_events = await event_collector.collect_position_events(
-            start_block=start_block,
-            end_block=end_block,
-        )
-
-        # Filter events for this market
-        market_events = [event for event in all_events if event.market.lower() == market_address.lower()]
-
-        console.print(f"  [green]✓[/green] Collected {len(market_events)} events for {symbol}")
-
-        if len(market_events) == 0:
-            console.print(f"  [yellow]⚠ No events found, skipping OHLCV generation[/yellow]")
-            return
-
-        # Save raw events
-        if market_events:
-            events_path = self.storage.save_position_events(
-                market_events,
-                symbol,
-                partition_id=0,
-            )
-            console.print(f"  [green]✓[/green] Saved raw events to {events_path}")
-
-        # Generate OHLCV for each timeframe
-        for timeframe in TIMEFRAMES:
-            console.print(f"  Generating {timeframe} candles...")
-
-            ohlcv = aggregate_events_to_ohlcv(
-                events=market_events,
-                timeframe=timeframe,
-                symbol=symbol,
-            )
-
-            if len(ohlcv) == 0:
-                console.print(f"    [yellow]⚠ No candles generated for {timeframe}[/yellow]")
-                continue
-
-            # Save to parquet
-            self.storage.save_candles(ohlcv, timeframe, symbol)
-
-            earliest = ohlcv["timestamp"].min()
-            latest = ohlcv["timestamp"].max()
-            console.print(
-                f"    [green]✓[/green] {timeframe}: {len(ohlcv)} candles "
-                f"({earliest} to {latest})"
-            )
-
-        console.print(f"[green]✓ Collection complete for {symbol}[/green]\n")
 
     async def collect_all_symbols(
         self,
@@ -473,35 +382,104 @@ class DataCollector:
         """Collect data for all supported symbols with parallel processing.
 
         :param full: If True, collect from genesis; if False, resume from checkpoints
-        :param concurrency: Number of symbols to process concurrently (default: 1, use --concurrency for parallel)
-        :param use_events: Use event-based collection instead of oracle-based
+        :param concurrency: Number of symbols to process concurrently (default: 1, use --concurrency for parallel). Note: Ignored in event mode.
+        :param use_events: Use event-based collection (batch all markets) instead of oracle-based
         """
         if use_events:
             # Event-based collection mode
             console.print("[cyan]Using event-based collection (indexing position events)[/cyan]\n")
 
-            # Discover all GMX tokens
-            console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
-            symbols = self.gmx_discovery.get_supported_symbols()
-            console.print(
-                f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
+            # Initialize event collector
+            event_collector = GMXEventCollector(
+                hypersync_endpoint=self.config.hypersync_endpoint,
+                rpc_url=self.config.rpc_url,
+                api_token=self.config.hypersync_api_token,
             )
 
-            total = len(symbols)
+            # Initialize market mapper
+            mapper = GMXMarketMapper(self.web3)
+            market_mapping = mapper.get_market_symbol_mapping()
+
+            # Invert mapping: market address -> symbol
+            address_to_symbol = {addr.lower(): sym for addr, sym in market_mapping.items()}
+
+            console.print(f"[dim]Mapped {len(address_to_symbol)} market addresses to symbols[/dim]\n")
+
+            # Determine block range
+            start_block = self.config.start_block or 0
+            end_block = self.config.end_block
+
+            console.print(f"Collecting ALL position events from block {start_block} to {end_block or 'latest'}...")
+
+            # Collect ALL events at once (much faster than per-market)
+            all_events = await event_collector.collect_position_events(
+                start_block=start_block,
+                end_block=end_block,
+            )
+
+            console.print(f"[green]✓[/green] Collected {len(all_events)} total events\n")
+
+            # Group events by market address to aggregate per-symbol OHLCV data
+            events_by_market = defaultdict(list)
+
+            for event in all_events:
+                market_address = event.market.lower()
+                if market_address in address_to_symbol:
+                    events_by_market[market_address].append(event)
+
+            total = len(events_by_market)
             successful = 0
             failed = 0
             failed_symbols = []
 
-            # Sequential collection (events are already from all markets)
-            for symbol in symbols:
+            # Process each market
+            for market_address, market_events in events_by_market.items():
+                symbol = address_to_symbol[market_address]
+
+                console.print(f"\n[bold cyan]Processing {symbol}[/bold cyan]")
+                console.print(f"  Events: {len(market_events)}")
+
+                if len(market_events) == 0:
+                    continue
+
                 try:
-                    await self.collect_via_events(symbol)
+                    # Save raw events
+                    events_path = self.storage.save_position_events(
+                        market_events,
+                        symbol,
+                        partition_id=0,
+                    )
+                    console.print(f"  [green]✓[/green] Saved raw events")
+
+                    # Generate OHLCV for each timeframe
+                    for timeframe in TIMEFRAMES:
+                        try:
+                            ohlcv = aggregate_events_to_ohlcv(
+                                events=market_events,
+                                timeframe=timeframe,
+                                symbol=symbol,
+                            )
+
+                            if len(ohlcv) == 0:
+                                continue
+
+                            self.storage.save_candles(ohlcv, timeframe, symbol)
+
+                            console.print(f"  [green]✓[/green] {timeframe}: {len(ohlcv)} candles")
+
+                        except Exception as e:
+                            console.print(f"  [red]✗ {timeframe} failed: {e}[/red]")
+
+                    console.print(f"[green]✓ Complete for {symbol}[/green]")
                     successful += 1
+
                 except Exception as e:
-                    console.print(f"[red]✗ Failed to collect {symbol}: {e}[/red]")
+                    console.print(f"  [red]✗ Failed to save events: {e}[/red]")
                     failed += 1
                     failed_symbols.append(symbol)
                     continue
+
+            console.print(f"\n[bold green]Event-based collection complete![/bold green]")
 
         else:
             # Existing oracle-based collection mode
@@ -692,7 +670,8 @@ def cli(
     try:
         if symbol:
             if use_events:
-                asyncio.run(collector.collect_via_events(symbol.upper()))
+                console.print("[red]Error: Single symbol collection with --use-events is not supported. Use collect_all_symbols instead.[/red]")
+                raise typer.Exit(1)
             else:
                 asyncio.run(collector.collect_symbol(symbol.upper(), full=full))
         else:
