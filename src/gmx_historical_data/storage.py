@@ -50,7 +50,9 @@ POSITION_EVENTS_SCHEMA = pa.schema([
     ("market", pa.string()),
     ("account", pa.string()),
     ("is_long", pa.bool_()),
-    ("execution_price", pa.string()),  # 30 decimals, stored as string (too large for int64)
+    ("index_token_price_min", pa.string()),  # 30 decimals, oracle min price from Chainlink
+    ("index_token_price_max", pa.string()),  # 30 decimals, oracle max price from Chainlink
+    ("execution_price", pa.string()),  # 30 decimals, execution price (includes price impact)
     ("size_delta_usd", pa.string()),   # 30 decimals, stored as string
     ("size_delta_in_tokens", pa.string()),  # Stored as string
     ("price_impact_usd", pa.string()),  # 30 decimals, stored as string (can be negative)
@@ -292,6 +294,8 @@ class ParquetStorage:
             "market": [e.market for e in events],
             "account": [e.account for e in events],
             "is_long": [e.is_long for e in events],
+            "index_token_price_min": [str(e.index_token_price_min) for e in events],
+            "index_token_price_max": [str(e.index_token_price_max) for e in events],
             "execution_price": [str(e.execution_price) for e in events],
             "size_delta_usd": [str(e.size_delta_usd) for e in events],
             "size_delta_in_tokens": [str(e.size_delta_in_tokens) for e in events],

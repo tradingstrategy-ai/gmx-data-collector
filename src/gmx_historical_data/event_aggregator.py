@@ -17,23 +17,27 @@ def aggregate_events_to_ohlcv(
     timeframe: str,
     symbol: str,
 ) -> pd.DataFrame:
-    """Convert position events to OHLCV candles.
+    """Convert position events to OHLC candles using oracle prices.
+
+    Uses Chainlink oracle prices (min/max from indexTokenPrice) instead of
+    execution prices to provide clean market prices without price impact.
 
     :param events: List of position events
     :param timeframe: Timeframe for resampling (e.g., "1min", "1h", "1D")
     :param symbol: Token symbol
-    :return: DataFrame with OHLCV data including volume (sum of size_delta_usd)
+    :return: DataFrame with OHLC data (no volume)
     """
     if not events:
         # Return empty DataFrame with correct schema
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume", "symbol"])
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "symbol"])
 
     # Convert events to DataFrame
+    # Use oracle mid-price: average of Chainlink's min/max prices
+    # This gives clean market prices without price impact from executions
     df = pd.DataFrame([
         {
             "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
-            "price": e.execution_price / GMX_USD_PRECISION,
-            "size_usd": e.size_delta_usd / GMX_USD_PRECISION,
+            "price": (e.index_token_price_min + e.index_token_price_max) / 2 / GMX_USD_PRECISION,
         }
         for e in events
     ])
@@ -44,14 +48,13 @@ def aggregate_events_to_ohlcv(
     # Sort by timestamp, then by original order for deterministic behavior
     df = df.sort_values(["timestamp", "original_order"])
 
-    # Resample to OHLCV
+    # Resample to OHLC (no volume)
     ohlcv = df.set_index("timestamp").resample(timeframe).agg({
         "price": ["first", "max", "min", "last"],
-        "size_usd": "sum",
     })
 
     # Flatten column names
-    ohlcv.columns = ["open", "high", "low", "close", "volume"]
+    ohlcv.columns = ["open", "high", "low", "close"]
 
     # Add symbol
     ohlcv["symbol"] = symbol

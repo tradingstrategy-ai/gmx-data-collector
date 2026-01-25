@@ -22,7 +22,9 @@ class GMXPositionEvent:
     :param market: Market contract address
     :param account: Trader address
     :param is_long: True for long position, False for short
-    :param execution_price: Execution price (30 decimal precision)
+    :param index_token_price_min: Oracle minimum price (30 decimals, from Chainlink)
+    :param index_token_price_max: Oracle maximum price (30 decimals, from Chainlink)
+    :param execution_price: Execution price (30 decimals, includes price impact)
     :param size_delta_usd: Position size change in USD (30 decimals)
     :param size_delta_in_tokens: Position size change in tokens
     :param price_impact_usd: Price impact in USD (30 decimals, can be negative)
@@ -38,6 +40,8 @@ class GMXPositionEvent:
     market: str
     account: str
     is_long: bool
+    index_token_price_min: int
+    index_token_price_max: int
     execution_price: int
     size_delta_usd: int
     size_delta_in_tokens: int
@@ -87,8 +91,22 @@ def parse_position_event(
             f"Cannot use Unix epoch 0 as it leads to data corruption."
         )
 
+    # Convert snake_case field names to camelCase for eth_defi compatibility
+    # eth_defi expects full Ethereum log format with camelCase fields
+    # HyperSync provides: block_number, block_hash, transaction_hash, transaction_index, log_index, etc.
+    eth_defi_log_dict = {
+        "blockNumber": log_dict["block_number"],
+        "blockHash": log_dict.get("block_hash", ""),
+        "transactionHash": log_dict["transaction_hash"],
+        "transactionIndex": log_dict.get("transaction_index", 0),
+        "logIndex": log_dict["log_index"],
+        "address": log_dict.get("address", ""),
+        "topics": log_dict.get("topics", []),
+        "data": log_dict.get("data", "0x"),
+    }
+
     # Use eth_defi to decode event
-    event_data: GMXEventData = decode_gmx_event(web3, log_dict)
+    event_data: GMXEventData = decode_gmx_event(web3, eth_defi_log_dict)
 
     if event_data is None:
         raise ValueError(f"Failed to decode event from log: {log_dict}")
@@ -101,6 +119,10 @@ def parse_position_event(
         )
 
     # Extract position-specific fields - trust eth_defi to return correct types
+    # Convert bytes32 position_key to hex string for storage
+    position_key_bytes = event_data.get_bytes32("positionKey")
+    position_key_hex = position_key_bytes.hex() if isinstance(position_key_bytes, bytes) else str(position_key_bytes)
+
     return GMXPositionEvent(
         block_number=block_number,
         block_timestamp=block_timestamps[block_number],
@@ -110,10 +132,12 @@ def parse_position_event(
         market=event_data.get_address("market"),
         account=event_data.get_address("account"),
         is_long=event_data.get_bool("isLong"),
+        index_token_price_min=event_data.get_uint("indexTokenPrice.min"),
+        index_token_price_max=event_data.get_uint("indexTokenPrice.max"),
         execution_price=event_data.get_uint("executionPrice"),
         size_delta_usd=event_data.get_uint("sizeDeltaUsd"),
         size_delta_in_tokens=event_data.get_uint("sizeDeltaInTokens"),
         price_impact_usd=event_data.get_int("priceImpactUsd"),
-        position_key=event_data.get_bytes32("positionKey"),
+        position_key=position_key_hex,
         collateral_token=event_data.get_address("collateralToken"),
     )
