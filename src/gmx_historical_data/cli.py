@@ -15,7 +15,7 @@ from web3 import Web3
 
 console = Console()
 
-from gmx_historical_data.config import CollectionConfig, TIMEFRAMES
+from gmx_historical_data.config import CollectionConfig, TIMEFRAMES, GMX_V2_GENESIS_BLOCK
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
 from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
@@ -178,16 +178,21 @@ class DataCollector:
 
             if gmx_1h is not None:
                 backfill_start, backfill_end = self.gap_analyzer.calculate_gap(
-                    gmx_df=gmx_1h, chainlink_available=True
+                    gmx_df=gmx_1h,
+                    chainlink_available=True,
+                    gmx_v2_genesis_block=GMX_V2_GENESIS_BLOCK,
                 )
 
                 console.print(f"\n[bold]Analyzing data gap...[/bold]")
                 if backfill_end is not None:
                     gmx_earliest = gmx_1h["timestamp"].min()
+                    console.print(f"  [dim]GMX V2 genesis:[/dim] Block {backfill_start:,}")
                     console.print(f"  [dim]GMX coverage starts:[/dim] {gmx_earliest}")
-                    console.print(
-                        f"  [dim]Backfill needed:[/dim] Genesis → {gmx_earliest}"
-                    )
+
+                    # Calculate time window
+                    time_delta = (gmx_earliest - pd.Timestamp('2023-08-07', tz='UTC')).total_seconds()
+                    days = time_delta / 86400
+                    console.print(f"  [dim]Backfill window:[/dim] Block {backfill_start:,} → {gmx_earliest} (~{days:.0f} days)")
                 else:
                     console.print(
                         f"  [green]✓[/green] No gap - GMX data covers full history"
@@ -214,10 +219,11 @@ class DataCollector:
                     if chainlink_feed_address:
                         # Determine start block
                         if full:
-                            start_block = self.config.start_block or 0
+                            start_block = backfill_start or GMX_V2_GENESIS_BLOCK
                         else:
                             start_block = self.checkpoint_mgr.get_resume_block(
-                                symbol, default=0
+                                symbol,
+                                default=backfill_start or GMX_V2_GENESIS_BLOCK
                             )
 
                         # Convert backfill_end timestamp to block
@@ -691,9 +697,96 @@ def cli(
         raise typer.Exit(1)
 
 
+def verify_command(
+    symbol: Optional[str] = typer.Option(None, "--symbol", help="Symbol to verify (omit for all)"),
+    output_dir: Path = typer.Option(Path("./data"), "--output-dir", help="Data directory"),
+    timeframe: str = typer.Option("1h", "--timeframe", help="Timeframe to verify"),
+) -> None:
+    """Verify collected data quality."""
+    from gmx_historical_data.data_verifier import DataVerifier
+
+    storage = ParquetStorage(output_dir)
+    verifier = DataVerifier(storage)
+
+    console.print("\n[bold cyan]Data Verification Report[/bold cyan]\n")
+
+    # Get symbols to verify
+    if symbol:
+        symbols = [symbol.upper()]
+    else:
+        # Discover all collected symbols
+        candles_dir = storage.candles_dir
+        if not candles_dir.exists():
+            console.print("[yellow]No data found in output directory[/yellow]")
+            return
+        symbols = [d.name for d in candles_dir.iterdir() if d.is_dir()]
+
+    if not symbols:
+        console.print("[yellow]No symbols found[/yellow]")
+        return
+
+    # Create verification table
+    table = Table(show_header=True, header_style="bold magenta", box=box.ROUNDED)
+    table.add_column("Symbol", style="cyan", width=8)
+    table.add_column("Coverage Start", width=20)
+    table.add_column("Coverage End", width=20)
+    table.add_column("Candles", justify="right", width=10)
+    table.add_column("Gaps", justify="right", width=8)
+    table.add_column("Quality", justify="right", width=10)
+
+    for sym in sorted(symbols):
+        report = verifier.verify_symbol(sym, timeframe)
+
+        if report.coverage_start is None:
+            table.add_row(
+                sym,
+                "[dim]No data[/dim]",
+                "[dim]No data[/dim]",
+                "0",
+                "N/A",
+                "[dim]N/A[/dim]",
+            )
+            continue
+
+        gaps_str = (
+            f"[yellow]{len(report.gaps_detected)}[/yellow]"
+            if report.gaps_detected
+            else "[green]0[/green]"
+        )
+
+        quality_color = (
+            "green"
+            if report.quality_score > 80
+            else "yellow"
+            if report.quality_score > 60
+            else "red"
+        )
+        quality_str = f"[{quality_color}]{report.quality_score:.0f}/100[/{quality_color}]"
+
+        table.add_row(
+            sym,
+            str(report.coverage_start),
+            str(report.coverage_end),
+            f"{report.total_candles:,}",
+            gaps_str,
+            quality_str,
+        )
+
+    console.print(table)
+    console.print()
+
+
+# Create Typer app
+app = typer.Typer(help="GMX Historical Data Collection CLI")
+
+# Register commands
+app.command(name="collect")(cli)
+app.command(name="verify")(verify_command)
+
+
 def main() -> None:
     """Main CLI entry point."""
-    typer.run(cli)
+    app()
 
 
 if __name__ == "__main__":

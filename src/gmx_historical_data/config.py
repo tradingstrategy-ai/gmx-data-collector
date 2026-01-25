@@ -68,3 +68,7 @@ ANSWER_UPDATED_TOPIC = (
 
 # GMX V2 EventEmitter contract address (Arbitrum)
 EVENT_EMITTER_ADDRESS = "0xC8ee91A54287DB53897056e12D9819156D3822Fb"
+
+# GMX V2 Launch Information (Arbitrum)
+GMX_V2_GENESIS_BLOCK = 120_000_000  # Aug 2023 (approximate)
+GMX_V2_GENESIS_TIMESTAMP = 1691366400  # Aug 7, 2023 00:00:00 UTC (approximate)
