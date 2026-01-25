@@ -1,21 +1,29 @@
 # GMX Historical Data Collection
 
-Collect complete historical price data for **all 118 GMX tokens** using a hybrid approach: GMX API for recent data, Chainlink oracles for historical backfill.
+Collect complete historical price data for **all GMX V2 tokens** using event-based indexing or oracle-based collection.
 
 ## Overview
 
-This tool provides **maximum coverage** for GMX token price history by intelligently combining two data sources:
+This tool provides **maximum coverage** for GMX token price history with two collection modes:
+
+**Event-Based (Recommended):**
+- **GMX Position Events**: Direct indexing of PositionIncrease/Decrease events
+- **HyperSync**: 100-2000x faster than RPC for blockchain event queries
+- **Coverage**: All 102 GMX V2 tokens since Aug 2023
+
+**Oracle-Based (Legacy):**
 - **GMX API**: Latest ~6 months of high-quality OHLCV data
 - **Chainlink Oracles**: Historical data back to 2021 (where feeds exist)
-- **HyperSync**: 100-2000x faster than RPC for blockchain event queries
+- **Coverage**: ~50 tokens with Chainlink feeds
 
 ### Features
 
-- 🎯 **Universal Coverage**: Event-based collection for all 118 GMX tokens
+- 🎯 **Universal Coverage**: Event-based collection for all 102 GMX V2 tokens
 - ⚡ **HyperSync Integration**: 100-2000x faster than RPC queries
 - 📊 **OHLCV Generation**: Multiple timeframes (1m, 5m, 15m, 1h, 4h, 1d)
 - 💾 **Parquet Storage**: Efficient columnar format with zstd compression
 - 🔄 **Dual Collection Modes**: Events (recommended) or Oracles (legacy)
+- 💯 **Authentic Prices**: Real execution prices from actual GMX trades
 - 🧪 **Battle-Tested**: Comprehensive test suite
 
 ### Data Coverage Strategy
@@ -42,8 +50,8 @@ This tool provides **maximum coverage** for GMX token price history by intellige
 ### Prerequisites
 
 - Python 3.11+
-- Arbitrum RPC URL (Alchemy, Infura, or similar)
-- Optional: HyperSync API token (recommended for production)
+- Arbitrum RPC URL (Alchemy, Infura, or public RPC)
+- HyperSync API token (required for event-based mode, free from https://envio.dev)
 
 ### Setup
 
@@ -66,15 +74,14 @@ This tool provides **maximum coverage** for GMX token price history by intellige
 
 4. **Set environment variables:**
    ```bash
+   # Required: Arbitrum RPC URL
    export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
-   ```
+   # Or use public RPC (slower): https://arb1.arbitrum.io/rpc
 
-   Optional (for better performance):
-   ```bash
-   # Single token
+   # Required for event-based mode: HyperSync API token (free from https://envio.dev)
    export HYPERSYNC_API_TOKEN="your_token_here"
 
-   # Multiple tokens (recommended for high throughput)
+   # Optional: Multiple tokens for high throughput
    export HYPERSYNC_API_TOKEN="token1,token2,token3"
    ```
 
@@ -82,23 +89,31 @@ This tool provides **maximum coverage** for GMX token price history by intellige
 
 GMX Historical Data supports two collection modes:
 
-### 1. Event-Based Collection (Recommended for all tokens)
+### 1. Event-Based Collection (Recommended)
 
-Indexes GMX PositionIncrease/Decrease events directly from the blockchain:
+Indexes GMX PositionIncrease/Decrease events directly from the blockchain using HyperSync:
 
 ```bash
-# Collect all tokens via events
-poetry run gmx_historical_data --full --use-events
+# Set required environment variables
+export JSON_RPC_ARBITRUM="your_arbitrum_rpc_url"
+export HYPERSYNC_API_TOKEN="your_hypersync_token"  # Get free from https://envio.dev
 
-# Specify block range (example: roughly Aug 2023 - Dec 2023)
-poetry run gmx_historical_data --use-events --start-block 150000000 --end-block 180000000
+# Collect full historical data for all tokens (from GMX V2 genesis)
+poetry run gmx_historical_data --full --use-events --output-dir ./data
+
+# Or specify custom block range
+poetry run gmx_historical_data --full --use-events \
+  --start-block 120000000 \
+  --end-block 180000000 \
+  --output-dir ./data
 ```
 
 **Advantages:**
-- ✅ Works for ALL 118 GMX tokens (including synthetics like BONK, SUI, TON)
-- ✅ Authentic execution prices from real trades
-- ✅ No API credentials needed
-- ✅ Complete history since GMX V2 launch (Aug 2023)
+- ✅ Works for ALL 102 GMX V2 tokens (including synthetics like BONK, SUI, TON)
+- ✅ Authentic execution prices from real trades (not oracle estimates)
+- ✅ Complete history since GMX V2 launch (Aug 2023, block ~120M)
+- ✅ Blazing fast with HyperSync (100-2000x faster than RPC)
+- ✅ Single batch query collects all markets efficiently
 
 ### 2. Oracle-Based Collection (Legacy)
 
@@ -116,9 +131,10 @@ poetry run gmx_historical_data --full
 
 ### Which Mode Should You Use?
 
-- **Need all 118 tokens (including synthetics)?** → Use event-based mode
-- **Need historical data before August 2023?** → Use oracle-based mode for supported tokens
-- **Unsure?** → Start with event-based mode (works for all tokens, simpler setup)
+- **Need all 102 tokens (including synthetics)?** → Use event-based mode
+- **Need historical data before August 2023?** → Use oracle-based mode for ~50 supported tokens
+- **Want authentic trade execution prices?** → Use event-based mode
+- **Unsure?** → Start with event-based mode (works for all tokens, authentic prices)
 
 ## Usage
 

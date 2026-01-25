@@ -69,7 +69,9 @@ class GMXEventCollector:
         field_selection = FieldSelection(
             log=[
                 LogField.BLOCK_NUMBER,
+                LogField.BLOCK_HASH,
                 LogField.TRANSACTION_HASH,
+                LogField.TRANSACTION_INDEX,
                 LogField.LOG_INDEX,
                 LogField.ADDRESS,
                 LogField.TOPIC0,
@@ -108,10 +110,17 @@ class GMXEventCollector:
         response = await self.client.get(query)
 
         # Build block timestamp mapping
+        # HyperSync may return timestamps as hex strings, convert to int
         block_timestamps = {}
         if response.data.blocks:
             for block in response.data.blocks:
-                block_timestamps[block.number] = block.timestamp
+                timestamp = block.timestamp
+                # Convert hex string to int if needed
+                if isinstance(timestamp, str) and timestamp.startswith("0x"):
+                    timestamp = int(timestamp, 16)
+                elif isinstance(timestamp, str):
+                    timestamp = int(timestamp)
+                block_timestamps[block.number] = timestamp
 
         # Parse events
         events = []
@@ -121,7 +130,9 @@ class GMXEventCollector:
                     # Convert HyperSync log to dict format
                     log_dict = {
                         "block_number": log.block_number,
+                        "block_hash": log.block_hash or "",
                         "transaction_hash": log.transaction_hash or "",
+                        "transaction_index": log.transaction_index if log.transaction_index is not None else 0,
                         "log_index": log.log_index if log.log_index is not None else 0,
                         "address": log.address or "",
                         "topics": [t for t in (log.topics or []) if t is not None],
