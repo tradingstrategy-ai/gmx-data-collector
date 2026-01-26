@@ -101,127 +101,64 @@ cargo --version
    export HYPERSYNC_API_TOKEN="token1,token2,token3"
    ```
 
-## Collection Modes
+## Usage
 
-GMX Historical Data supports two collection modes:
+**Note:** Commands use `poetry run`. Alternatively, activate `poetry shell` and run commands directly.
 
-### 1. Event-Based Collection (Recommended)
-
-Indexes GMX PositionIncrease/Decrease events directly from the blockchain using HyperSync:
+### Quick Start
 
 ```bash
 # Set required environment variables
-export JSON_RPC_ARBITRUM="your_arbitrum_rpc_url"
-export HYPERSYNC_API_TOKEN="your_hypersync_token"  # Get free from https://envio.dev
+export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
+export HYPERSYNC_API_TOKEN="your_token_here"  # Get free from https://envio.dev
 
-# Collect full historical data for all tokens (from GMX V2 genesis)
-poetry run gmx_historical_data --full --use-events --output-dir ./data
+# Full historical collection for all 118 markets
+gmx_historical_data collect --full --output-dir ./data
 
-# Or specify custom block range
-poetry run gmx_historical_data --full --use-events \
-  --start-block 120000000 \
-  --end-block 180000000 \
-  --output-dir ./data
+# Incremental update (faster, only new data)
+gmx_historical_data collect --update --output-dir ./data
+
+# Single symbol collection
+gmx_historical_data collect --full --symbol ETH --output-dir ./data
+
+# Verify data quality
+gmx_historical_data verify --output-dir ./data
 ```
 
-**Advantages:**
-- ✅ Works for ALL 102 GMX V2 tokens (including synthetics like BONK, SUI, TON)
-- ✅ Authentic execution prices from real trades (not oracle estimates)
-- ✅ Complete history since GMX V2 launch (Aug 2023, block ~120M)
-- ✅ Blazing fast with HyperSync (100-2000x faster than RPC)
-- ✅ Single batch query collects all markets efficiently
-
-### 2. Oracle-Based Collection (Legacy)
-
-Uses Chainlink Price Feeds + GMX API:
+### Collection Commands
 
 ```bash
-# Default mode (no --use-events flag)
-poetry run gmx_historical_data --full
-```
+# Collect all 118 markets (34 Chainlink + 84 non-Chainlink)
+gmx_historical_data collect --full --output-dir ./data
 
-**Limitations:**
-- ❌ Only ~50 tokens with Chainlink feeds
-- ❌ Synthetic tokens require paid Chainlink Data Streams API
-- ✅ Longer history for old tokens (since 2021)
+# Collect only Chainlink markets (skip 84 non-Chainlink markets)
+gmx_historical_data collect --full --no-collect-non-chainlink --output-dir ./data
 
-### Which Mode Should You Use?
+# Parallel collection (faster but uses more resources)
+gmx_historical_data collect --full --concurrency 4 --output-dir ./data
 
-- **Need all 102 tokens (including synthetics)?** → Use event-based mode
-- **Need historical data before August 2023?** → Use oracle-based mode for ~50 supported tokens
-- **Want authentic trade execution prices?** → Use event-based mode
-- **Unsure?** → Start with event-based mode (works for all tokens, authentic prices)
-
-## Usage
-
-**Note:** Commands below use `poetry run`. Alternatively, activate the Poetry shell with `poetry shell` and run commands directly (e.g., `gmx_historical_data --full ...`).
-
-### Quick Start - Collect Single Token
-
-```bash
-# Collect full historical data for ETH
-poetry run gmx_historical_data \
-    --full \
-    --symbol ETH \
+# Custom block range
+gmx_historical_data collect --full --symbol BTC \
+    --start-block 120000000 \
+    --end-block 180000000 \
     --output-dir ./data
 ```
 
-### Collect All Tokens
+### Verification & Debugging
 
 ```bash
-# Full historical collection for all supported tokens (sequential by default)
-poetry run gmx_historical_data \
-    --full \
-    --output-dir ./data
+# Verify collected data quality
+gmx_historical_data verify --output-dir ./data
 
-# High-throughput mode: 20 symbols in parallel (optional speedup)
-poetry run gmx_historical_data \
-    --full \
-    --concurrency 20 \
-    --output-dir ./data
-
-# Conservative mode: 5 symbols in parallel (more stable on slower connections)
-poetry run gmx_historical_data \
-    --full \
-    --concurrency 5 \
-    --output-dir ./data
+# Debug oracle events for non-Chainlink tokens
+gmx_historical_data debug-oracle --symbol SUI --show-raw
 ```
 
-### Incremental Updates
+### Daemon (Continuous Collection)
 
 ```bash
-# Update with only new data since last collection
-poetry run gmx_historical_data \
-    --update \
-    --output-dir ./data
-```
-
-### Advanced Options
-
-```bash
-# Collect specific block range with HyperSync token
-poetry run gmx_historical_data \
-    --full \
-    --symbol BTC \
-    --output-dir ./data \
-    --start-block 1000000 \
-    --end-block 2000000 \
-    --hypersync-token "your_token" \
-    --rpc-url "https://arb1.arbitrum.io/rpc"
-
-# Maximum throughput: Multiple HyperSync tokens + high concurrency
-export HYPERSYNC_API_TOKEN="token1,token2,token3"
-poetry run gmx_historical_data \
-    --full \
-    --concurrency 20 \
-    --output-dir ./data
-
-# Custom concurrency for specific workloads
-poetry run gmx_historical_data \
-    --full \
-    --symbol ETH \
-    --concurrency 1 \
-    --output-dir ./data
+# Run periodic collector daemon
+gmx-periodic-collector
 ```
 
 ## Verify Data
@@ -257,14 +194,14 @@ After collecting data, generate visualizations:
 
 ```bash
 # Collect data for example tokens
-poetry run gmx_historical_data --full --symbol ETH
-poetry run gmx_historical_data --full --symbol BTC
-poetry run gmx_historical_data --full --symbol ARB
+gmx_historical_data collect --full --symbol ETH --output-dir ./data
+gmx_historical_data collect --full --symbol BTC --output-dir ./data
+gmx_historical_data collect --full --symbol ARB --output-dir ./data
 
 # Generate example plots
-poetry run plot-gmx-data ETH --timeframe 1h
-poetry run plot-gmx-data BTC --timeframe 1D
-poetry run plot-gmx-data ARB --timeframe 4h
+plot-gmx-data ETH --timeframe 1h --data-dir ./data
+plot-gmx-data BTC --timeframe 1D --data-dir ./data
+plot-gmx-data ARB --timeframe 4h --data-dir ./data
 ```
 
 **Expected Output:**
@@ -444,34 +381,57 @@ For best performance and rate limit resilience, use multiple API tokens:
 ## CLI Reference
 
 ```
-usage: poetry run gmx_historical_data [-h] [--full] [--update] [--symbol SYMBOL]
-                                      [--output-dir OUTPUT_DIR] [--rpc-url RPC_URL]
-                                      [--hypersync-token HYPERSYNC_TOKEN]
-                                      [--start-block START_BLOCK] [--end-block END_BLOCK]
-                                      [--use-gmx-api | --no-gmx-api]
-                                      [--concurrency CONCURRENCY]
+gmx_historical_data [OPTIONS] COMMAND [ARGS]...
 
-Collect GMX historical price data via Chainlink oracles and GMX API
+Commands:
+  collect       Collect GMX historical price data
+  verify        Verify collected data quality
+  debug-oracle  Debug oracle events for non-Chainlink tokens
 
-optional arguments:
-  -h, --help            show this help message and exit
-  --full                Collect full historical data from genesis
-  --update              Incremental update from last checkpoint
-  --symbol SYMBOL       Specific token symbol to collect (e.g., ETH, BTC)
-  --output-dir OUTPUT_DIR
-                        Output directory for data (default: ./data)
-  --rpc-url RPC_URL     Arbitrum RPC URL (default: from JSON_RPC_ARBITRUM env var)
-  --hypersync-token HYPERSYNC_TOKEN
-                        HyperSync API token(s) - comma-separated for multiple tokens
-                        (or set HYPERSYNC_API_TOKEN env var)
-  --start-block START_BLOCK
-                        Starting block number (default: 0)
-  --end-block END_BLOCK
-                        Ending block number (default: latest)
-  --use-gmx-api         Fetch latest data from GMX API (default: enabled)
-  --no-gmx-api          Skip GMX API, use only Chainlink data
-  --concurrency CONCURRENCY
-                        Number of symbols to process in parallel (default: 1 for sequential, max: 50)
+Environment Variables:
+  JSON_RPC_ARBITRUM     Arbitrum RPC URL (required)
+  HYPERSYNC_API_TOKEN   HyperSync API token from envio.dev (required)
+```
+
+### collect
+
+```
+gmx_historical_data collect [OPTIONS]
+
+Options:
+  --full                    Collect full historical data from genesis
+  --update                  Incremental update from last checkpoint
+  --symbol TEXT             Specific token symbol (e.g., ETH, BTC, SUI)
+  --output-dir PATH         Output directory [default: data]
+  --rpc-url TEXT            Arbitrum RPC URL (or set JSON_RPC_ARBITRUM)
+  --hypersync-token TEXT    HyperSync API token (or set HYPERSYNC_API_TOKEN)
+  --start-block INTEGER     Starting block number
+  --end-block INTEGER       Ending block number
+  --use-gmx-api/--no-gmx-api
+                            Fetch latest data from GMX API [default: enabled]
+  --collect-non-chainlink/--no-collect-non-chainlink
+                            Collect non-Chainlink markets [default: enabled]
+  --concurrency INTEGER     Parallel symbols (1-50) [default: 1]
+```
+
+### verify
+
+```
+gmx_historical_data verify [OPTIONS]
+
+Options:
+  --output-dir PATH    Data directory to verify [default: data]
+```
+
+### debug-oracle
+
+```
+gmx_historical_data debug-oracle [OPTIONS]
+
+Options:
+  --symbol TEXT        Token symbol to debug (e.g., SUI, HYPE)
+  --show-raw           Show raw event data
+  --limit INTEGER      Limit number of events
 ```
 
 ## Troubleshooting
@@ -539,13 +499,13 @@ export HYPERSYNC_API_TOKEN="your_token"
 ```bash
 # Use multiple HyperSync tokens + enable parallel processing
 export HYPERSYNC_API_TOKEN="token1,token2,token3"
-poetry run gmx_historical_data --full --concurrency 20
+gmx_historical_data collect --full --concurrency 20 --output-dir ./data
 ```
 
 **If you hit connection limits:**
 ```bash
 # Use lower concurrency or stick with sequential (default: 1)
-poetry run gmx_historical_data --full --concurrency 5
+gmx_historical_data collect --full --concurrency 5 --output-dir ./data
 ```
 
 ### Rate Limit Errors (429)
@@ -561,8 +521,8 @@ The tool automatically handles rate limits with:
 export HYPERSYNC_API_TOKEN="tok1,tok2,tok3,tok4,tok5"
 
 # Or reduce concurrency (or use sequential default)
-poetry run gmx_historical_data --full --concurrency 5
-# Sequential (default): poetry run gmx_historical_data --full
+gmx_historical_data collect --full --concurrency 5 --output-dir ./data
+# Sequential (default): gmx_historical_data collect --full --output-dir ./data
 ```
 
 ### Timeout Errors
@@ -574,8 +534,8 @@ poetry run gmx_historical_data --full --concurrency 5
 **If you see frequent timeouts:**
 ```bash
 # Use sequential processing (default) or lower concurrency
-poetry run gmx_historical_data --full  # Sequential (default)
-poetry run gmx_historical_data --full --concurrency 5  # Low concurrency
+gmx_historical_data collect --full --output-dir ./data  # Sequential (default)
+gmx_historical_data collect --full --concurrency 5 --output-dir ./data  # Low concurrency
 
 # Or check your network connection stability
 ```
