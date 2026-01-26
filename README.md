@@ -50,8 +50,24 @@ This tool provides **maximum coverage** for GMX token price history with two col
 ### Prerequisites
 
 - Python 3.11+
+- Rust toolchain (required for building `hypersync` package)
 - Arbitrum RPC URL (Alchemy, Infura, or public RPC)
 - HyperSync API token (required for event-based mode, free from https://envio.dev)
+
+#### Installing Rust
+
+HyperSync requires Rust to compile. Install via [rustup](https://rustup.rs/):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+Verify installation:
+```bash
+rustc --version
+cargo --version
+```
 
 ### Setup
 
@@ -459,6 +475,24 @@ optional arguments:
 ```
 
 ## Troubleshooting
+
+### HyperSync Installation Issues
+
+If you encounter build errors when installing `hypersync`, ensure Rust is installed (see Prerequisites) and use PEP 517 build:
+
+```bash
+# Build wheel with PEP 517 (recommended)
+pip wheel --no-cache-dir --use-pep517 "hypersync==0.7.17"
+pip install hypersync-0.7.17-*.whl
+
+# Or install directly
+pip install --no-cache-dir --use-pep517 "hypersync==0.7.17"
+```
+
+Common issues:
+- **"cargo not found"**: Install Rust toolchain (see Prerequisites)
+- **Build fails on macOS**: Ensure Xcode command line tools are installed: `xcode-select --install`
+- **Build fails on Linux**: Install build essentials: `apt-get install build-essential`
 
 ### "RPC URL required" Error
 ```bash
