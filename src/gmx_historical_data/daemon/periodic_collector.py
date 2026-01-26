@@ -20,7 +20,7 @@ from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.gmx_api_integration import GMXDataFetcher
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.daemon.config import DaemonConfig
+from gmx_historical_data.daemon.config import DaemonConfig, get_gmx_markets_with_chainlink_feeds
 from gmx_historical_data.daemon.gap_detector import GapDetector
 from gmx_historical_data.daemon.health_monitor import HealthMonitor
 
@@ -78,7 +78,10 @@ class GMXPeriodicCollector:
         self.shutdown_requested = True
 
     def _discover_symbols(self) -> list[str]:
-        """Discover all GMX tokens to collect.
+        """Discover GMX tokens to collect (only those with Chainlink feeds).
+
+        By default, only collects markets with public Chainlink price feeds (34 markets).
+        This ensures reliable OHLCV data quality.
 
         :return: List of token symbols (filtered by config and exclusions)
         """
@@ -87,17 +90,15 @@ class GMXPeriodicCollector:
             symbols = self.config.collection_symbols
             console.print(f"[cyan]Using configured symbols: {len(symbols)} tokens[/cyan]")
         else:
-            # Auto-discover all GMX tokens
-            all_symbols = self.gmx_discovery.get_supported_symbols()
+            # Use only markets with Chainlink feeds (34 markets)
+            symbols = get_gmx_markets_with_chainlink_feeds()
 
             # Filter out excluded symbols
-            symbols = [s for s in all_symbols if s not in EXCLUDED_SYMBOLS]
+            symbols = [s for s in symbols if s not in EXCLUDED_SYMBOLS]
             symbols = [s for s in symbols if s not in self.config.excluded_symbols]
 
-            excluded_count = len(all_symbols) - len(symbols)
-            console.print(f"[cyan]Auto-discovered {len(symbols)} GMX tokens[/cyan]")
-            if excluded_count > 0:
-                console.print(f"[dim]  (excluded {excluded_count} deprecated tokens)[/dim]")
+            console.print(f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]")
+            console.print(f"[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]")
 
         return symbols
 
