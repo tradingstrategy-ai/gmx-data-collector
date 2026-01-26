@@ -1,0 +1,51 @@
+# Systemd service file for GMX Periodic Data Collector
+#
+# Installation:
+# 1. Copy this file to /etc/systemd/system/gmx-collector.service
+# 2. Update paths and user in the [Service] section
+# 3. Create .env.daemon file with configuration
+# 4. Enable and start the service:
+#    sudo systemctl enable gmx-collector.service
+#    sudo systemctl start gmx-collector.service
+
+[Unit]
+Description=GMX Periodic Data Collector
+After=network.target
+Documentation=https://github.com/tradingstrategy/gmx_historical_data
+
+[Service]
+Type=simple
+
+# User and group to run the service as
+# Replace 'youruser' with your actual username
+User=youruser
+Group=youruser
+
+# Working directory - update this path
+WorkingDirectory=/path/to/gmx_historical_data
+
+# Environment file with configuration
+# Create this file based on docker/.env.daemon.example
+EnvironmentFile=/path/to/gmx_historical_data/.env.daemon
+
+# Command to run
+# Update poetry path if needed
+ExecStart=/usr/bin/poetry run python scripts/run_periodic_collector.py
+
+# Restart policy
+Restart=always
+RestartSec=30
+
+# Logging
+StandardOutput=append:/var/log/gmx-collector.log
+StandardError=append:/var/log/gmx-collector.error.log
+
+# Security hardening (optional)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/path/to/gmx_historical_data/data
+
+[Install]
+WantedBy=multi-user.target

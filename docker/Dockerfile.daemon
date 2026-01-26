@@ -1,0 +1,49 @@
+FROM python:3.11-slim as builder
+
+# Install poetry
+RUN pip install --no-cache-dir poetry==1.8.0
+
+WORKDIR /app
+
+# Copy dependency files
+COPY pyproject.toml poetry.lock* ./
+
+# Install dependencies (without dev dependencies)
+RUN poetry config virtualenvs.create false \
+    && poetry install --no-dev --no-interaction --no-ansi --no-root
+
+# Runtime stage
+FROM python:3.11-slim
+
+# Install curl for healthcheck
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy installed packages from builder
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# Copy application source
+COPY src/ src/
+COPY scripts/ scripts/
+
+# Create data directory with proper permissions
+RUN mkdir -p /app/data
+
+# Create non-root user
+RUN useradd -m -u 1000 -s /bin/bash gmx && \
+    chown -R gmx:gmx /app
+
+# Switch to non-root user
+USER gmx
+
+# Health check (optional - will check if health endpoint is running)
+# Comment out if not implementing HTTP health endpoint
+# HEALTHCHECK --interval=5m --timeout=10s --retries=3 \
+#     CMD curl -f http://localhost:${HEALTH_CHECK_PORT:-8080}/health || exit 1
+
+# Run the periodic collector
+CMD ["python", "scripts/run_periodic_collector.py"]

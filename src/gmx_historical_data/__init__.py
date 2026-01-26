@@ -11,7 +11,12 @@ from gmx_historical_data.chainlink_feeds_complete import (
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery, GMXToken
 from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 from gmx_historical_data.aggregator_discovery import AggregatorDiscovery
-from gmx_historical_data.hypersync_collector import HyperSyncCollector, CollectionStats
+try:
+    from gmx_historical_data.hypersync_collector import HyperSyncCollector, CollectionStats
+except ImportError:
+    # hypersync is optional - allow daemon to work without it
+    HyperSyncCollector = None
+    CollectionStats = None
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.checkpoint import CheckpointManager
 from gmx_historical_data.resampler import OHLCVResampler

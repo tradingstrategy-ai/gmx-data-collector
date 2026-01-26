@@ -17,10 +17,13 @@ matplotlib = ">=3.10.8"
 web3-ethereum-defi = ">=0.39.0"
 typer = ">=0.15.1"
 rich = ">=13.9.4"
+schedule = ">=1.2.0"
+aiohttp = ">=3.9.0"
 
 [tool.poetry.scripts]
 gmx_historical_data = "gmx_historical_data.cli:main"
 plot-gmx-data = "gmx_historical_data.plot_data:main"
+gmx-periodic-collector = "gmx_historical_data.daemon.periodic_collector:main"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

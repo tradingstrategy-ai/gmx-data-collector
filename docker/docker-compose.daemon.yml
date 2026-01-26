@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  gmx-collector:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.daemon
+    container_name: gmx-periodic-collector
+    env_file:
+      - .env.daemon
+    volumes:
+      # Mount data directory for persistent storage
+      - ../data:/app/data
+    restart: unless-stopped
+    # Uncomment if implementing HTTP health endpoint
+    # ports:
+    #   - "${HEALTH_CHECK_PORT:-8080}:8080"
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    #   interval: 5m
+    #   timeout: 10s
+    #   retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
