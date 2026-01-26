@@ -6,6 +6,42 @@ producing OHLCV candles suitable for backtesting.
 Supports hybrid collection:
 - Chainlink markets (34): Uses GMX API
 - Non-Chainlink markets (84): Uses OraclePriceUpdate events from EventEmitter
+
+USAGE:
+    gmx-periodic-collector
+
+ENVIRONMENT VARIABLES (required):
+    JSON_RPC_ARBITRUM        Arbitrum RPC URL
+    HYPERSYNC_API_TOKEN      HyperSync API token from envio.dev
+
+ENVIRONMENT VARIABLES (optional):
+    COLLECTION_INTERVAL_MINUTES  Collection interval (default: 60)
+    OUTPUT_DIR                   Output directory (default: ./data)
+    COLLECT_NON_CHAINLINK        Include 84 non-Chainlink markets (default: true)
+    ENABLE_ADAPTIVE_GAP_DETECTION  Detect API sliding window data loss (default: true)
+    TIMEFRAME_CONCURRENCY        Parallel timeframe fetches (default: 6)
+    LOG_LEVEL                    Logging level (default: INFO)
+    DRY_RUN                      Don't save data, just log (default: false)
+
+DOCKER DEPLOYMENT:
+    cd docker
+    cp .env.daemon.example .env.daemon
+    # Edit .env.daemon with your API keys
+    docker-compose up -d
+    docker logs -f gmx-collector
+
+EXAMPLE:
+    # Set required environment variables
+    export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
+    export HYPERSYNC_API_TOKEN="YOUR_TOKEN"
+
+    # Optional: configure collection
+    export COLLECTION_INTERVAL_MINUTES=60
+    export OUTPUT_DIR=./data
+    export COLLECT_NON_CHAINLINK=true
+
+    # Start daemon
+    gmx-periodic-collector
 """
 
 import asyncio
@@ -89,7 +125,6 @@ class GMXPeriodicCollector:
 
             self.oracle_collector = OraclePriceCollector(
                 hypersync_endpoint=config.hypersync_endpoint,
-                rpc_url=config.rpc_url,
                 api_token=config.hypersync_api_token,
             )
             web3 = Web3(Web3.HTTPProvider(config.rpc_url))

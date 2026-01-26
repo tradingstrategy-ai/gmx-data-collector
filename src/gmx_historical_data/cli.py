@@ -483,10 +483,9 @@ class DataCollector:
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.oracle_event_aggregator import aggregate_oracle_events_to_ohlcv
 
-        # Initialize oracle collector
+        # Initialize oracle collector (pure HyperSync, no RPC needed)
         oracle_collector = OraclePriceCollector(
             hypersync_endpoint=self.config.hypersync_endpoint,
-            rpc_url=self.config.rpc_url,
             api_token=self.config.hypersync_api_token,
         )
 
@@ -773,11 +772,10 @@ class DataCollector:
             box=box.ROUNDED,
         ))
 
-        # Initialize oracle collector
+        # Initialize oracle collector (pure HyperSync, no RPC needed)
         console.print("\n[bold]Initializing oracle price collector...[/bold]")
         oracle_collector = OraclePriceCollector(
             hypersync_endpoint=self.config.hypersync_endpoint,
-            rpc_url=self.config.rpc_url,
             api_token=self.config.hypersync_api_token,
         )
 
@@ -979,20 +977,56 @@ def cli(
 ) -> None:
     """Collect GMX historical price data.
 
-    By default, collects BOTH Chainlink markets (34) and non-Chainlink markets (84).
+    By default, collects BOTH Chainlink markets (34) and non-Chainlink markets (84)
+    for a total of 118 GMX V2 markets on Arbitrum.
 
-    Examples:
-        # Full historical collection for ETH (Chainlink market)
-        gmx_historical_data collect --full --symbol ETH --output-dir ./data
+    DATA SOURCES:
+      • Chainlink Markets: GMX API (last ~6 months) + Chainlink HyperSync backfill
+      • Non-Chainlink Markets: OraclePriceUpdate events via HyperSync + eth_defi
 
-        # Full collection for all 118 markets (Chainlink + non-Chainlink)
-        gmx_historical_data collect --full --output-dir ./data
+    TIMEFRAMES COLLECTED:
+      1min, 5min, 15min, 1h, 4h, 1D
 
-        # Incremental update for all symbols
-        gmx_historical_data collect --update --output-dir ./data
+    OUTPUT STRUCTURE:
+      data/
+      └── candles/
+          ├── ETH/
+          │   ├── 1min.parquet
+          │   ├── 5min.parquet
+          │   ├── 15min.parquet
+          │   ├── 1h.parquet
+          │   ├── 4h.parquet
+          │   └── 1D.parquet
+          ├── BTC/
+          │   └── ...
+          └── SUI/
+              └── ...
 
-        # Collect only Chainlink markets (skip non-Chainlink)
-        gmx_historical_data collect --full --no-collect-non-chainlink --output-dir ./data
+    EXAMPLES:
+
+      # Full historical collection for all 118 markets
+      export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
+      export HYPERSYNC_API_TOKEN="YOUR_TOKEN"
+      gmx_historical_data collect --full --output-dir ./data
+
+      # Incremental update (faster, only new data since last collection)
+      gmx_historical_data collect --update --output-dir ./data
+
+      # Single symbol - Chainlink market (uses GMX API + Chainlink backfill)
+      gmx_historical_data collect --full --symbol ETH --output-dir ./data
+
+      # Single symbol - Non-Chainlink market (uses oracle events)
+      gmx_historical_data collect --full --symbol SUI --output-dir ./data
+
+      # Collect only Chainlink markets (skip 84 non-Chainlink markets)
+      gmx_historical_data collect --full --no-collect-non-chainlink --output-dir ./data
+
+      # Parallel collection (faster but uses more resources)
+      gmx_historical_data collect --update --concurrency 4 --output-dir ./data
+
+    VERIFICATION:
+      After collection, verify data quality:
+      gmx_historical_data verify --output-dir ./data
     """
     # Validate arguments
     if not full and not update:
@@ -1100,7 +1134,41 @@ def verify_command(
     output_dir: Path = typer.Option(Path("./data"), "--output-dir", help="Data directory"),
     timeframe: str = typer.Option("1h", "--timeframe", help="Timeframe to verify"),
 ) -> None:
-    """Verify collected data quality."""
+    """Verify collected data quality.
+
+    Checks for data gaps, coverage, and quality metrics for collected OHLCV data.
+
+    METRICS REPORTED:
+      • Coverage Start/End: Time range of collected data
+      • Candle Count: Total number of candles
+      • Gaps: Missing data periods
+      • Quality Score: 0-100 score based on completeness
+
+    EXAMPLES:
+
+      # Verify all symbols (1h timeframe by default)
+      gmx_historical_data verify --output-dir ./data
+
+      # Verify specific symbol
+      gmx_historical_data verify --symbol ETH --output-dir ./data
+
+      # Verify different timeframe
+      gmx_historical_data verify --timeframe 5min --output-dir ./data
+
+    PYTHON VERIFICATION:
+      # Quick check of Parquet files
+      python -c "
+      import pandas as pd
+      from pathlib import Path
+
+      data_dir = Path('./data/candles')
+      for symbol_dir in sorted(data_dir.iterdir())[:10]:
+          if symbol_dir.is_dir():
+              for tf_file in symbol_dir.glob('*.parquet'):
+                  df = pd.read_parquet(tf_file)
+                  print(f'{symbol_dir.name}/{tf_file.stem}: {len(df)} candles')
+      "
+    """
     from gmx_historical_data.data_verifier import DataVerifier
 
     storage = ParquetStorage(output_dir)
@@ -1210,20 +1278,47 @@ def debug_oracle_command(
 ) -> None:
     """Debug oracle events for non-Chainlink tokens.
 
-    Use this command to verify that OraclePriceUpdate events are being
-    emitted for a specific token, helpful for debugging collection issues.
+    Use this command to:
+      • List all GMX markets and their Chainlink status
+      • Verify OraclePriceUpdate events are being emitted for a token
+      • Debug collection issues for specific tokens
+      • Inspect raw event data for parsing issues
 
-    Automatically fetches ALL historical events from GMX V2 genesis block.
+    Automatically fetches ALL historical events from GMX V2 genesis block
+    (block 120,000,000 on Arbitrum).
 
-    Examples:
-        # List all non-Chainlink markets
-        gmx_historical_data debug-oracle
+    MARKET CATEGORIES:
+      • Chainlink Markets (34): Have public price feeds, use GMX API
+      • Non-Chainlink Markets (84): Use OraclePriceUpdate events
 
-        # Debug oracle events for SUI (fetches all historical data)
-        gmx_historical_data debug-oracle --symbol SUI
+    EXAMPLES:
 
-        # Show raw event data for debugging
-        gmx_historical_data debug-oracle --symbol TAO --show-raw
+      # List all markets and their data source
+      gmx_historical_data debug-oracle
+
+      # Debug oracle events for a non-Chainlink token
+      gmx_historical_data debug-oracle --symbol SUI
+
+      # Show raw event data for debugging parsing issues
+      gmx_historical_data debug-oracle --symbol TAO --show-raw --limit 10
+
+      # Use more parallel workers for faster scanning
+      gmx_historical_data debug-oracle --symbol HYPE --concurrency 8
+
+      # Limit output for quick check
+      gmx_historical_data debug-oracle --symbol VIRTUAL --limit 50
+
+    OUTPUT INCLUDES:
+      • Token address and decimals
+      • Market type (Chainlink vs Non-Chainlink)
+      • Sample price events with timestamps
+      • Price summary (range, latest, block range, time range)
+
+    TROUBLESHOOTING:
+      If no events found:
+        1. Verify the token exists in GMX markets
+        2. Check if token is a Chainlink market (uses different data source)
+        3. Try increasing --concurrency for faster scanning
     """
     import asyncio
     from web3 import Web3
@@ -1313,17 +1408,18 @@ def debug_oracle_command(
         console.print(f"\n[yellow]Note: {symbol_upper} is a Chainlink market.[/yellow]")
         console.print("[yellow]It uses GMX API for data, but may also have oracle events.[/yellow]")
 
-    # Validate HyperSync token
-    if not hypersync_token:
-        console.print("[red]Error: HyperSync token required. Set HYPERSYNC_API_TOKEN env var or use --hypersync-token[/red]")
-        raise typer.Exit(1)
+    from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+    from hypersync import HypersyncClient, ClientConfig
 
-    # Get current block
+    # Get current block via HyperSync (no RPC needed)
+    console.print(f"\n[bold]Initializing HyperSync collector...[/bold]")
     try:
-        current_block = web3.eth.block_number
+        config = ClientConfig(url="https://arbitrum.hypersync.xyz", bearer_token=hypersync_token)
+        hs_client = HypersyncClient(config)
+        current_block = asyncio.run(hs_client.get_height())
         console.print(f"  [dim]Current block:[/dim] {current_block:,}")
     except Exception as e:
-        console.print(f"[red]Failed to get current block: {e}[/red]")
+        console.print(f"[red]Failed to get current block from HyperSync: {e}[/red]")
         raise typer.Exit(1)
 
     # Start from GMX V2 genesis block to get ALL historical events
@@ -1337,11 +1433,9 @@ def debug_oracle_command(
     console.print(f"  [dim]Using {concurrency} parallel workers for faster collection[/dim]")
     console.print()
 
-    from gmx_historical_data.oracle_price_collector import OraclePriceCollector
-
+    # Pure HyperSync collector - no RPC needed for maximum speed
     oracle_collector = OraclePriceCollector(
         hypersync_endpoint="https://arbitrum.hypersync.xyz",
-        rpc_url=rpc_url,
         api_token=hypersync_token,
     )
 
@@ -1447,8 +1541,51 @@ def debug_oracle_command(
     console.print(summary_table)
 
 
-# Create Typer app
-app = typer.Typer(help="GMX Historical Data Collection CLI")
+# Create Typer app with comprehensive help
+CLI_HELP = """
+GMX Historical Data Collection CLI
+
+Collects OHLCV price data for GMX V2 markets on Arbitrum.
+
+MARKET TYPES:
+  • Chainlink Markets (34): ETH, BTC, SOL, ARB, LINK, etc.
+    - Data source: GMX API + Chainlink historical backfill
+    - Collection: Uses GMXDataFetcher + HyperSync
+
+  • Non-Chainlink Markets (84): SUI, HYPE, TAO, VIRTUAL, etc.
+    - Data source: OraclePriceUpdate events from GMX EventEmitter
+    - Collection: Uses OraclePriceCollector via HyperSync
+
+ENVIRONMENT VARIABLES:
+  JSON_RPC_ARBITRUM     Arbitrum RPC URL (required)
+  HYPERSYNC_API_TOKEN   HyperSync API token from envio.dev (required)
+
+QUICK START:
+  # Full historical collection for all 118 markets
+  gmx_historical_data collect --full --output-dir ./data
+
+  # Incremental update (faster, only new data)
+  gmx_historical_data collect --update --output-dir ./data
+
+  # Single symbol collection
+  gmx_historical_data collect --full --symbol ETH --output-dir ./data
+
+  # Verify data quality
+  gmx_historical_data verify --output-dir ./data
+
+  # Debug oracle events for non-Chainlink tokens
+  gmx_historical_data debug-oracle --symbol SUI --show-raw
+
+DAEMON (Continuous Collection):
+  gmx-periodic-collector
+
+For more details on each command, use --help:
+  gmx_historical_data collect --help
+  gmx_historical_data verify --help
+  gmx_historical_data debug-oracle --help
+"""
+
+app = typer.Typer(help=CLI_HELP, rich_markup_mode="rich")
 
 # Register commands
 app.command(name="collect")(cli)

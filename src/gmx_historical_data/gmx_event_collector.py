@@ -13,6 +13,12 @@ from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent, parse_position_event
 
 
+# EventLog1 signature hash from GMX EventEmitter contract
+# EventLog1(address,string,string,bytes32,EventData)
+# This is topic0 for most GMX events including PositionIncrease/PositionDecrease
+EVENTLOG1_SIGNATURE = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+
+
 def get_position_event_hashes() -> list[str]:
     """Get event name hashes for PositionIncrease and PositionDecrease.
 
@@ -57,11 +63,12 @@ class GMXEventCollector:
         """
         event_hashes = get_position_event_hashes()
 
-        # GMX uses EventLog/EventLog1/EventLog2 with event name hash in topic[1]
+        # Filter by EventLog1 signature (topic0) AND PositionIncrease/PositionDecrease (topic1)
+        # This enables server-side filtering at HyperSync for much faster queries
         log_selection = LogSelection(
             address=[EVENT_EMITTER_ADDRESS.lower()],
             topics=[
-                [],  # topic0: EventLog signature (any variant)
+                [EVENTLOG1_SIGNATURE],  # topic0: EventLog1 only (server-side filter)
                 event_hashes,  # topic1: PositionIncrease or PositionDecrease
             ],
         )

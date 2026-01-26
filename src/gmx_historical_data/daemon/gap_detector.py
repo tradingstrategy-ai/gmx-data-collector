@@ -78,6 +78,14 @@ class GapDetectionResult:
 class GapDetector:
     """Detect gaps in existing OHLCV data to determine what needs collection.
 
+    .. deprecated::
+        Use :class:`AdaptiveGapDetector` instead. This class does not detect
+        sliding window data loss from GMX API and will be removed in a future version.
+
+    The simple GapDetector compares local storage against current time but does NOT
+    query the GMX API to detect if data has been permanently lost due to the API's
+    sliding window. Use AdaptiveGapDetector for production workloads.
+
     :param storage: ParquetStorage instance for reading existing data
     """
 
