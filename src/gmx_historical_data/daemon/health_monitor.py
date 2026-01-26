@@ -23,6 +23,7 @@ class CycleMetrics:
     :param symbols_failed: Number of symbols that failed
     :param candles_added: Candles added per symbol/timeframe
     :param errors: List of error details
+    :param data_loss_events: List of data loss events in this cycle
     """
 
     cycle_number: int
@@ -34,6 +35,7 @@ class CycleMetrics:
     symbols_failed: int = 0
     candles_added: Dict[str, Dict[str, int]] = field(default_factory=dict)
     errors: list[dict] = field(default_factory=list)
+    data_loss_events: list[dict] = field(default_factory=list)
 
 
 class HealthMonitor:
@@ -119,6 +121,31 @@ class HealthMonitor:
                         "symbol": symbol,
                         "timeframe": timeframe,
                         "error": error,
+                        "cycle_number": self.current_cycle.cycle_number,
+                    }
+                )
+            )
+
+    def record_data_loss(self, event) -> None:
+        """Record a data loss event for tracking.
+
+        :param event: DataLossEvent from DataLossHandler
+        """
+        if not self.current_cycle:
+            logger.warning("No active cycle to record data loss")
+            return
+
+        self.current_cycle.data_loss_events.append(event.to_dict())
+
+        if self.log_metrics:
+            logger.critical(
+                json.dumps(
+                    {
+                        "event": "data_loss_recorded",
+                        "symbol": event.symbol,
+                        "timeframe": event.timeframe,
+                        "lost_candles": event.lost_candles,
+                        "lost_timespan": event.lost_timespan,
                         "cycle_number": self.current_cycle.cycle_number,
                     }
                 )

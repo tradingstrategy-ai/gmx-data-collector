@@ -2,27 +2,47 @@
 
 Collects fresh GMX API data for all tokens at configurable intervals,
 producing OHLCV candles suitable for backtesting.
+
+Supports hybrid collection:
+- Chainlink markets (34): Uses GMX API
+- Non-Chainlink markets (84): Uses OraclePriceUpdate events from EventEmitter
 """
 
+import asyncio
 import signal
 import sys
 import logging
 import time
-import pandas as pd
-from datetime import datetime, timezone
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+import pandas as pd
 import schedule
 from rich.console import Console
+from rich.logging import RichHandler
+from rich.panel import Panel
+from rich.table import Table
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from web3 import Web3
 
-from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS
+from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS, GMX_V2_GENESIS_BLOCK
 from gmx_historical_data.storage import ParquetStorage
-from gmx_historical_data.gmx_api_integration import GMXDataFetcher
+from gmx_historical_data.gmx_api_integration import GMXDataFetcher, map_timeframe_to_gmx_period
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.daemon.config import DaemonConfig, get_gmx_markets_with_chainlink_feeds
-from gmx_historical_data.daemon.gap_detector import GapDetector
+from gmx_historical_data.daemon.config import (
+    DaemonConfig,
+    get_gmx_markets_with_chainlink_feeds,
+    get_gmx_markets_without_chainlink_feeds,
+)
+from gmx_historical_data.daemon.gap_detector import (
+    GapDetector,
+    AdaptiveGapDetector,
+    GapStatus,
+)
 from gmx_historical_data.daemon.health_monitor import HealthMonitor
+from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
 
 
 console = Console()
@@ -51,6 +71,30 @@ class GMXPeriodicCollector:
         self.gap_detector = GapDetector(self.storage)
         self.health_monitor = HealthMonitor(log_metrics=True)
 
+        # Initialize adaptive gap detection components
+        self.adaptive_gap_detector = AdaptiveGapDetector(
+            storage=self.storage,
+            gmx_fetcher=self.gmx_fetcher,
+        )
+        self.data_loss_handler = DataLossHandler()
+
+        # Initialize oracle collector for non-Chainlink markets if enabled
+        self.oracle_collector = None
+        self.token_mapper = None
+        self._last_oracle_block = GMX_V2_GENESIS_BLOCK
+
+        if config.collect_non_chainlink:
+            from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+            from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+
+            self.oracle_collector = OraclePriceCollector(
+                hypersync_endpoint=config.hypersync_endpoint,
+                rpc_url=config.rpc_url,
+                api_token=config.hypersync_api_token,
+            )
+            web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+            self.token_mapper = GMXTokenMapper(web3)
+
         # Configure logging
         self._setup_logging()
 
@@ -59,11 +103,20 @@ class GMXPeriodicCollector:
         signal.signal(signal.SIGINT, self._handle_shutdown_signal)
 
     def _setup_logging(self) -> None:
-        """Configure logging based on config."""
+        """Configure logging with rich handler for beautiful output."""
         logging.basicConfig(
             level=getattr(logging, self.config.log_level),
-            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
+            format="%(message)s",
+            datefmt="[%X]",
+            handlers=[
+                RichHandler(
+                    console=console,
+                    rich_tracebacks=True,
+                    tracebacks_show_locals=True,
+                    show_time=True,
+                    show_path=False,
+                )
+            ],
         )
 
     def _handle_shutdown_signal(self, signum, frame) -> None:
@@ -109,22 +162,51 @@ class GMXPeriodicCollector:
     ) -> tuple[str, str, int, Exception | None]:
         """Collect data for a single symbol/timeframe combination.
 
+        Uses adaptive gap detection when enabled to detect permanent data loss
+        from GMX API's sliding window.
+
         :param symbol: Token symbol
         :param timeframe: Timeframe string
         :return: Tuple of (symbol, timeframe, candles_added, error)
         """
         try:
-            # Detect gap
-            fetch_start, fetch_end = self.gap_detector.detect_gap(symbol, timeframe)
+            # Use adaptive gap detection if enabled
+            if self.config.enable_adaptive_gap_detection:
+                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(
+                    symbol, timeframe
+                )
 
-            # No gap - skip collection
-            if fetch_start is None and fetch_end is None:
-                return symbol, timeframe, 0, None
+                # Handle data loss scenario
+                if gap_result.has_data_loss:
+                    event = self.data_loss_handler.handle_gap_result(
+                        symbol, timeframe, gap_result
+                    )
+                    if event:
+                        self.health_monitor.record_data_loss(event)
+                        logger.critical(
+                            f"DATA LOSS: {symbol} {timeframe} lost "
+                            f"~{gap_result.lost_candles_estimate} candles "
+                            f"({gap_result.lost_timespan})"
+                        )
 
-            # Fetch GMX API data
+                # Skip if no gap
+                if not gap_result.needs_fetch:
+                    return symbol, timeframe, 0, None
+
+                fetch_start = gap_result.fetch_start
+            else:
+                # Fall back to simple gap detection
+                fetch_start, fetch_end = self.gap_detector.detect_gap(symbol, timeframe)
+
+                # No gap - skip collection
+                if fetch_start is None and fetch_end is None:
+                    return symbol, timeframe, 0, None
+
+            # Fetch GMX API data (map timeframe to GMX period format: 1min->1m, 1D->1d)
+            gmx_period = map_timeframe_to_gmx_period(timeframe)
             gmx_df = self.gmx_fetcher.fetch_gmx_candles(
                 symbol=symbol,
-                period=timeframe,
+                period=gmx_period,
                 limit=10000,
             )
 
@@ -206,9 +288,250 @@ class GMXPeriodicCollector:
 
         return candles_by_timeframe
 
+    async def _collect_symbol_via_oracle_fallback(self, symbol: str) -> dict[str, int]:
+        """Fallback collection for a single symbol via oracle events.
+
+        Used when GMX API collection fails (e.g., aggregator discovery failed).
+
+        :param symbol: Token symbol
+        :return: Dictionary of candles added per timeframe
+        """
+        from gmx_historical_data.oracle_event_aggregator import (
+            aggregate_oracle_events_to_ohlcv,
+        )
+
+        if not self.oracle_collector or not self.token_mapper:
+            return {}
+
+        # Get token address for the symbol
+        try:
+            token_mapping = self.token_mapper.get_all_token_mapping()
+        except Exception as e:
+            logger.warning(f"Failed to get token mapping for oracle fallback: {e}")
+            return {}
+
+        # Find the token address for this symbol
+        symbol_upper = symbol.upper()
+        token_address = None
+        for addr, sym in token_mapping.items():
+            if sym.upper() == symbol_upper:
+                token_address = addr
+                break
+
+        if not token_address:
+            logger.warning(f"No token address found for {symbol} in oracle fallback")
+            return {}
+
+        # Get token decimals for price conversion
+        token_decimals = self.token_mapper.get_decimals_for_symbol(symbol_upper) or 18
+
+        # Collect oracle events for this token
+        try:
+            events = await self.oracle_collector.collect_oracle_events(
+                start_block=self._last_oracle_block + 1,
+                token_addresses=[token_address],
+            )
+        except Exception as e:
+            logger.warning(f"Oracle fallback failed for {symbol}: {e}")
+            return {}
+
+        if not events:
+            return {}
+
+        # Aggregate to OHLCV
+        candles_by_timeframe = {}
+        for timeframe in TIMEFRAMES:
+            try:
+                ohlcv = aggregate_oracle_events_to_ohlcv(
+                    events, timeframe, symbol, token_decimals=token_decimals
+                )
+
+                if ohlcv.empty:
+                    continue
+
+                # Merge with existing data
+                existing = self.storage.read_candles(timeframe, symbol)
+                if not existing.empty:
+                    merged = pd.concat([existing, ohlcv], ignore_index=True)
+                    merged = merged.sort_values("timestamp").drop_duplicates(
+                        subset=["timestamp"], keep="last"
+                    )
+                else:
+                    merged = ohlcv
+
+                # Save if not dry run
+                if not self.config.dry_run:
+                    self.storage.save_candles(merged, timeframe, symbol)
+
+                candles_by_timeframe[timeframe] = len(ohlcv)
+
+            except Exception as e:
+                logger.warning(f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}")
+
+        return candles_by_timeframe
+
+    async def _collect_non_chainlink_markets(self) -> dict[str, int]:
+        """Collect data for non-Chainlink markets via OraclePriceUpdate events.
+
+        :return: Dict of symbol -> candles collected
+        """
+        from gmx_historical_data.oracle_event_aggregator import (
+            aggregate_oracle_events_to_ohlcv,
+        )
+
+        if not self.oracle_collector or not self.token_mapper:
+            return {}
+
+        console.rule("[bold magenta]Non-Chainlink Markets (Oracle Events)[/bold magenta]")
+
+        # Get non-Chainlink token mapping
+        try:
+            token_mapping = self.token_mapper.get_non_chainlink_tokens()
+        except Exception as e:
+            logger.error(f"Failed to get non-Chainlink token mapping: {e}")
+            console.print(f"[red]Failed to get token mapping: {e}[/red]")
+            return {}
+
+        if not token_mapping:
+            console.print("[yellow]No non-Chainlink tokens found[/yellow]")
+            return {}
+
+        console.print(f"[cyan]Found {len(token_mapping)} non-Chainlink markets[/cyan]")
+
+        # Get token decimals for price conversion
+        try:
+            token_decimals_map = self.token_mapper.get_token_decimals()
+        except Exception as e:
+            logger.warning(f"Could not get token decimals: {e}. Using default 18.")
+            token_decimals_map = {}
+
+        # Determine block range (incremental from last collection)
+        start_block = self._last_oracle_block + 1
+
+        # Collect ALL oracle events at once (efficient batch query)
+        token_addresses = list(token_mapping.keys())
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+            transient=True,
+        ) as progress:
+            progress.add_task("[cyan]Fetching oracle events from HyperSync...", total=None)
+
+            try:
+                events = await self.oracle_collector.collect_oracle_events(
+                    start_block=start_block,
+                    token_addresses=token_addresses,
+                )
+            except Exception as e:
+                logger.error(f"Failed to collect oracle events: {e}")
+                console.print(f"[red]Failed to collect oracle events: {e}[/red]")
+                return {}
+
+        if not events:
+            console.print("[dim]No new oracle events found[/dim]")
+            return {}
+
+        # Update last processed block
+        self._last_oracle_block = max(e.block_number for e in events)
+        console.print(f"[dim]Collected {len(events):,} oracle events up to block {self._last_oracle_block:,}[/dim]")
+
+        # Group events by token
+        events_by_token: dict[str, list] = defaultdict(list)
+        for event in events:
+            events_by_token[event.token.lower()].append(event)
+
+        # Aggregate to OHLCV per symbol
+        results: dict[str, int] = {}
+        total_candles = 0
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task(
+                "[magenta]Aggregating oracle events...",
+                total=len(events_by_token),
+            )
+
+            for token_addr, token_events in events_by_token.items():
+                symbol = token_mapping.get(token_addr)
+                if not symbol:
+                    progress.update(task, advance=1)
+                    continue
+
+                # Skip excluded symbols
+                if symbol in EXCLUDED_SYMBOLS or symbol in self.config.excluded_symbols:
+                    progress.update(task, advance=1)
+                    continue
+
+                progress.update(task, description=f"[magenta]Aggregating {symbol}...")
+
+                # Get decimals for this token (default 18 if not found)
+                token_decimals = token_decimals_map.get(symbol, 18)
+
+                symbol_candles = 0
+                for timeframe in TIMEFRAMES:
+                    try:
+                        ohlcv = aggregate_oracle_events_to_ohlcv(
+                            token_events, timeframe, symbol, token_decimals=token_decimals
+                        )
+
+                        if ohlcv.empty:
+                            continue
+
+                        # Merge with existing data
+                        existing = self.storage.read_candles(timeframe, symbol)
+                        if not existing.empty:
+                            merged = pd.concat([existing, ohlcv], ignore_index=True)
+                            merged = merged.sort_values("timestamp").drop_duplicates(
+                                subset=["timestamp"], keep="last"
+                            )
+                        else:
+                            merged = ohlcv
+
+                        # Save if not dry run
+                        if not self.config.dry_run:
+                            self.storage.save_candles(merged, timeframe, symbol)
+
+                        symbol_candles += len(ohlcv)
+
+                    except Exception as e:
+                        logger.error(f"Failed to aggregate {symbol} {timeframe}: {e}")
+
+                if symbol_candles > 0:
+                    results[symbol] = symbol_candles
+                    total_candles += symbol_candles
+                    self.health_monitor.record_symbol_success(symbol, {})
+
+                progress.update(task, advance=1)
+
+        # Summary panel
+        summary_table = Table(show_header=False, box=None, padding=(0, 2))
+        summary_table.add_column("Metric", style="dim")
+        summary_table.add_column("Value")
+
+        summary_table.add_row("Symbols processed", f"[green]{len(results)}[/green]")
+        summary_table.add_row("Candles added", f"{total_candles:,}")
+        summary_table.add_row("Last block", f"{self._last_oracle_block:,}")
+
+        console.print(Panel(
+            summary_table,
+            title="[bold]Oracle Collection Complete[/bold]",
+            border_style="magenta",
+        ))
+
+        return results
+
     def run_collection_cycle(self) -> None:
         """Execute one complete collection cycle for all symbols."""
-        console.print("\n[bold cyan]Starting collection cycle[/bold cyan]")
+        console.print()
+        console.rule("[bold cyan]Collection Cycle[/bold cyan]")
         logger.info("Starting collection cycle")
 
         # Start cycle tracking
@@ -223,53 +546,143 @@ class GMXPeriodicCollector:
             self.health_monitor.end_cycle(total_symbols=0)
             return
 
-        # Process each symbol
-        for i, symbol in enumerate(symbols, 1):
-            # Check for shutdown request
-            if self.shutdown_requested:
-                console.print("[yellow]Shutdown requested - stopping collection cycle[/yellow]")
-                break
+        # Process each symbol with progress bar
+        succeeded = 0
+        failed = 0
+        total_candles = 0
+        fallback_succeeded = 0
 
-            console.print(f"\n[cyan]({i}/{len(symbols)})[/cyan] Collecting {symbol}...")
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+            transient=False,
+        ) as progress:
+            task = progress.add_task(
+                "[cyan]Collecting symbols...",
+                total=len(symbols),
+            )
 
-            try:
-                candles_by_timeframe = self._collect_symbol(symbol)
+            for symbol in symbols:
+                # Check for shutdown request
+                if self.shutdown_requested:
+                    console.print("[yellow]Shutdown requested - stopping collection cycle[/yellow]")
+                    break
 
-                # Record success if any candles were added
-                if sum(candles_by_timeframe.values()) > 0:
-                    self.health_monitor.record_symbol_success(symbol, candles_by_timeframe)
-                else:
-                    # No candles added (up to date)
-                    self.health_monitor.record_symbol_success(symbol, {})
+                progress.update(task, description=f"[cyan]Collecting {symbol}...")
 
-            except Exception as e:
-                logger.exception(f"Failed to collect {symbol}: {e}")
-                console.print(f"  [red]Error: {e}[/red]")
-                self.health_monitor.record_symbol_failure(symbol, str(e))
+                try:
+                    candles_by_timeframe = self._collect_symbol(symbol)
+                    symbol_candles = sum(candles_by_timeframe.values())
+                    total_candles += symbol_candles
+
+                    # Record success if any candles were added
+                    if symbol_candles > 0:
+                        self.health_monitor.record_symbol_success(symbol, candles_by_timeframe)
+                    else:
+                        # No candles added (up to date)
+                        self.health_monitor.record_symbol_success(symbol, {})
+
+                    succeeded += 1
+
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.warning(f"GMX API collection failed for {symbol}: {e}")
+
+                    # Try oracle event fallback if hybrid mode is enabled
+                    if self.config.collect_non_chainlink and self.oracle_collector:
+                        console.print(f"  [yellow]{symbol}[/yellow]: API failed, trying oracle fallback...")
+                        try:
+                            fallback_candles = asyncio.run(
+                                self._collect_symbol_via_oracle_fallback(symbol)
+                            )
+                            fallback_total = sum(fallback_candles.values())
+
+                            if fallback_total > 0:
+                                console.print(f"  [green]{symbol}[/green]: {fallback_total:,} candles via oracle fallback")
+                                total_candles += fallback_total
+                                self.health_monitor.record_symbol_success(symbol, fallback_candles)
+                                succeeded += 1
+                                fallback_succeeded += 1
+                            else:
+                                # Fallback returned no data - still mark as failure
+                                console.print(f"  [red]{symbol}[/red]: Oracle fallback returned no data")
+                                self.health_monitor.record_symbol_failure(symbol, error_msg)
+                                failed += 1
+
+                        except Exception as fallback_error:
+                            logger.warning(f"Oracle fallback also failed for {symbol}: {fallback_error}")
+                            console.print(f"  [red]{symbol}[/red]: Both API and oracle fallback failed")
+                            self.health_monitor.record_symbol_failure(symbol, error_msg)
+                            failed += 1
+                    else:
+                        self.health_monitor.record_symbol_failure(symbol, error_msg)
+                        failed += 1
+
+                progress.update(task, advance=1)
 
         # End cycle tracking
         self.health_monitor.end_cycle(total_symbols=len(symbols))
 
-        # Print cycle summary
-        metrics = self.health_monitor.get_metrics_summary()
-        console.print(f"\n[bold]Cycle complete:[/bold]")
-        console.print(f"  Succeeded: [green]{metrics['current_cycle']['succeeded']}[/green]")
-        console.print(f"  Failed: [red]{metrics['current_cycle']['failed']}[/red]")
-        console.print(f"  Total: {metrics['current_cycle']['total_attempted']}")
+        # Build summary table
+        summary_table = Table(show_header=False, box=None, padding=(0, 2))
+        summary_table.add_column("Metric", style="dim")
+        summary_table.add_column("Value")
 
-        if not self.config.dry_run:
-            console.print(f"  Data saved to: {self.config.output_dir}")
+        summary_table.add_row("Succeeded", f"[green]{succeeded}[/green]")
+        if fallback_succeeded > 0:
+            summary_table.add_row("  via oracle fallback", f"[yellow]{fallback_succeeded}[/yellow]")
+        summary_table.add_row("Failed", f"[red]{failed}[/red]" if failed > 0 else "0")
+        summary_table.add_row("Total symbols", str(len(symbols)))
+        summary_table.add_row("Candles added", f"{total_candles:,}")
+
+        if self.config.dry_run:
+            summary_table.add_row("Status", "[yellow]DRY RUN - no data saved[/yellow]")
         else:
-            console.print(f"  [yellow](DRY RUN - no data saved)[/yellow]")
+            summary_table.add_row("Data saved to", str(self.config.output_dir))
+
+        console.print(Panel(
+            summary_table,
+            title="[bold]Cycle Complete[/bold]",
+            border_style="green" if failed == 0 else "yellow",
+        ))
+
+        # Collect non-Chainlink markets if enabled
+        if self.config.collect_non_chainlink and not self.shutdown_requested:
+            try:
+                asyncio.run(self._collect_non_chainlink_markets())
+            except Exception as e:
+                logger.error(f"Failed to collect non-Chainlink markets: {e}")
+                console.print(f"[red]Non-Chainlink collection failed: {e}[/red]")
 
     def start(self) -> None:
         """Start the periodic collection daemon."""
-        console.print("\n[bold green]GMX Periodic Data Collector[/bold green]")
-        console.print(f"Collection interval: [cyan]{self.config.collection_interval_minutes}[/cyan] minutes")
-        console.print(f"Output directory: [cyan]{self.config.output_dir}[/cyan]")
-        console.print(f"Timeframes: [cyan]{', '.join(TIMEFRAMES)}[/cyan]")
+        # Build configuration table
+        config_table = Table(show_header=False, box=None, padding=(0, 2))
+        config_table.add_column("Setting", style="dim")
+        config_table.add_column("Value", style="cyan")
+
+        config_table.add_row("Collection interval", f"{self.config.collection_interval_minutes} minutes")
+        config_table.add_row("Output directory", str(self.config.output_dir))
+        config_table.add_row("Timeframes", ", ".join(TIMEFRAMES))
+
+        mode_parts = []
+        if self.config.collect_non_chainlink:
+            mode_parts.append("[magenta]Hybrid (API + Oracle Events)[/magenta]")
+        else:
+            mode_parts.append("[green]API Only (Chainlink markets)[/green]")
         if self.config.dry_run:
-            console.print("[yellow]DRY RUN MODE - data will not be saved[/yellow]")
+            mode_parts.append("[yellow]DRY RUN[/yellow]")
+        config_table.add_row("Mode", " | ".join(mode_parts))
+
+        # Display startup panel
+        console.print(Panel(
+            config_table,
+            title="[bold green]GMX Periodic Data Collector[/bold green]",
+            border_style="green",
+        ))
 
         # Schedule periodic collection
         schedule.every(self.config.collection_interval_minutes).minutes.do(
@@ -277,18 +690,26 @@ class GMXPeriodicCollector:
         )
 
         # Run first collection immediately
-        console.print("\n[bold]Running initial collection...[/bold]")
+        console.rule("[bold]Initial Collection[/bold]")
         self.run_collection_cycle()
 
         # Main loop
         self.running = True
-        console.print(f"\n[bold green]Daemon started successfully[/bold green]")
 
         # Calculate next collection time
-        from datetime import timedelta
         next_run = datetime.now(timezone.utc) + timedelta(seconds=schedule.idle_seconds())
-        console.print(f"Next collection at: [cyan]{next_run.strftime('%Y-%m-%d %H:%M:%S %Z')}[/cyan]")
-        console.print("\nPress Ctrl+C to stop\n")
+
+        status_table = Table(show_header=False, box=None, padding=(0, 2))
+        status_table.add_column("Info", style="dim")
+        status_table.add_column("Value", style="cyan")
+        status_table.add_row("Next collection", next_run.strftime("%Y-%m-%d %H:%M:%S %Z"))
+        status_table.add_row("Stop daemon", "Press Ctrl+C")
+
+        console.print(Panel(
+            status_table,
+            title="[bold green]Daemon Running[/bold green]",
+            border_style="green",
+        ))
 
         while self.running and not self.shutdown_requested:
             try:
@@ -303,9 +724,12 @@ class GMXPeriodicCollector:
                 break
 
         # Graceful shutdown
-        console.print("\n[yellow]Shutting down gracefully...[/yellow]")
+        console.print(Panel(
+            "[dim]Cleanup complete[/dim]",
+            title="[yellow]Daemon Stopped[/yellow]",
+            border_style="yellow",
+        ))
         logger.info("Daemon stopped")
-        console.print("[green]Daemon stopped[/green]\n")
 
 
 def main() -> None:

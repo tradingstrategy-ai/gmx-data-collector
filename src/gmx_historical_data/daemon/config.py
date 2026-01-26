@@ -67,6 +67,99 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
     ]
 
 
+def get_gmx_markets_without_chainlink_feeds() -> list[str]:
+    """Get list of GMX markets that do NOT have public Chainlink price feeds.
+
+    These 84 markets require OraclePriceUpdate event collection from
+    GMX EventEmitter contract to build OHLCV candles.
+
+    :return: List of GMX market symbols without Chainlink feeds
+    """
+    return [
+        "0G",
+        "ADA",
+        "AERO",
+        "AI16Z",
+        "AIXBT",
+        "ALGO",
+        "ANIME",
+        "APT",
+        "AR",
+        "ASTER",
+        "AVNT",
+        "BERA",
+        "BOME",
+        "BRETT",
+        "CAKE",
+        "CHZ",
+        "CRO",
+        "CVX",
+        "DASH",
+        "DOLO",
+        "DOT",
+        "DYDX",
+        "EIGEN",
+        "ENA",
+        "FARTCOIN",
+        "FET",
+        "FLOKI",
+        "HBAR",
+        "HYPE",
+        "ICP",
+        "INJ",
+        "IP",
+        "JTO",
+        "JUP",
+        "KAS",
+        "KTA",
+        "LINEA",
+        "LIT",
+        "MELANIA",
+        "MEME",
+        "MEW",
+        "MNT",
+        "MON",
+        "MOODENG",
+        "MORPHO",
+        "OKB",
+        "OM",
+        "ONDO",
+        "ORDI",
+        "PENGU",
+        "PI",
+        "PUMP",
+        "RENDER",
+        "S",
+        "SATS",
+        "SEI",
+        "SKY",
+        "SPX6900",
+        "STX",
+        "SUI",
+        "SYRUP",
+        "TAO",
+        "TIA",
+        "TON",
+        "TRUMP",
+        "TRX",
+        "USDe",
+        "VIRTUAL",
+        "VVV",
+        "WELL",
+        "WLD",
+        "WLFI",
+        "XAUT",
+        "XAUT.v2",
+        "XLM",
+        "XMR",
+        "XPL",
+        "ZEC",
+        "ZORA",
+        "ZRO",
+        "tBTC",
+    ]
+
+
 @dataclass
 class DaemonConfig:
     """Configuration for periodic data collection daemon.
@@ -80,6 +173,10 @@ class DaemonConfig:
     :param health_check_port: Port for health check HTTP endpoint
     :param log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
     :param dry_run: If True, don't save data (testing only)
+    :param collect_non_chainlink: If True, collect non-Chainlink markets via oracle events
+    :param hypersync_api_token: Optional HyperSync API token for authentication
+    :param hypersync_endpoint: HyperSync API endpoint URL
+    :param enable_adaptive_gap_detection: If True, query API for actual data range to detect data loss
     """
 
     collection_interval_minutes: int = 60
@@ -91,6 +188,10 @@ class DaemonConfig:
     health_check_port: int = 8080
     log_level: str = "INFO"
     dry_run: bool = False
+    collect_non_chainlink: bool = False
+    hypersync_api_token: str | None = None
+    hypersync_endpoint: str = "https://arbitrum.hypersync.xyz"
+    enable_adaptive_gap_detection: bool = True
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -130,6 +231,10 @@ class DaemonConfig:
             HEALTH_CHECK_PORT: Health check port (default: 8080)
             LOG_LEVEL: Logging level (default: INFO)
             DRY_RUN: Dry run mode - don't save data (default: false)
+            COLLECT_NON_CHAINLINK: Enable hybrid collection for non-Chainlink markets (default: false)
+            HYPERSYNC_API_TOKEN: Optional HyperSync API token
+            HYPERSYNC_ENDPOINT: HyperSync API endpoint (default: https://arbitrum.hypersync.xyz)
+            ENABLE_ADAPTIVE_GAP_DETECTION: Enable API-aware gap detection to detect data loss (default: true)
 
         :return: DaemonConfig instance
         :raises ValueError: If required environment variables are missing
@@ -186,6 +291,20 @@ class DaemonConfig:
         dry_run_str = os.getenv("DRY_RUN", "false").lower()
         dry_run = dry_run_str in ("true", "1", "yes")
 
+        # Optional - collect non-Chainlink markets via oracle events
+        collect_non_chainlink_str = os.getenv("COLLECT_NON_CHAINLINK", "false").lower()
+        collect_non_chainlink = collect_non_chainlink_str in ("true", "1", "yes")
+
+        # Optional - HyperSync configuration
+        hypersync_api_token = os.getenv("HYPERSYNC_API_TOKEN")
+        hypersync_endpoint = os.getenv(
+            "HYPERSYNC_ENDPOINT", "https://arbitrum.hypersync.xyz"
+        )
+
+        # Optional - adaptive gap detection (enabled by default)
+        adaptive_gap_str = os.getenv("ENABLE_ADAPTIVE_GAP_DETECTION", "true").lower()
+        enable_adaptive_gap_detection = adaptive_gap_str in ("true", "1", "yes")
+
         return cls(
             collection_interval_minutes=collection_interval_minutes,
             output_dir=output_dir,
@@ -196,4 +315,8 @@ class DaemonConfig:
             health_check_port=health_check_port,
             log_level=log_level,
             dry_run=dry_run,
+            collect_non_chainlink=collect_non_chainlink,
+            hypersync_api_token=hypersync_api_token,
+            hypersync_endpoint=hypersync_endpoint,
+            enable_adaptive_gap_detection=enable_adaptive_gap_detection,
         )

@@ -37,6 +37,9 @@ from gmx_historical_data.gmx_api_integration import (
 )
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
 from gmx_historical_data.gap_analyzer import DataGapAnalyzer
+from gmx_historical_data.daemon.config import get_gmx_markets_without_chainlink_feeds
+from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector, GapStatus
+from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
 
 
 class DataCollector:
@@ -76,8 +79,68 @@ class DataCollector:
         # Gap analyzer
         self.gap_analyzer = DataGapAnalyzer()
 
+        # Adaptive gap detection for sliding window awareness
+        if use_gmx_api and self.gmx_fetcher:
+            self.adaptive_gap_detector = AdaptiveGapDetector(
+                storage=self.storage,
+                gmx_fetcher=self.gmx_fetcher,
+            )
+            self.data_loss_handler = DataLossHandler()
+        else:
+            self.adaptive_gap_detector = None
+            self.data_loss_handler = None
+
         # Ensure directories exist
         config.ensure_directories()
+
+    def check_and_report_data_loss(self, symbol: str) -> dict[str, any]:
+        """Check for data loss across all timeframes for a symbol.
+
+        Uses adaptive gap detection to identify if GMX API's sliding window
+        has moved past our stored data, resulting in permanent data loss.
+
+        :param symbol: Token symbol (e.g., 'ETH')
+        :return: Dictionary with data loss info per timeframe
+        """
+        from gmx_historical_data.config import TIMEFRAMES
+
+        if not self.adaptive_gap_detector:
+            return {}
+
+        results = {}
+        for timeframe in TIMEFRAMES:
+            try:
+                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(
+                    symbol, timeframe
+                )
+                results[timeframe] = {
+                    "status": gap_result.status.value,
+                    "needs_fetch": gap_result.needs_fetch,
+                    "has_data_loss": gap_result.has_data_loss,
+                    "our_latest": gap_result.our_latest,
+                    "api_earliest": gap_result.api_earliest,
+                    "api_latest": gap_result.api_latest,
+                    "lost_candles": gap_result.lost_candles_estimate,
+                    "lost_timespan": gap_result.lost_timespan,
+                }
+
+                # Handle data loss
+                if gap_result.has_data_loss and self.data_loss_handler:
+                    event = self.data_loss_handler.handle_gap_result(
+                        symbol, timeframe, gap_result
+                    )
+                    if event:
+                        console.print(
+                            f"  [red bold]DATA LOSS[/red bold] {timeframe}: "
+                            f"~{gap_result.lost_candles_estimate} candles lost "
+                            f"({gap_result.lost_timespan})"
+                        )
+
+            except Exception as e:
+                console.print(f"  [yellow]Warning: Could not check {timeframe}: {e}[/yellow]")
+                results[timeframe] = {"error": str(e)}
+
+        return results
 
     async def collect_symbol(
         self,
@@ -95,6 +158,23 @@ class DataCollector:
                 f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED
             )
         )
+
+        # Step 0: Check for data loss (adaptive gap detection)
+        if self.adaptive_gap_detector:
+            console.print("\n[bold]Checking for data gaps (sliding window awareness)...[/bold]")
+            gap_info = self.check_and_report_data_loss(symbol)
+
+            # Summarize gap status
+            data_loss_count = sum(1 for tf, info in gap_info.items() if info.get("has_data_loss"))
+            no_gap_count = sum(1 for tf, info in gap_info.items() if info.get("status") == "no_gap")
+
+            if data_loss_count > 0:
+                console.print(f"  [red]⚠ Data loss detected in {data_loss_count} timeframe(s)[/red]")
+            if no_gap_count > 0:
+                console.print(f"  [green]✓ {no_gap_count} timeframe(s) are up to date[/green]")
+            if no_gap_count < len(gap_info) - data_loss_count:
+                needs_update = len(gap_info) - no_gap_count - data_loss_count
+                console.print(f"  [cyan]→ {needs_update} timeframe(s) need incremental update[/cyan]")
 
         # Step 1: Fetch GMX data (all timeframes in parallel)
         console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
@@ -214,7 +294,14 @@ class DataCollector:
                         )
                     except Exception as e:
                         console.print(f"[red]✗ Aggregator discovery failed: {e}[/red]")
+                        console.print(f"[cyan]  Falling back to oracle events for historical data...[/cyan]")
                         chainlink_feed_address = None  # Disable Chainlink backfill
+
+                        # Try oracle event fallback for this symbol
+                        try:
+                            await self._collect_symbol_via_oracle_fallback(symbol)
+                        except Exception as fallback_e:
+                            console.print(f"[yellow]  Oracle fallback also failed: {fallback_e}[/yellow]")
 
                     if chainlink_feed_address:
                         # Determine start block
@@ -378,6 +465,102 @@ class DataCollector:
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
+    async def _collect_symbol_via_oracle_fallback(
+        self,
+        symbol: str,
+        start_block: int | None = None,
+        end_block: int | None = None,
+    ) -> None:
+        """Fallback collection for a single symbol via oracle events.
+
+        Used when GMX API or Chainlink collection fails.
+
+        :param symbol: Token symbol
+        :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
+        :param end_block: Ending block (default: latest)
+        """
+        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+        from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+        from gmx_historical_data.oracle_event_aggregator import aggregate_oracle_events_to_ohlcv
+
+        # Initialize oracle collector
+        oracle_collector = OraclePriceCollector(
+            hypersync_endpoint=self.config.hypersync_endpoint,
+            rpc_url=self.config.rpc_url,
+            api_token=self.config.hypersync_api_token,
+        )
+
+        # Initialize token mapper
+        token_mapper = GMXTokenMapper(self.web3)
+
+        # Get token address for the symbol
+        try:
+            token_mapping = token_mapper.get_all_token_mapping()
+        except Exception as e:
+            console.print(f"  [red]Failed to get token mapping: {e}[/red]")
+            return
+
+        # Find the token address for this symbol
+        symbol_upper = symbol.upper()
+        token_address = None
+        for addr, sym in token_mapping.items():
+            if sym.upper() == symbol_upper:
+                token_address = addr
+                break
+
+        if not token_address:
+            console.print(f"  [yellow]No token address found for {symbol} in oracle mapping[/yellow]")
+            return
+
+        # Get token decimals for price conversion
+        token_decimals = token_mapper.get_decimals_for_symbol(symbol_upper) or 18
+        console.print(f"  [dim]Found token address:[/dim] {token_address} ({token_decimals} decimals)")
+
+        # Determine block range
+        start = start_block or GMX_V2_GENESIS_BLOCK
+
+        # Collect oracle events for this token
+        try:
+            events = await oracle_collector.collect_oracle_events(
+                start_block=start,
+                end_block=end_block,
+                token_addresses=[token_address],
+            )
+        except Exception as e:
+            console.print(f"  [red]Failed to collect oracle events: {e}[/red]")
+            return
+
+        if not events:
+            console.print(f"  [yellow]No oracle events found for {symbol}[/yellow]")
+            return
+
+        console.print(f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events")
+
+        # Aggregate to OHLCV
+        for timeframe in TIMEFRAMES:
+            try:
+                ohlcv = aggregate_oracle_events_to_ohlcv(
+                    events, timeframe, symbol, token_decimals=token_decimals
+                )
+
+                if ohlcv.empty:
+                    continue
+
+                # Merge with existing data
+                existing = self.storage.read_candles(timeframe, symbol)
+                if not existing.empty:
+                    merged = pd.concat([existing, ohlcv], ignore_index=True)
+                    merged = merged.sort_values("timestamp").drop_duplicates(
+                        subset=["timestamp"], keep="last"
+                    )
+                else:
+                    merged = ohlcv
+
+                self.storage.save_candles(merged, timeframe, symbol)
+                console.print(f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles via oracle fallback")
+
+            except Exception as e:
+                console.print(f"  [red]✗ {timeframe} oracle aggregation failed: {e}[/red]")
 
     async def collect_all_symbols(
         self,
@@ -566,6 +749,167 @@ class DataCollector:
         console.print()
         console.print(summary_table)
 
+    async def collect_non_chainlink_markets(
+        self,
+        start_block: int | None = None,
+        end_block: int | None = None,
+    ) -> None:
+        """Collect data for non-Chainlink markets via OraclePriceUpdate events.
+
+        Uses GMX oracle events from EventEmitter to build OHLCV candles for
+        the 84 markets that don't have Chainlink price feeds.
+
+        :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
+        :param end_block: Ending block (default: latest)
+        """
+        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+        from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+        from gmx_historical_data.oracle_event_aggregator import aggregate_oracle_events_to_ohlcv
+
+        console.print(Panel(
+            "[bold magenta]Non-Chainlink Market Collection[/bold magenta]\n\n"
+            "Collecting OHLCV data from OraclePriceUpdate events for markets\n"
+            "without Chainlink price feeds.",
+            box=box.ROUNDED,
+        ))
+
+        # Initialize oracle collector
+        console.print("\n[bold]Initializing oracle price collector...[/bold]")
+        oracle_collector = OraclePriceCollector(
+            hypersync_endpoint=self.config.hypersync_endpoint,
+            rpc_url=self.config.rpc_url,
+            api_token=self.config.hypersync_api_token,
+        )
+
+        # Initialize token mapper
+        token_mapper = GMXTokenMapper(self.web3)
+
+        # Get non-Chainlink token mapping
+        try:
+            token_mapping = token_mapper.get_non_chainlink_tokens()
+        except Exception as e:
+            console.print(f"[red]Failed to get token mapping: {e}[/red]")
+            return
+
+        if not token_mapping:
+            console.print("[yellow]No non-Chainlink tokens found[/yellow]")
+            return
+
+        console.print(f"[green]✓[/green] Found [cyan]{len(token_mapping)}[/cyan] non-Chainlink markets")
+
+        # Get token decimals for price conversion
+        try:
+            token_decimals_map = token_mapper.get_token_decimals()
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not get token decimals: {e}. Using default 18.[/yellow]")
+            token_decimals_map = {}
+
+        # List markets
+        market_list = ", ".join(sorted(set(token_mapping.values())))
+        console.print(f"[dim]Markets: {market_list}[/dim]\n")
+
+        # Determine block range
+        start = start_block or GMX_V2_GENESIS_BLOCK
+        console.print(f"[bold]Collecting oracle events...[/bold]")
+        console.print(f"  [dim]Start block:[/dim] {start:,}")
+        console.print(f"  [dim]End block:[/dim] {end_block or 'latest'}")
+
+        # Collect ALL oracle events at once (efficient batch query)
+        token_addresses = list(token_mapping.keys())
+        try:
+            events = await oracle_collector.collect_oracle_events(
+                start_block=start,
+                end_block=end_block,
+                token_addresses=token_addresses,
+            )
+        except Exception as e:
+            console.print(f"[red]Failed to collect oracle events: {e}[/red]")
+            return
+
+        if not events:
+            console.print("[yellow]No oracle events found[/yellow]")
+            return
+
+        console.print(f"[green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events")
+
+        # Group events by token
+        events_by_token: dict[str, list] = defaultdict(list)
+        for event in events:
+            events_by_token[event.token.lower()].append(event)
+
+        console.print(f"[dim]Events span {len(events_by_token)} unique tokens[/dim]\n")
+
+        # Aggregate to OHLCV per symbol
+        total = len(events_by_token)
+        successful = 0
+        failed = 0
+        failed_symbols = []
+
+        console.print("[bold]Aggregating to OHLCV candles...[/bold]")
+
+        for token_addr, token_events in events_by_token.items():
+            symbol = token_mapping.get(token_addr)
+            if not symbol:
+                continue
+
+            # Skip excluded symbols
+            if symbol in EXCLUDED_SYMBOLS:
+                console.print(f"[dim]Skipping {symbol} (excluded)[/dim]")
+                continue
+
+            # Get decimals for this token (default 18 if not found)
+            decimals = token_decimals_map.get(symbol, 18)
+            console.print(f"\n[cyan]{symbol}[/cyan]: {len(token_events):,} events ({decimals} decimals)")
+
+            try:
+                for timeframe in TIMEFRAMES:
+                    ohlcv = aggregate_oracle_events_to_ohlcv(
+                        token_events, timeframe, symbol, token_decimals=decimals
+                    )
+
+                    if ohlcv.empty:
+                        continue
+
+                    # Merge with existing data
+                    existing = self.storage.read_candles(timeframe, symbol)
+                    if not existing.empty:
+                        merged = pd.concat([existing, ohlcv], ignore_index=True)
+                        merged = merged.sort_values("timestamp").drop_duplicates(
+                            subset=["timestamp"], keep="last"
+                        )
+                    else:
+                        merged = ohlcv
+
+                    self.storage.save_candles(merged, timeframe, symbol)
+                    console.print(f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles")
+
+                successful += 1
+
+            except Exception as e:
+                console.print(f"  [red]✗ Error: {e}[/red]")
+                failed += 1
+                failed_symbols.append(symbol)
+
+        # Summary
+        summary_table = Table(
+            title="Non-Chainlink Collection Summary", box=box.ROUNDED, show_header=False
+        )
+        summary_table.add_column("Status", style="bold")
+        summary_table.add_column("Count", justify="right")
+
+        summary_table.add_row(
+            "[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]"
+        )
+        summary_table.add_row("[red]✗ Failed[/red]", f"[red]{failed}/{total}[/red]")
+        if failed_symbols:
+            summary_table.add_row(
+                "[yellow]Failed symbols[/yellow]",
+                f"[yellow]{', '.join(failed_symbols)}[/yellow]",
+            )
+
+        console.print()
+        console.print(summary_table)
+
 
 def cli(
     full: bool = typer.Option(
@@ -620,6 +964,11 @@ def cli(
         "--use-events",
         help="Use event-based collection (index GMX position events) instead of oracle-based",
     ),
+    collect_non_chainlink: bool = typer.Option(
+        True,
+        "--collect-non-chainlink/--no-collect-non-chainlink",
+        help="Collect data for markets without Chainlink feeds using OraclePriceUpdate events (enabled by default)",
+    ),
     concurrency: int = typer.Option(
         1,
         "--concurrency",
@@ -630,15 +979,20 @@ def cli(
 ) -> None:
     """Collect GMX historical price data.
 
+    By default, collects BOTH Chainlink markets (34) and non-Chainlink markets (84).
+
     Examples:
-        # Full historical collection for ETH
-        gmx_historical_data --full --symbol ETH --output-dir ./data
+        # Full historical collection for ETH (Chainlink market)
+        gmx_historical_data collect --full --symbol ETH --output-dir ./data
+
+        # Full collection for all 118 markets (Chainlink + non-Chainlink)
+        gmx_historical_data collect --full --output-dir ./data
 
         # Incremental update for all symbols
-        gmx_historical_data --update --output-dir ./data
+        gmx_historical_data collect --update --output-dir ./data
 
-        # Full collection for all symbols
-        gmx_historical_data --full --output-dir ./data
+        # Collect only Chainlink markets (skip non-Chainlink)
+        gmx_historical_data collect --full --no-collect-non-chainlink --output-dir ./data
     """
     # Validate arguments
     if not full and not update:
@@ -689,19 +1043,32 @@ def cli(
     # Run collection
     try:
         if symbol:
-            # Check if symbol is excluded
+            # Single symbol collection
             symbol_upper = symbol.upper()
             if symbol_upper in EXCLUDED_SYMBOLS:
                 console.print(f"[yellow]Warning: {symbol_upper} is excluded (deprecated/problematic)[/yellow]")
                 console.print(f"[dim]Skipping collection for {symbol_upper}[/dim]")
                 raise typer.Exit(0)
 
-            if use_events:
+            # Check if symbol is non-Chainlink
+            non_chainlink_symbols = get_gmx_markets_without_chainlink_feeds()
+            if symbol_upper in non_chainlink_symbols:
+                # Non-Chainlink symbol - use oracle events
+                console.print(f"[cyan]{symbol_upper} is a non-Chainlink market - using oracle events[/cyan]")
+                asyncio.run(
+                    collector.collect_non_chainlink_markets(
+                        start_block=start_block,
+                        end_block=end_block,
+                    )
+                )
+            elif use_events:
                 console.print("[red]Error: Single symbol collection with --use-events is not supported. Use collect_all_symbols instead.[/red]")
                 raise typer.Exit(1)
             else:
                 asyncio.run(collector.collect_symbol(symbol_upper, full=full))
         else:
+            # Collect all symbols
+            # Step 1: Collect Chainlink markets via GMX API
             asyncio.run(
                 collector.collect_all_symbols(
                     full=full,
@@ -709,6 +1076,16 @@ def cli(
                     use_events=use_events,
                 )
             )
+
+            # Step 2: Collect non-Chainlink markets via oracle events (if enabled)
+            if collect_non_chainlink:
+                console.print("\n")
+                asyncio.run(
+                    collector.collect_non_chainlink_markets(
+                        start_block=start_block,
+                        end_block=end_block,
+                    )
+                )
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Collection interrupted by user[/yellow]")
         raise typer.Exit(1)
@@ -797,12 +1174,286 @@ def verify_command(
     console.print()
 
 
+def debug_oracle_command(
+    symbol: Optional[str] = typer.Option(
+        None,
+        "--symbol",
+        help="Specific token symbol to debug (e.g., SUI, TAO). If not provided, lists all non-Chainlink markets.",
+    ),
+    rpc_url: Optional[str] = typer.Option(
+        None,
+        "--rpc-url",
+        envvar="JSON_RPC_ARBITRUM",
+        help="Arbitrum RPC URL",
+    ),
+    hypersync_token: Optional[str] = typer.Option(
+        None,
+        "--hypersync-token",
+        envvar="HYPERSYNC_API_TOKEN",
+        help="HyperSync API token",
+    ),
+    limit: int = typer.Option(
+        100,
+        "--limit",
+        help="Maximum number of events to show",
+    ),
+    show_raw: bool = typer.Option(
+        False,
+        "--show-raw",
+        help="Show raw event data for debugging parsing issues",
+    ),
+    concurrency: int = typer.Option(
+        4,
+        "--concurrency",
+        help="Number of parallel workers for block scanning (1-8)",
+    ),
+) -> None:
+    """Debug oracle events for non-Chainlink tokens.
+
+    Use this command to verify that OraclePriceUpdate events are being
+    emitted for a specific token, helpful for debugging collection issues.
+
+    Automatically fetches ALL historical events from GMX V2 genesis block.
+
+    Examples:
+        # List all non-Chainlink markets
+        gmx_historical_data debug-oracle
+
+        # Debug oracle events for SUI (fetches all historical data)
+        gmx_historical_data debug-oracle --symbol SUI
+
+        # Show raw event data for debugging
+        gmx_historical_data debug-oracle --symbol TAO --show-raw
+    """
+    import asyncio
+    from web3 import Web3
+    from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+    from gmx_historical_data.daemon.config import (
+        get_gmx_markets_with_chainlink_feeds,
+        get_gmx_markets_without_chainlink_feeds,
+    )
+
+    # Validate RPC URL
+    if not rpc_url:
+        console.print("[red]Error: RPC URL required. Set JSON_RPC_ARBITRUM env var or use --rpc-url[/red]")
+        raise typer.Exit(1)
+
+    web3 = Web3(Web3.HTTPProvider(rpc_url))
+
+    # Initialize token mapper
+    console.print("[bold]Initializing GMX token mapper...[/bold]")
+    try:
+        token_mapper = GMXTokenMapper(web3)
+        all_tokens = token_mapper.get_all_token_mapping()
+        non_chainlink_tokens = token_mapper.get_non_chainlink_tokens()
+        chainlink_tokens = token_mapper.get_chainlink_tokens()
+    except Exception as e:
+        console.print(f"[red]Failed to initialize token mapper: {e}[/red]")
+        raise typer.Exit(1)
+
+    # If no symbol, just list markets
+    if not symbol:
+        console.print()
+        console.print(Panel(
+            f"[bold cyan]GMX Market Summary[/bold cyan]\n\n"
+            f"Total markets: {len(all_tokens)}\n"
+            f"Chainlink markets: {len(chainlink_tokens)}\n"
+            f"Non-Chainlink markets: {len(non_chainlink_tokens)}",
+            box=box.ROUNDED,
+        ))
+
+        # Show Chainlink markets
+        chainlink_table = Table(title="Chainlink Markets (GMX API)", box=box.ROUNDED)
+        chainlink_table.add_column("Symbol", style="green")
+        chainlink_table.add_column("Token Address", style="dim")
+
+        for addr, sym in sorted(chainlink_tokens.items(), key=lambda x: x[1]):
+            chainlink_table.add_row(sym, addr)
+
+        console.print(chainlink_table)
+        console.print()
+
+        # Show non-Chainlink markets
+        non_chainlink_table = Table(title="Non-Chainlink Markets (Oracle Events)", box=box.ROUNDED)
+        non_chainlink_table.add_column("Symbol", style="magenta")
+        non_chainlink_table.add_column("Token Address", style="dim")
+
+        for addr, sym in sorted(non_chainlink_tokens.items(), key=lambda x: x[1]):
+            non_chainlink_table.add_row(sym, addr)
+
+        console.print(non_chainlink_table)
+        return
+
+    # Debug specific symbol
+    symbol_upper = symbol.upper()
+    console.print(f"\n[bold]Debugging oracle events for {symbol_upper}...[/bold]")
+
+    # Find token address
+    token_address = None
+    is_chainlink = False
+
+    for addr, sym in all_tokens.items():
+        if sym.upper() == symbol_upper:
+            token_address = addr
+            is_chainlink = sym in [s for _, s in chainlink_tokens.items()]
+            break
+
+    if not token_address:
+        console.print(f"[red]Token {symbol_upper} not found in GMX markets[/red]")
+        raise typer.Exit(1)
+
+    # Get token decimals for price conversion
+    token_decimals = token_mapper.get_decimals_for_symbol(symbol_upper) or 18
+
+    console.print(f"  [dim]Token address:[/dim] {token_address}")
+    console.print(f"  [dim]Token decimals:[/dim] {token_decimals}")
+    console.print(f"  [dim]Market type:[/dim] {'Chainlink' if is_chainlink else 'Non-Chainlink (Oracle Events)'}")
+
+    if is_chainlink:
+        console.print(f"\n[yellow]Note: {symbol_upper} is a Chainlink market.[/yellow]")
+        console.print("[yellow]It uses GMX API for data, but may also have oracle events.[/yellow]")
+
+    # Validate HyperSync token
+    if not hypersync_token:
+        console.print("[red]Error: HyperSync token required. Set HYPERSYNC_API_TOKEN env var or use --hypersync-token[/red]")
+        raise typer.Exit(1)
+
+    # Get current block
+    try:
+        current_block = web3.eth.block_number
+        console.print(f"  [dim]Current block:[/dim] {current_block:,}")
+    except Exception as e:
+        console.print(f"[red]Failed to get current block: {e}[/red]")
+        raise typer.Exit(1)
+
+    # Start from GMX V2 genesis block to get ALL historical events
+    start_block = GMX_V2_GENESIS_BLOCK
+    console.print(f"  [dim]Scanning from GMX V2 genesis:[/dim] block {start_block:,} to {current_block:,}")
+
+    # Collect oracle events
+    total_blocks = current_block - start_block
+    console.print(f"\n[bold]Fetching oracle events from HyperSync...[/bold]")
+    console.print(f"  [dim]Block range:[/dim] {total_blocks:,} blocks to scan")
+    console.print(f"  [dim]Using {concurrency} parallel workers for faster collection[/dim]")
+    console.print()
+
+    from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+
+    oracle_collector = OraclePriceCollector(
+        hypersync_endpoint="https://arbitrum.hypersync.xyz",
+        rpc_url=rpc_url,
+        api_token=hypersync_token,
+    )
+
+    # Progress tracking with Rich live display
+    progress_status = {"message": "Starting..."}
+
+    def progress_callback(msg: str):
+        progress_status["message"] = msg
+        # Also print to console for logging
+        console.print(f"  [dim]{msg}[/dim]")
+
+    async def fetch_events():
+        return await oracle_collector.collect_oracle_events(
+            start_block=start_block,
+            end_block=current_block,
+            token_addresses=[token_address],
+            concurrency=concurrency,
+            progress_callback=progress_callback,
+        )
+
+    try:
+        events = asyncio.run(fetch_events())
+    except Exception as e:
+        console.print(f"[red]Failed to fetch oracle events: {e}[/red]")
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+    if not events:
+        console.print(f"[yellow]No oracle events found for {symbol_upper} in the specified block range[/yellow]")
+        console.print("[dim]Try using --start-block with an earlier block number[/dim]")
+        return
+
+    console.print(f"[green]✓[/green] Found [cyan]{len(events):,}[/cyan] oracle events")
+
+    # Show raw event data if requested (for debugging)
+    if show_raw and events:
+        console.print("\n[bold]Raw Event Data (first event):[/bold]")
+        first_event = events[0]
+        console.print(f"  block_number: {first_event.block_number}")
+        console.print(f"  block_timestamp: {first_event.block_timestamp}")
+        console.print(f"  transaction_hash: {first_event.transaction_hash}")
+        console.print(f"  log_index: {first_event.log_index}")
+        console.print(f"  token: {first_event.token}")
+        console.print(f"  provider: {first_event.provider}")
+        console.print(f"  min_price (raw): {first_event.min_price}")
+        console.print(f"  max_price (raw): {first_event.max_price}")
+        console.print(f"  timestamp: {first_event.timestamp}")
+        console.print()
+
+    # Show sample events
+    events_table = Table(title=f"Oracle Events for {symbol_upper} (showing up to {limit})", box=box.ROUNDED)
+    events_table.add_column("Block", style="dim", justify="right")
+    events_table.add_column("Timestamp", style="cyan")
+    events_table.add_column("Min Price", justify="right")
+    events_table.add_column("Max Price", justify="right")
+    events_table.add_column("Mid Price (USD)", justify="right", style="green")
+
+    from datetime import datetime
+    from gmx_historical_data.oracle_event_aggregator import get_price_divisor
+
+    # Calculate divisor based on token decimals
+    price_divisor = get_price_divisor(token_decimals)
+
+    for event in events[:limit]:
+        timestamp = datetime.utcfromtimestamp(event.block_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+        min_price = event.min_price / price_divisor
+        max_price = event.max_price / price_divisor
+        mid_price = (min_price + max_price) / 2
+
+        events_table.add_row(
+            f"{event.block_number:,}",
+            timestamp,
+            f"${min_price:,.4f}",
+            f"${max_price:,.4f}",
+            f"${mid_price:,.4f}",
+        )
+
+    console.print()
+    console.print(events_table)
+
+    if len(events) > limit:
+        console.print(f"\n[dim]... and {len(events) - limit} more events (use --limit to see more)[/dim]")
+
+    # Show summary statistics
+    console.print()
+    min_prices = [e.min_price / price_divisor for e in events]
+    max_prices = [e.max_price / price_divisor for e in events]
+    mid_prices = [(e.min_price + e.max_price) / 2 / price_divisor for e in events]
+
+    summary_table = Table(title="Price Summary", box=box.ROUNDED, show_header=False)
+    summary_table.add_column("Metric", style="dim")
+    summary_table.add_column("Value", style="cyan")
+
+    summary_table.add_row("Events count", f"{len(events):,}")
+    summary_table.add_row("Price range", f"${min(mid_prices):,.4f} - ${max(mid_prices):,.4f}")
+    summary_table.add_row("Latest price", f"${mid_prices[-1]:,.4f}")
+    summary_table.add_row("Block range", f"{events[0].block_number:,} - {events[-1].block_number:,}")
+
+    first_ts = datetime.utcfromtimestamp(events[0].block_timestamp)
+    last_ts = datetime.utcfromtimestamp(events[-1].block_timestamp)
+    summary_table.add_row("Time range", f"{first_ts} - {last_ts}")
+
+    console.print(summary_table)
+
+
 # Create Typer app
 app = typer.Typer(help="GMX Historical Data Collection CLI")
 
 # Register commands
 app.command(name="collect")(cli)
 app.command(name="verify")(verify_command)
+app.command(name="debug-oracle")(debug_oracle_command)
 
 
 def main() -> None:
