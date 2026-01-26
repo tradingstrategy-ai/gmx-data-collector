@@ -478,20 +478,40 @@ optional arguments:
 
 ### HyperSync Installation Issues
 
-If you encounter build errors when installing `hypersync`, ensure Rust is installed (see Prerequisites) and use PEP 517 build:
+If you encounter build errors when installing `hypersync`, ensure Rust and system dependencies are installed.
 
+**Ubuntu/Debian:**
 ```bash
-# Build wheel with PEP 517 (recommended)
-pip wheel --no-cache-dir --use-pep517 "hypersync==0.7.17"
-pip install hypersync-0.7.17-*.whl
+# Install all required dependencies
+sudo apt-get update
+sudo apt-get install build-essential capnproto libcapnp-dev
 
-# Or install directly
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+**macOS:**
+```bash
+# Install Xcode command line tools
+xcode-select --install
+
+# Install Cap'n Proto via Homebrew
+brew install capnp
+
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+**Then install hypersync:**
+```bash
 pip install --no-cache-dir --use-pep517 "hypersync==0.7.17"
 ```
 
-Common issues:
-- **"cargo not found"**: Install Rust toolchain (see Prerequisites)
-- **Build fails on macOS**: Ensure Xcode command line tools are installed: `xcode-select --install`
+Common errors:
+- **"cargo not found"**: Install Rust toolchain
+- **"capnp: No such file or directory"**: Install Cap'n Proto (`apt-get install capnproto libcapnp-dev` on Ubuntu, `brew install capnp` on macOS)
 - **Build fails on Linux**: Install build essentials: `apt-get install build-essential`
 
 ### "RPC URL required" Error
