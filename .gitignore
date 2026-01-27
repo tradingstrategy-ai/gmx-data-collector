@@ -121,6 +121,10 @@ docs/plans/
 *.svg
 plots/
 
+# Allow documentation images
+!docs/images/*.png
+!docs/images/*.jpg
+
 # Logs
 *.log
 logs/
