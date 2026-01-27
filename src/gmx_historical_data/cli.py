@@ -246,10 +246,10 @@ class DataCollector:
             console.print(f"  [dim]Mapped symbol:[/dim] {symbol} → {chainlink_symbol}")
         else:
             console.print(
-                f"  [yellow]○[/yellow] No Chainlink feed found - using GMX data only"
+                f"  [yellow]○[/yellow] No Chainlink feed found - will use oracle events for historical data"
             )
 
-        # Step 3: Calculate gap and backfill with Chainlink
+        # Step 3: Calculate gap and backfill with Chainlink or Oracle events
         chainlink_candles = {}
 
         if chainlink_feed_address:
@@ -300,6 +300,15 @@ class DataCollector:
                         # Try oracle event fallback for this symbol
                         try:
                             await self._collect_symbol_via_oracle_fallback(symbol)
+                            # Read back from storage into chainlink_candles
+                            # so the combining step can merge historical + GMX data
+                            for tf in TIMEFRAMES:
+                                stored_df = self.storage.read_candles(tf, symbol)
+                                if not stored_df.empty:
+                                    chainlink_candles[tf] = stored_df
+                                    console.print(
+                                        f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
+                                    )
                         except Exception as fallback_e:
                             console.print(f"[yellow]  Oracle fallback also failed: {fallback_e}[/yellow]")
 
@@ -427,6 +436,22 @@ class DataCollector:
                                 console.print(
                                     f"  [red]✗ RPC fallback also failed: {rpc_error}[/red]"
                                 )
+        else:
+            # No Chainlink feed - use oracle events for historical data
+            console.print(f"\n[bold]Backfilling with oracle events...[/bold]")
+            try:
+                await self._collect_symbol_via_oracle_fallback(symbol)
+                # Read back from storage into chainlink_candles
+                # so the combining step can merge historical + GMX data
+                for tf in TIMEFRAMES:
+                    stored_df = self.storage.read_candles(tf, symbol)
+                    if not stored_df.empty:
+                        chainlink_candles[tf] = stored_df
+                        console.print(
+                            f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
+                        )
+            except Exception as fallback_e:
+                console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
 
         # Step 4: Combine and save
         console.print("\n[bold]Saving combined candles...[/bold]")
