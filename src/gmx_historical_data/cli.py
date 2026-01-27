@@ -15,7 +15,7 @@ from web3 import Web3
 
 console = Console()
 
-from gmx_historical_data.config import CollectionConfig, TIMEFRAMES, GMX_V2_GENESIS_BLOCK, EXCLUDED_SYMBOLS
+from gmx_historical_data.config import CollectionConfig, TIMEFRAMES, GMX_V2_GENESIS_BLOCK, EXCLUDED_SYMBOLS, is_excluded_symbol
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
 from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
@@ -649,8 +649,8 @@ class DataCollector:
             for market_address, market_events in events_by_market.items():
                 symbol = address_to_symbol[market_address]
 
-                # Skip excluded symbols
-                if symbol in EXCLUDED_SYMBOLS:
+                # Skip excluded symbols (case-insensitive)
+                if is_excluded_symbol(symbol):
                     console.print(f"\n[dim]Skipping {symbol} (excluded)[/dim]")
                     continue
 
@@ -705,8 +705,8 @@ class DataCollector:
             console.print(f"\n[bold]Discovering GMX tokens...[/bold]")
             all_symbols = self.gmx_discovery.get_supported_symbols()
 
-            # Filter out excluded symbols
-            symbols = [s for s in all_symbols if s not in EXCLUDED_SYMBOLS]
+            # Filter out excluded symbols (case-insensitive)
+            symbols = [s for s in all_symbols if not is_excluded_symbol(s)]
             excluded_count = len(all_symbols) - len(symbols)
 
             console.print(
@@ -819,9 +819,9 @@ class DataCollector:
             console.print("[yellow]No non-Chainlink tokens found[/yellow]")
             return
 
-        # Get unique symbols
+        # Get unique symbols (filter excluded, case-insensitive)
         symbols = sorted(set(token_mapping.values()))
-        symbols = [s for s in symbols if s not in EXCLUDED_SYMBOLS]
+        symbols = [s for s in symbols if not is_excluded_symbol(s)]
 
         console.print(f"[green]✓[/green] Found [cyan]{len(symbols)}[/cyan] non-Chainlink markets")
 
@@ -1176,7 +1176,7 @@ def cli(
         if symbol:
             # Single symbol collection
             symbol_upper = symbol.upper()
-            if symbol_upper in EXCLUDED_SYMBOLS:
+            if is_excluded_symbol(symbol_upper):
                 console.print(f"[yellow]Warning: {symbol_upper} is excluded (deprecated/problematic)[/yellow]")
                 console.print(f"[dim]Skipping collection for {symbol_upper}[/dim]")
                 raise typer.Exit(0)

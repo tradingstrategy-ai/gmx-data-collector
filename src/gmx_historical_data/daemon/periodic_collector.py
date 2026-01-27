@@ -63,7 +63,7 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from web3 import Web3
 
-from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS, GMX_V2_GENESIS_BLOCK
+from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS, GMX_V2_GENESIS_BLOCK, is_excluded_symbol
 from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.gmx_api_integration import GMXDataFetcher, map_timeframe_to_gmx_period
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
@@ -181,9 +181,9 @@ class GMXPeriodicCollector:
             # Use only markets with Chainlink feeds (34 markets)
             symbols = get_gmx_markets_with_chainlink_feeds()
 
-            # Filter out excluded symbols
-            symbols = [s for s in symbols if s not in EXCLUDED_SYMBOLS]
-            symbols = [s for s in symbols if s not in self.config.excluded_symbols]
+            # Filter out excluded symbols (case-insensitive for global, direct check for config)
+            symbols = [s for s in symbols if not is_excluded_symbol(s)]
+            symbols = [s for s in symbols if s.upper() not in {e.upper() for e in self.config.excluded_symbols}]
 
             console.print(f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]")
             console.print(f"[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]")
@@ -500,8 +500,8 @@ class GMXPeriodicCollector:
                     progress.update(task, advance=1)
                     continue
 
-                # Skip excluded symbols
-                if symbol in EXCLUDED_SYMBOLS or symbol in self.config.excluded_symbols:
+                # Skip excluded symbols (case-insensitive)
+                if is_excluded_symbol(symbol) or symbol.upper() in {e.upper() for e in self.config.excluded_symbols}:
                     progress.update(task, advance=1)
                     continue
 

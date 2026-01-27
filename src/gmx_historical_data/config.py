@@ -88,6 +88,16 @@ GMX_V2_GENESIS_BLOCK = 120_000_000  # Aug 2023 (approximate)
 GMX_V2_GENESIS_TIMESTAMP = 1691366400  # Aug 7, 2023 00:00:00 UTC (approximate)
 
 # Excluded symbols (deprecated or problematic tokens)
+# Note: All symbols should be UPPERCASE for case-insensitive matching
 EXCLUDED_SYMBOLS = {
-    "APE_DEPRECATED",  # Deprecated APE market
+    "APE_DEPRECATED",  # Deprecated APE market (may appear as "APE_deprecated" in GMX metadata)
 }
+
+
+def is_excluded_symbol(symbol: str) -> bool:
+    """Check if a symbol is in the excluded list (case-insensitive).
+
+    :param symbol: Token symbol to check
+    :return: True if the symbol should be excluded
+    """
+    return symbol.upper() in EXCLUDED_SYMBOLS
