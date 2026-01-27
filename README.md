@@ -186,7 +186,7 @@ poetry run plot-gmx-data ETH --data-dir ./data --output-dir ./my_plots
 
 **Output:** All plots saved to `./plots/` by default (or your custom `--output-dir`).
 
-**Available timeframes:** 1min, 5min, 15min, 1h, 4h, 1D
+**Available timeframes:** 1m, 5m, 15m, 1h, 4h, 1d
 
 ### Example Plots
 
@@ -200,7 +200,7 @@ gmx_historical_data collect --full --symbol ARB --output-dir ./data
 
 # Generate example plots
 plot-gmx-data ETH --timeframe 1h --data-dir ./data
-plot-gmx-data BTC --timeframe 1D --data-dir ./data
+plot-gmx-data BTC --timeframe 1d --data-dir ./data
 plot-gmx-data ARB --timeframe 4h --data-dir ./data
 ```
 
@@ -215,7 +215,7 @@ Each plot shows:
 - Close price with high-low range overlay
 - Percentage returns over time
 
-Plots saved to: `./plots/ETH_1h_candles.png`, `./plots/BTC_1D_candles.png`, `./plots/ARB_4h_candles.png`
+Plots saved to: `./plots/ETH_1h_candles.png`, `./plots/BTC_1d_candles.png`, `./plots/ARB_4h_candles.png`
 
 ### Read Data Programmatically
 
@@ -234,7 +234,7 @@ candles_1h = storage.read_candles("1h", "ETH")
 print(f"Loaded {len(candles_1h)} 1h candles for ETH")
 
 # Read daily candles for BTC
-btc_daily = storage.read_candles("1D", "BTC")
+btc_daily = storage.read_candles("1d", "BTC")
 print(f"Loaded {len(btc_daily)} daily candles for BTC")
 ```
 
@@ -249,15 +249,15 @@ data/
 │       └── data.parquet
 ├── candles/arbitrum/               # Resampled OHLCV by token
 │   ├── ETH/
-│   │   ├── 1min.parquet
-│   │   ├── 5min.parquet
-│   │   ├── 15min.parquet
+│   │   ├── 1m.parquet
+│   │   ├── 5m.parquet
+│   │   ├── 15m.parquet
 │   │   ├── 1h.parquet
 │   │   ├── 4h.parquet
-│   │   └── 1D.parquet
+│   │   └── 1d.parquet
 │   ├── BTC/
-│   │   ├── 1min.parquet
-│   │   ├── 5min.parquet
+│   │   ├── 1m.parquet
+│   │   ├── 5m.parquet
 │   │   └── ...
 │   └── ARB/
 │       └── ...

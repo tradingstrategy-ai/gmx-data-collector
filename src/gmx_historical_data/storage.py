@@ -11,6 +11,7 @@ import pandas as pd
 
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
+from gmx_historical_data.config import TIMEFRAME_TO_FILENAME, FILENAME_TO_TIMEFRAME
 
 
 # Raw events schema
@@ -184,7 +185,7 @@ class ParquetStorage:
         """Save OHLCV candles to Parquet file.
 
         :param df: DataFrame with OHLCV data
-        :param timeframe: Timeframe string (e.g., '1min', '1h', '1D')
+        :param timeframe: Timeframe string (e.g., '1min', '1h', '1d')
         :param symbol: Token symbol (e.g., 'ETH')
         :return: Path to saved Parquet file
         """
@@ -203,8 +204,11 @@ class ParquetStorage:
         # Convert to Arrow table with schema
         table = pa.Table.from_pandas(df, schema=OHLCV_SCHEMA)
 
+        # Map timeframe to filename format (e.g., '1min' -> '1m')
+        filename = TIMEFRAME_TO_FILENAME.get(timeframe, timeframe)
+
         # Write to Parquet with compression
-        output_path = symbol_dir / f"{timeframe}.parquet"
+        output_path = symbol_dir / f"{filename}.parquet"
         pq.write_table(
             table,
             output_path,
@@ -221,11 +225,13 @@ class ParquetStorage:
     ) -> pd.DataFrame:
         """Read OHLCV candles from Parquet file.
 
-        :param timeframe: Timeframe string (e.g., '1min', '1h', '1D')
+        :param timeframe: Timeframe string (e.g., '1min', '1h', '1d')
         :param symbol: Token symbol (e.g., 'ETH')
         :return: DataFrame with OHLCV data
         """
-        candles_file = self.candles_dir / symbol / f"{timeframe}.parquet"
+        # Map timeframe to filename format (e.g., '1min' -> '1m')
+        filename = TIMEFRAME_TO_FILENAME.get(timeframe, timeframe)
+        candles_file = self.candles_dir / symbol / f"{filename}.parquet"
 
         if not candles_file.exists():
             return pd.DataFrame()

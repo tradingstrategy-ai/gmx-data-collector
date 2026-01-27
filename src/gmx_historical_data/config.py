@@ -57,9 +57,23 @@ class CollectionConfig:
         self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
 
-# Timeframes for OHLCV resampling
-# Note: Pandas 3.0+ uses lowercase for hour/day frequencies
-TIMEFRAMES = ["1min", "5min", "15min", "1h", "4h", "1D"]
+# Timeframes for OHLCV resampling (pandas format)
+# Uses "min" for minutes (pandas requirement), "h" for hours, "d" for days
+TIMEFRAMES = ["1min", "5min", "15min", "1h", "4h", "1d"]
+
+# Mapping from pandas timeframe to filename format
+# File naming uses short format: 1m, 5m, 15m, 1h, 4h, 1d
+TIMEFRAME_TO_FILENAME = {
+    "1min": "1m",
+    "5min": "5m",
+    "15min": "15m",
+    "1h": "1h",
+    "4h": "4h",
+    "1d": "1d",
+}
+
+# Reverse mapping for reading files
+FILENAME_TO_TIMEFRAME = {v: k for k, v in TIMEFRAME_TO_FILENAME.items()}
 
 # AnswerUpdated event signature
 ANSWER_UPDATED_TOPIC = (

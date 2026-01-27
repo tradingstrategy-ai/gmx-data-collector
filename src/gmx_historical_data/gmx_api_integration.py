@@ -132,16 +132,16 @@ def combine_gmx_and_chainlink_data(
 def map_timeframe_to_gmx_period(timeframe: str) -> str:
     """Map internal timeframe notation to GMX API period notation.
 
-    :param timeframe: Internal timeframe (e.g., '1min', '5min', '1h', '4h', '1D')
+    :param timeframe: Internal timeframe (e.g., '1min', '5min', '1h', '4h', '1d')
     :return: GMX API period string (e.g., '1m', '5m', '1h', '4h', '1d')
     """
-    # GMX uses 'm' for minutes instead of 'min' and lowercase 'd' for days
+    # GMX API uses 'm' for minutes, pandas uses 'min'
     mapping = {
         "1min": "1m",
         "5min": "5m",
         "15min": "15m",
         "1h": "1h",
         "4h": "4h",
-        "1D": "1d",  # GMX API expects lowercase 'd'
+        "1d": "1d",
     }
     return mapping.get(timeframe, timeframe)
