@@ -33,16 +33,24 @@ class FreqtradeExporter:
         symbols: list[str] | None = None,
         timeframes: list[str] | None = None,
         output_format: str = "feather",
+        trading_mode: str = "futures",
+        quote_currency: str = "USDC",
     ) -> dict[str, dict]:
         """Export GMX data to Freqtrade format.
 
         :param symbols: Specific symbols to export (default: all)
         :param timeframes: Specific timeframes to export (default: all)
         :param output_format: Output format ('feather' or 'parquet')
+        :param trading_mode: 'futures' or 'spot' (default: 'futures')
+        :param quote_currency: Quote/settlement currency (default: 'USDC')
         :return: Dict mapping symbol to export stats
         """
         # Create output directory
-        gmx_dir = self.output_dir / "gmx"
+        # For futures, create gmx/futures subdirectory
+        if trading_mode == "futures":
+            gmx_dir = self.output_dir / "gmx" / "futures"
+        else:
+            gmx_dir = self.output_dir / "gmx"
         gmx_dir.mkdir(parents=True, exist_ok=True)
 
         # Get symbols to export
@@ -75,7 +83,9 @@ class FreqtradeExporter:
                 ft_df = self._transform_dataframe(df)
 
                 # Generate filename
-                filename = self._get_freqtrade_filename(symbol, tf, output_format)
+                filename = self._get_freqtrade_filename(
+                    symbol, tf, output_format, trading_mode, quote_currency
+                )
                 output_path = gmx_dir / filename
 
                 # Save in requested format
@@ -122,15 +132,27 @@ class FreqtradeExporter:
         symbol: str,
         timeframe: str,
         fmt: str,
+        trading_mode: str = "futures",
+        quote_currency: str = "USDC",
     ) -> str:
         """Generate Freqtrade-compatible filename.
 
-        Format: {SYMBOL}_USD-{timeframe}.{format}
-        Example: ETH_USD-1h.feather
+        For futures: {BASE}_{QUOTE}_{SETTLE}-{timeframe}-futures.{format}
+        Example: ETH_USDC_USDC-1h-futures.feather (for ETH/USDC:USDC pair)
+
+        For spot: {BASE}_{QUOTE}-{timeframe}.{format}
+        Example: ETH_USDC-1h.feather
 
         :param symbol: Token symbol (e.g., 'ETH')
         :param timeframe: Timeframe (e.g., '1h')
         :param fmt: File format ('feather' or 'parquet')
+        :param trading_mode: 'futures' or 'spot'
+        :param quote_currency: Quote/settlement currency (default: 'USDC')
         :return: Filename string
         """
-        return f"{symbol}_USD-{timeframe}.{fmt}"
+        if trading_mode == "futures":
+            # Futures format: BASE_QUOTE_SETTLE-timeframe-futures.ext
+            return f"{symbol}_{quote_currency}_{quote_currency}-{timeframe}-futures.{fmt}"
+        else:
+            # Spot format: BASE_QUOTE-timeframe.ext
+            return f"{symbol}_{quote_currency}-{timeframe}.{fmt}"

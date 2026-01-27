@@ -18,7 +18,7 @@ gmx_historical_data collect --default --output-dir ./data --concurrency 5
 
 ## Installation
 
-**Prerequisites:** Python 3.11+, Rust toolchain (for hypersync)
+**Prerequisites:** Python 3.11 or 3.12 (recommended), Rust toolchain (for hypersync)
 
 ```bash
 # Install Rust (if needed)
@@ -102,6 +102,35 @@ data/
 
 ## Troubleshooting
 
+### Poetry Install Failing
+
+If `poetry install` hangs or fails:
+
+```bash
+# Clear poetry cache
+poetry cache clear pypi --all
+
+# Try with verbose output to see what's stuck
+poetry install -vvv
+
+# If dependency resolution is slow, try:
+poetry install --no-cache
+```
+
+If poetry can't find a compatible Python version:
+```bash
+# Check Python version (needs 3.11 or 3.12)
+python --version
+
+# Use pyenv to install correct version
+pyenv install 3.11
+pyenv local 3.11
+poetry env use python3.11
+poetry install
+```
+
+> **Note:** Python 3.13 requires additional workarounds. Use Python 3.11 or 3.12 for easiest installation.
+
 ### HyperSync Build Errors
 
 HyperSync requires Rust and Cap'n Proto. If `poetry install` fails:
@@ -126,14 +155,17 @@ sudo dnf install capnproto capnproto-devel
 
 **3. If still failing, try installing hypersync separately:**
 ```bash
-pip install hypersync --no-cache-dir
+pip install --no-cache-dir --use-pep517 "hypersync==0.7.17"
 poetry install
 ```
+
+> **Note:** hypersync 0.8.x has a build issue with a missing GitHub dependency. Use 0.7.x versions until this is resolved.
 
 **4. Common errors:**
 - `error: linker 'cc' not found` → Install build-essential/gcc
 - `capnp/capnp.h: No such file` → Install libcapnp-dev
 - `cargo not found` → Source cargo env: `source $HOME/.cargo/env`
+- `PyO3's maximum supported version` → Use Python 3.11 or 3.12, or set `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1`
 
 ### Rate Limits
 

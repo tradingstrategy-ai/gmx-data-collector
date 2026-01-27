@@ -52,16 +52,17 @@ def sample_storage():
 
 
 def test_export_creates_freqtrade_format(sample_storage):
-    """Test export creates files with correct freqtrade format."""
+    """Test export creates files with correct freqtrade futures format."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
         result = exporter.export()
 
-        # Check files created
-        gmx_dir = Path(output_dir) / "gmx"
-        assert gmx_dir.exists()
+        # Check files created in gmx/futures subdirectory
+        futures_dir = Path(output_dir) / "gmx" / "futures"
+        assert futures_dir.exists()
 
-        eth_1h = gmx_dir / "ETH_USD-1h.feather"
+        # Futures format: BASE_QUOTE_SETTLE-timeframe-futures.feather
+        eth_1h = futures_dir / "ETH_USDC_USDC-1h-futures.feather"
         assert eth_1h.exists()
 
         # Read and verify format
@@ -77,9 +78,9 @@ def test_export_specific_symbols(sample_storage):
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
         result = exporter.export(symbols=["ETH"])
 
-        gmx_dir = Path(output_dir) / "gmx"
-        assert (gmx_dir / "ETH_USD-1h.feather").exists()
-        assert not (gmx_dir / "BTC_USD-1h.feather").exists()
+        futures_dir = Path(output_dir) / "gmx" / "futures"
+        assert (futures_dir / "ETH_USDC_USDC-1h-futures.feather").exists()
+        assert not (futures_dir / "BTC_USDC_USDC-1h-futures.feather").exists()
 
 
 def test_export_specific_timeframes(sample_storage):
@@ -88,9 +89,9 @@ def test_export_specific_timeframes(sample_storage):
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
         result = exporter.export(timeframes=["1h"])
 
-        gmx_dir = Path(output_dir) / "gmx"
-        assert (gmx_dir / "ETH_USD-1h.feather").exists()
-        assert not (gmx_dir / "ETH_USD-4h.feather").exists()
+        futures_dir = Path(output_dir) / "gmx" / "futures"
+        assert (futures_dir / "ETH_USDC_USDC-1h-futures.feather").exists()
+        assert not (futures_dir / "ETH_USDC_USDC-4h-futures.feather").exists()
 
 
 def test_export_returns_stats(sample_storage):
@@ -111,5 +112,5 @@ def test_date_column_is_datetime(sample_storage):
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
         exporter.export()
 
-        df = pd.read_feather(Path(output_dir) / "gmx" / "ETH_USD-1h.feather")
+        df = pd.read_feather(Path(output_dir) / "gmx" / "futures" / "ETH_USDC_USDC-1h-futures.feather")
         assert pd.api.types.is_datetime64_any_dtype(df["date"])
