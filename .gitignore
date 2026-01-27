@@ -97,6 +97,10 @@ $RECYCLE.BIN/
 .env.local
 .env.*.local
 
+# Config files (may contain credentials, but allow examples)
+configs/*.json
+!configs/*.example.json
+
 # Data directories (GMX historical data)
 data/
 test_data/
