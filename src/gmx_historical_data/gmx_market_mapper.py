@@ -45,8 +45,10 @@ class GMXMarketMapper:
             for market_addr, market_data in available_markets.items():
                 # Normalize address to lowercase
                 addr_lower = market_addr.lower()
-                # Extract symbol from market_data dict
-                symbol = market_data['market_symbol']
+                # Extract base symbol from market_metadata (not market_symbol which may have suffix)
+                # market_symbol may have suffixes like "ETH2", "ARB2" for different markets
+                metadata = market_data.get("market_metadata", {})
+                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
                 mapping[addr_lower] = symbol
 
             self._mapping_cache = mapping

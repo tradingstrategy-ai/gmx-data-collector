@@ -55,8 +55,11 @@ class GMXTokenMapper:
                 # Normalize address to lowercase
                 addr_lower = index_token.lower()
 
-                # Extract symbol from market_data
-                symbol = market_data.get("market_symbol", "")
+                # Extract base token symbol from market_metadata (not market_symbol)
+                # market_symbol may have suffixes like "ETH2", "ARB2" for different markets
+                # but market_metadata.symbol has the base symbol that GMX API accepts
+                metadata = market_data.get("market_metadata", {})
+                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
                 if symbol:
                     mapping[addr_lower] = symbol
 
@@ -166,8 +169,9 @@ class GMXTokenMapper:
 
             decimals_map = {}
             for market_data in available_markets.values():
-                symbol = market_data.get("market_symbol", "")
+                # Use base symbol from market_metadata (not market_symbol which may have suffix)
                 metadata = market_data.get("market_metadata", {})
+                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
                 decimals = metadata.get("decimals")
 
                 if symbol and decimals is not None:

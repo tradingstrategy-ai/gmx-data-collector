@@ -92,7 +92,7 @@ class DataVerifier:
             "15min": pd.Timedelta(minutes=15),
             "1h": pd.Timedelta(hours=1),
             "4h": pd.Timedelta(hours=4),
-            "1D": pd.Timedelta(days=1),
+            "1d": pd.Timedelta(days=1),
         }
         expected_interval = intervals.get(timeframe)
         if not expected_interval:
@@ -146,7 +146,7 @@ class DataVerifier:
             "15min": 96,
             "1h": 24,
             "4h": 6,
-            "1D": 1,
+            "1d": 1,
         }
         expected_per_day = intervals_per_day.get(timeframe, 24)
         expected_total = time_range * expected_per_day

@@ -274,9 +274,10 @@ def plot_symbol(
         # Plot all timeframes overview
         plot_multiple_timeframes(storage, symbol, output_dir)
 
-        # Plot detailed candles for all timeframes
-        for tf in TIMEFRAMES:
-            plot_candles(storage, symbol, tf, output_dir)
+        # Also plot 1h and 1d in detail
+        for tf in ["1h", "1d"]:
+            if tf in TIMEFRAMES:
+                plot_candles(storage, symbol, tf, output_dir)
 
 
 def cli(

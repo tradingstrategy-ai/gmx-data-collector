@@ -1057,18 +1057,18 @@ def cli(
       • Non-Chainlink Markets: OraclePriceUpdate events via HyperSync + eth_defi
 
     TIMEFRAMES COLLECTED:
-      1min, 5min, 15min, 1h, 4h, 1D
+      1min, 5min, 15min, 1h, 4h, 1d
 
     OUTPUT STRUCTURE:
       data/
       └── candles/
           ├── ETH/
-          │   ├── 1min.parquet
-          │   ├── 5min.parquet
-          │   ├── 15min.parquet
+          │   ├── 1m.parquet
+          │   ├── 5m.parquet
+          │   ├── 15m.parquet
           │   ├── 1h.parquet
           │   ├── 4h.parquet
-          │   └── 1D.parquet
+          │   └── 1d.parquet
           ├── BTC/
           │   └── ...
           └── SUI/

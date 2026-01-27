@@ -96,7 +96,7 @@ class GapDetector:
         "15min": timedelta(minutes=15),
         "1h": timedelta(hours=1),
         "4h": timedelta(hours=4),
-        "1D": timedelta(days=1),
+        "1d": timedelta(days=1),
     }
 
     def __init__(self, storage: ParquetStorage):
@@ -245,7 +245,7 @@ class AdaptiveGapDetector:
         "15min": timedelta(minutes=15),
         "1h": timedelta(hours=1),
         "4h": timedelta(hours=4),
-        "1D": timedelta(days=1),
+        "1d": timedelta(days=1),
     }
 
     def __init__(self, storage: ParquetStorage, gmx_fetcher):
