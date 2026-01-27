@@ -102,19 +102,47 @@ data/
 
 ## Troubleshooting
 
-**HyperSync build errors:**
+### HyperSync Build Errors
+
+HyperSync requires Rust and Cap'n Proto. If `poetry install` fails:
+
+**1. Install Rust toolchain:**
 ```bash
-# Ubuntu
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+**2. Install Cap'n Proto:**
+```bash
+# Ubuntu/Debian
 sudo apt-get install build-essential capnproto libcapnp-dev
 
 # macOS
 brew install capnp
+
+# Fedora/RHEL
+sudo dnf install capnproto capnproto-devel
 ```
 
-**Rate limits:** Add multiple HyperSync tokens
+**3. If still failing, try installing hypersync separately:**
+```bash
+pip install hypersync --no-cache-dir
+poetry install
+```
+
+**4. Common errors:**
+- `error: linker 'cc' not found` → Install build-essential/gcc
+- `capnp/capnp.h: No such file` → Install libcapnp-dev
+- `cargo not found` → Source cargo env: `source $HOME/.cargo/env`
+
+### Rate Limits
+
+Add multiple HyperSync tokens (comma-separated):
 ```bash
 export HYPERSYNC_API_TOKEN="token1,token2,token3"
 ```
+
+Get free tokens at https://envio.dev
 
 ## Development
 
