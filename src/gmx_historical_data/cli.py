@@ -753,10 +753,10 @@ class DataCollector:
         start_block: int | None = None,
         end_block: int | None = None,
     ) -> None:
-        """Collect data for non-Chainlink markets via OraclePriceUpdate events.
+        """Collect data for non-Chainlink markets via GMX API + OraclePriceUpdate events.
 
-        Uses GMX oracle events from EventEmitter to build OHLCV candles for
-        the 84 markets that don't have Chainlink price feeds.
+        Uses GMX API for recent data (~6 months) and backfills historical data
+        with OraclePriceUpdate events from GMX EventEmitter.
 
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
@@ -767,13 +767,14 @@ class DataCollector:
 
         console.print(Panel(
             "[bold magenta]Non-Chainlink Market Collection[/bold magenta]\n\n"
-            "Collecting OHLCV data from OraclePriceUpdate events for markets\n"
-            "without Chainlink price feeds.",
+            "Collecting OHLCV data using:\n"
+            "  • GMX API: Recent data (~6 months)\n"
+            "  • OraclePriceUpdate events: Historical backfill",
             box=box.ROUNDED,
         ))
 
         # Initialize oracle collector (pure HyperSync, no RPC needed)
-        console.print("\n[bold]Initializing oracle price collector...[/bold]")
+        console.print("\n[bold]Initializing collectors...[/bold]")
         oracle_collector = OraclePriceCollector(
             hypersync_endpoint=self.config.hypersync_endpoint,
             api_token=self.config.hypersync_api_token,
@@ -793,7 +794,11 @@ class DataCollector:
             console.print("[yellow]No non-Chainlink tokens found[/yellow]")
             return
 
-        console.print(f"[green]✓[/green] Found [cyan]{len(token_mapping)}[/cyan] non-Chainlink markets")
+        # Get unique symbols
+        symbols = sorted(set(token_mapping.values()))
+        symbols = [s for s in symbols if s not in EXCLUDED_SYMBOLS]
+
+        console.print(f"[green]✓[/green] Found [cyan]{len(symbols)}[/cyan] non-Chainlink markets")
 
         # Get token decimals for price conversion
         try:
@@ -802,13 +807,53 @@ class DataCollector:
             console.print(f"[yellow]Warning: Could not get token decimals: {e}. Using default 18.[/yellow]")
             token_decimals_map = {}
 
-        # List markets
-        market_list = ", ".join(sorted(set(token_mapping.values())))
-        console.print(f"[dim]Markets: {market_list}[/dim]\n")
+        # Step 1: Fetch GMX API data for all symbols
+        console.print("\n[bold]Step 1: Fetching recent data from GMX API...[/bold]")
+        gmx_data_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
+
+        if self.use_gmx_api and self.gmx_fetcher:
+            for symbol in symbols:
+                console.print(f"\n[cyan]{symbol}[/cyan]")
+                gmx_candles = {}
+
+                async def fetch_timeframe(tf: str, sym: str, timeout: float = 120.0):
+                    """Fetch GMX data for a single timeframe."""
+                    gmx_period = map_timeframe_to_gmx_period(tf)
+                    try:
+                        df = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self.gmx_fetcher.fetch_gmx_candles, sym, gmx_period
+                            ),
+                            timeout=timeout,
+                        )
+                        return tf, df
+                    except asyncio.TimeoutError:
+                        return tf, pd.DataFrame()
+                    except Exception:
+                        return tf, pd.DataFrame()
+
+                # Fetch all timeframes in parallel
+                tasks = [fetch_timeframe(tf, symbol) for tf in TIMEFRAMES]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for result in results:
+                    if isinstance(result, Exception):
+                        continue
+                    timeframe, gmx_df = result
+                    if not gmx_df.empty:
+                        gmx_candles[timeframe] = gmx_df
+                        console.print(f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles from GMX API")
+
+                if gmx_candles:
+                    gmx_data_by_symbol[symbol] = gmx_candles
+                else:
+                    console.print(f"  [yellow]○[/yellow] No GMX API data available")
+
+        # Step 2: Collect oracle events for historical backfill
+        console.print("\n[bold]Step 2: Collecting oracle events for historical backfill...[/bold]")
 
         # Determine block range
         start = start_block or GMX_V2_GENESIS_BLOCK
-        console.print(f"[bold]Collecting oracle events...[/bold]")
         console.print(f"  [dim]Start block:[/dim] {start:,}")
         console.print(f"  [dim]End block:[/dim] {end_block or 'latest'}")
 
@@ -822,64 +867,91 @@ class DataCollector:
             )
         except Exception as e:
             console.print(f"[red]Failed to collect oracle events: {e}[/red]")
-            return
+            events = []
 
-        if not events:
-            console.print("[yellow]No oracle events found[/yellow]")
-            return
-
-        console.print(f"[green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events")
+        if events:
+            console.print(f"[green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events")
+        else:
+            console.print("[yellow]No oracle events found - using GMX API data only[/yellow]")
 
         # Group events by token
         events_by_token: dict[str, list] = defaultdict(list)
         for event in events:
             events_by_token[event.token.lower()].append(event)
 
-        console.print(f"[dim]Events span {len(events_by_token)} unique tokens[/dim]\n")
+        # Build reverse mapping: symbol -> token_addr
+        symbol_to_token = {}
+        for addr, sym in token_mapping.items():
+            symbol_to_token[sym] = addr
 
-        # Aggregate to OHLCV per symbol
-        total = len(events_by_token)
+        # Step 3: Combine GMX API + Oracle events per symbol
+        console.print("\n[bold]Step 3: Combining GMX API + Oracle data...[/bold]")
+
+        total = len(symbols)
         successful = 0
         failed = 0
         failed_symbols = []
 
-        console.print("[bold]Aggregating to OHLCV candles...[/bold]")
+        for symbol in symbols:
+            console.print(f"\n[cyan]{symbol}[/cyan]")
 
-        for token_addr, token_events in events_by_token.items():
-            symbol = token_mapping.get(token_addr)
-            if not symbol:
-                continue
+            # Get GMX API data
+            gmx_candles = gmx_data_by_symbol.get(symbol, {})
 
-            # Skip excluded symbols
-            if symbol in EXCLUDED_SYMBOLS:
-                console.print(f"[dim]Skipping {symbol} (excluded)[/dim]")
-                continue
+            # Get oracle events for this symbol
+            token_addr = symbol_to_token.get(symbol, "").lower()
+            token_events = events_by_token.get(token_addr, [])
 
-            # Get decimals for this token (default 18 if not found)
+            # Get decimals for this token
             decimals = token_decimals_map.get(symbol, 18)
-            console.print(f"\n[cyan]{symbol}[/cyan]: {len(token_events):,} events ({decimals} decimals)")
+
+            if not gmx_candles and not token_events:
+                console.print(f"  [yellow]○[/yellow] No data available (GMX API or oracle events)")
+                failed += 1
+                failed_symbols.append(symbol)
+                continue
 
             try:
                 for timeframe in TIMEFRAMES:
-                    ohlcv = aggregate_oracle_events_to_ohlcv(
-                        token_events, timeframe, symbol, token_decimals=decimals
-                    )
+                    gmx_df = gmx_candles.get(timeframe)
+                    oracle_df = None
 
-                    if ohlcv.empty:
-                        continue
-
-                    # Merge with existing data
-                    existing = self.storage.read_candles(timeframe, symbol)
-                    if not existing.empty:
-                        merged = pd.concat([existing, ohlcv], ignore_index=True)
-                        merged = merged.sort_values("timestamp").drop_duplicates(
-                            subset=["timestamp"], keep="last"
+                    # Aggregate oracle events to OHLCV
+                    if token_events:
+                        oracle_df = aggregate_oracle_events_to_ohlcv(
+                            token_events, timeframe, symbol, token_decimals=decimals
                         )
-                    else:
-                        merged = ohlcv
+                        if oracle_df.empty:
+                            oracle_df = None
 
-                    self.storage.save_candles(merged, timeframe, symbol)
-                    console.print(f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles")
+                    # Combine: Oracle (historical) + GMX (recent)
+                    if gmx_df is not None and oracle_df is not None:
+                        # Filter oracle data to only before GMX coverage
+                        gmx_earliest = gmx_df["timestamp"].min()
+                        oracle_df_filtered = oracle_df[oracle_df["timestamp"] < gmx_earliest]
+
+                        if not oracle_df_filtered.empty:
+                            combined = pd.concat([oracle_df_filtered, gmx_df], ignore_index=True)
+                            combined = combined.sort_values("timestamp").drop_duplicates(
+                                subset=["timestamp"], keep="last"
+                            )
+                            self.storage.save_candles(combined, timeframe, symbol)
+                            console.print(
+                                f"  [green]✓[/green] {timeframe}: {len(combined):,} candles "
+                                f"(oracle: {len(oracle_df_filtered):,} + GMX: {len(gmx_df):,})"
+                            )
+                        else:
+                            # GMX covers everything
+                            self.storage.save_candles(gmx_df, timeframe, symbol)
+                            console.print(f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles (GMX API)")
+                    elif gmx_df is not None:
+                        # Only GMX data
+                        self.storage.save_candles(gmx_df, timeframe, symbol)
+                        console.print(f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles (GMX API)")
+                    elif oracle_df is not None:
+                        # Only oracle data
+                        self.storage.save_candles(oracle_df, timeframe, symbol)
+                        console.print(f"  [green]✓[/green] {timeframe}: {len(oracle_df):,} candles (oracle events)")
 
                 successful += 1
 
@@ -902,7 +974,7 @@ class DataCollector:
         if failed_symbols:
             summary_table.add_row(
                 "[yellow]Failed symbols[/yellow]",
-                f"[yellow]{', '.join(failed_symbols)}[/yellow]",
+                f"[yellow]{', '.join(failed_symbols[:10])}{'...' if len(failed_symbols) > 10 else ''}[/yellow]",
             )
 
         console.print()
