@@ -1,6 +1,6 @@
 # GMX Historical Data Collection
 
-Collect historical price data for all 118 GMX V2 tokens.
+Collect historical price data for all `118 GMX V2` tokens.
 
 ## Quick Start
 
@@ -33,17 +33,17 @@ poetry install
 ### Collect Data
 
 ```bash
-# Recommended: Collect all 118 tokens
+# Time Consuming(ETA 5-6 hours): Collect all 118 tokens
 gmx_historical_data collect --default --output-dir ./data --concurrency 5
 
-# Single token
+# Recommended: Single token
 gmx_historical_data collect --default --symbol ETH --output-dir ./data
 
 # Verify data quality
 gmx_historical_data verify --output-dir ./data
 ```
 
-The `--default` flag fetches recent data from GMX API (~6 months) and backfills historical data from Chainlink oracles where available.
+The `--default` flag fetches recent data from GMX API (~6 months) and backfills historical data from Chainlink oracles where available. **N.B.** There are only around 34 tokens which have the chainlink price feeds as of making this tutorial.
 
 ### Export for Freqtrade
 
@@ -73,6 +73,8 @@ cp configs/adxmomentum_gmx.example.json configs/adxmomentum_gmx.json
 # Edit configs/adxmomentum_gmx.json with your settings
 ```
 
+**N.B.**: The following step is very essential as we are saving the data as [`parquet`](https://en.wikipedia.org/wiki/Apache_Parquet) file but `freqtrade` expects the data as [`feather`](https://en.wikipedia.org/wiki/Feather_file_format) file format.
+
 ```bash
 # Export data to freqtrade format
 gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./user_data/data/gmx \
@@ -85,34 +87,7 @@ gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./user_data/
     --strategy ADXMomentum --timerange 20210713-
 ```
 
-Example strategy: `examples/strategies/ADXMomentum.py`
-
-### Plot Results
-
-Generate interactive HTML charts for analysis:
-
-```bash
-# Plot profit/loss over time
-./freqtrade-gmx plot-profit --config configs/adxmomentum_gmx.example.json --auto-open
-
-# Plot individual pair with indicators
-./freqtrade-gmx plot-dataframe --config configs/adxmomentum_gmx.example.json \
-    --strategy ADXMomentum -p BTC/USDC:USDC --auto-open
-```
-
-Charts are saved to `user_data/plot/`:
-- `freqtrade-profit-plot.html` - Cumulative profit chart
-- `freqtrade-plot-BTC_USDC_USDC-1h.html` - Price chart with indicators and trade markers
-
-#### Profit Chart
-
-![Profit Chart](docs/images/profit-chart.png)
-
-#### Price Chart with Indicators
-
-![Price Chart](docs/images/price-chart-1.png)
-![Price Chart](docs/images/price-chart-2.png)
-
+You can keep the timerange blank. Then freqtrade will run the backtest on the highest range of data available.
 
 ### Example Backtest Results
 
@@ -225,6 +200,37 @@ Backtested 2021-07-14 11:00:00 -> 2026-01-27 15:00:00 | Max open trades : 2
 ```
 
 ~4.5 years of backtesting data with 760 trades using ADXMomentum strategy.
+
+
+Example strategy: `examples/strategies/ADXMomentum.py`
+
+### Plot Results
+
+Generate interactive HTML charts for analysis:
+
+```bash
+# Plot profit/loss over time
+./freqtrade-gmx plot-profit --config configs/adxmomentum_gmx.example.json --auto-open
+
+# Plot individual pair with indicators
+./freqtrade-gmx plot-dataframe --config configs/adxmomentum_gmx.example.json \
+    --strategy ADXMomentum -p BTC/USDC:USDC --auto-open
+```
+
+Charts are saved to `user_data/plot/`:
+- `freqtrade-profit-plot.html` - Cumulative profit chart
+- `freqtrade-plot-BTC_USDC_USDC-1h.html` - Price chart with indicators and trade markers
+
+#### Profit Chart
+
+![Profit Chart](docs/images/profit-chart.png)
+
+#### Price Chart with Indicators
+
+![Price Chart](docs/images/price-chart-1.png)
+![Price Chart](docs/images/price-chart-2.png)
+
+
 
 ## Data Structure
 
