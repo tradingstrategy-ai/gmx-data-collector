@@ -13,7 +13,27 @@ from rich.panel import Panel
 from rich import box
 
 from gmx_historical_data.storage import ParquetStorage
-from gmx_historical_data.config import TIMEFRAMES
+from gmx_historical_data.config import TIMEFRAMES, TIMEFRAME_TO_FILENAME
+
+
+def normalize_timeframe(tf: str) -> str:
+    """Normalize timeframe input to internal format.
+
+    Accepts various formats and converts to internal pandas-compatible format.
+
+    :param tf: Timeframe string (e.g., '1m', '1min', '1D', '1d')
+    :return: Normalized timeframe (e.g., '1min', '1d')
+    """
+    # Map common user inputs to internal format
+    mapping = {
+        # Short format to pandas format
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        # Uppercase D to lowercase
+        "1D": "1d",
+    }
+    return mapping.get(tf, tf)
 
 console = Console()
 
@@ -254,8 +274,8 @@ def plot_symbol(
         # Plot all timeframes overview
         plot_multiple_timeframes(storage, symbol, output_dir)
 
-        # Also plot 1h and 1D in detail
-        for tf in ["1h", "1D"]:
+        # Also plot 1h and 1d in detail
+        for tf in ["1h", "1d"]:
             if tf in TIMEFRAMES:
                 plot_candles(storage, symbol, tf, output_dir)
 
@@ -315,12 +335,16 @@ def cli(
         console.print("[red]Error: Cannot specify both a symbol and --all[/red]")
         raise typer.Exit(1)
 
-    # Validate timeframe
-    if timeframe and timeframe not in TIMEFRAMES:
-        console.print(
-            f"[red]Error: Invalid timeframe '{timeframe}'. Must be one of: {', '.join(TIMEFRAMES)}[/red]"
-        )
-        raise typer.Exit(1)
+    # Normalize and validate timeframe
+    if timeframe:
+        timeframe = normalize_timeframe(timeframe)
+        if timeframe not in TIMEFRAMES:
+            # Show both internal and user-friendly formats
+            user_formats = [TIMEFRAME_TO_FILENAME.get(tf, tf) for tf in TIMEFRAMES]
+            console.print(
+                f"[red]Error: Invalid timeframe '{timeframe}'. Must be one of: {', '.join(user_formats)}[/red]"
+            )
+            raise typer.Exit(1)
 
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
