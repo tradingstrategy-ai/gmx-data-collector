@@ -62,8 +62,8 @@ GMX requires [gmx-ccxt-freqtrade](https://github.com/tradingstrategy-ai/gmx-ccxt
 > **Important:** Install `freqtrade` and `web3-ethereum-defi` in a separate isolated environment. Freqtrade requires `pandas<3.0` which conflicts with this project's `pandas>=3.0`. Even though `web3-ethereum-defi` is a project dependency, a clean install in an isolated venv avoids dependency conflicts.
 
 ```bash
-# Create isolated environment for freqtrade
-python -m venv .venv && source .venv/bin/activate
+# Create isolated environment for freqtrade (not .venv - that's for poetry)
+python -m venv freqtrade-venv && source freqtrade-venv/bin/activate
 pip install "freqtrade>=2025.11" "web3-ethereum-defi[web3v7,ccxt]>=0.38"
 
 # Run backtest with GMX support

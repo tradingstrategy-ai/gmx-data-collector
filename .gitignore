@@ -63,6 +63,7 @@ venv/
 ENV/
 env/
 .venv
+freqtrade-venv/
 
 # IDEs
 .vscode/
