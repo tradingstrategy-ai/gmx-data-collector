@@ -82,8 +82,8 @@ def test_aggregate_events_to_ohlcv():
     candle1 = ohlcv.iloc[0]
     assert candle1["open"] == 3000.0  # First trade
     assert candle1["high"] == 3100.0  # Max in bucket
-    assert candle1["low"] == 3000.0   # Min in bucket
-    assert candle1["close"] == 3100.0 # Last trade
+    assert candle1["low"] == 3000.0  # Min in bucket
+    assert candle1["close"] == 3100.0  # Last trade
     assert candle1["symbol"] == "ETH"
 
     # Second candle (12:01)
@@ -212,8 +212,8 @@ def test_aggregate_identical_timestamps():
     candle = ohlcv.iloc[0]
     assert candle["open"] == 3000.0  # First
     assert candle["high"] == 3100.0  # Max
-    assert candle["low"] == 2950.0   # Min
-    assert candle["close"] == 2950.0 # Last
+    assert candle["low"] == 2950.0  # Min
+    assert candle["close"] == 2950.0  # Last
     assert candle["symbol"] == "ETH"
 
 

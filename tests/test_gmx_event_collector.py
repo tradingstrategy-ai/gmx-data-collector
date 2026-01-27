@@ -16,7 +16,9 @@ def test_get_position_event_hashes():
 
     assert len(hashes) == 2  # PositionIncrease, PositionDecrease
     assert all(isinstance(h, str) for h in hashes)
-    assert all(len(h) == 66 for h in hashes)  # 0x prefix (2 chars) + 32 bytes (64 hex chars) = 66 chars total
+    assert all(
+        len(h) == 66 for h in hashes
+    )  # 0x prefix (2 chars) + 32 bytes (64 hex chars) = 66 chars total
     assert all(h.startswith("0x") for h in hashes)
 
 
@@ -39,7 +41,9 @@ async def test_collect_events_small_range():
 
     # Collect from a small recent range (last 1000 blocks)
     # This should complete quickly
-    end_block = 180_000_000  # Recent block on Arbitrum (as of Jan 2025 - may need updating)
+    end_block = (
+        180_000_000  # Recent block on Arbitrum (as of Jan 2025 - may need updating)
+    )
     start_block = end_block - 1000
 
     try:

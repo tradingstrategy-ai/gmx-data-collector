@@ -8,8 +8,7 @@ from gmx_historical_data.config import CollectionConfig
 
 
 @pytest.mark.skipif(
-    not os.getenv("JSON_RPC_ARBITRUM"),
-    reason="Requires JSON_RPC_ARBITRUM env var"
+    not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var"
 )
 @pytest.mark.asyncio
 async def test_hybrid_collection_eth():
@@ -51,12 +50,14 @@ async def test_hybrid_collection_eth():
 
 
 @pytest.mark.skipif(
-    not os.getenv("JSON_RPC_ARBITRUM"),
-    reason="Requires JSON_RPC_ARBITRUM env var"
+    not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var"
 )
 def test_gmx_v2_genesis_constant():
     """Test GMX V2 genesis constant is defined."""
-    from gmx_historical_data.config import GMX_V2_GENESIS_BLOCK, GMX_V2_GENESIS_TIMESTAMP
+    from gmx_historical_data.config import (
+        GMX_V2_GENESIS_BLOCK,
+        GMX_V2_GENESIS_TIMESTAMP,
+    )
 
     # Verify constants are set
     assert GMX_V2_GENESIS_BLOCK == 120_000_000
@@ -64,6 +65,9 @@ def test_gmx_v2_genesis_constant():
 
     # Verify timestamp corresponds to Aug 2023
     import datetime
-    dt = datetime.datetime.fromtimestamp(GMX_V2_GENESIS_TIMESTAMP, tz=datetime.timezone.utc)
+
+    dt = datetime.datetime.fromtimestamp(
+        GMX_V2_GENESIS_TIMESTAMP, tz=datetime.timezone.utc
+    )
     assert dt.year == 2023
     assert dt.month == 8

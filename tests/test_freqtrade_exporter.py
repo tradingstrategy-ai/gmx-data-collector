@@ -112,5 +112,7 @@ def test_date_column_is_datetime(sample_storage):
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
         exporter.export()
 
-        df = pd.read_feather(Path(output_dir) / "gmx" / "futures" / "ETH_USDC_USDC-1h-futures.feather")
+        df = pd.read_feather(
+            Path(output_dir) / "gmx" / "futures" / "ETH_USDC_USDC-1h-futures.feather"
+        )
         assert pd.api.types.is_datetime64_any_dtype(df["date"])

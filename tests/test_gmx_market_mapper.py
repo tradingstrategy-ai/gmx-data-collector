@@ -9,6 +9,7 @@ from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
 def web3():
     """Web3 instance for Arbitrum."""
     import os
+
     rpc_url = os.environ.get("JSON_RPC_ARBITRUM")
     if not rpc_url:
         pytest.skip("JSON_RPC_ARBITRUM not set")

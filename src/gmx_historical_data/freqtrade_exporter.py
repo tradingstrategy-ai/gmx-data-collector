@@ -152,7 +152,9 @@ class FreqtradeExporter:
         """
         if trading_mode == "futures":
             # Futures format: BASE_QUOTE_SETTLE-timeframe-futures.ext
-            return f"{symbol}_{quote_currency}_{quote_currency}-{timeframe}-futures.{fmt}"
+            return (
+                f"{symbol}_{quote_currency}_{quote_currency}-{timeframe}-futures.{fmt}"
+            )
         else:
             # Spot format: BASE_QUOTE-timeframe.ext
             return f"{symbol}_{quote_currency}-{timeframe}.{fmt}"
