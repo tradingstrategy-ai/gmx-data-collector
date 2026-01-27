@@ -1,0 +1,115 @@
+"""Tests for Freqtrade exporter."""
+
+import tempfile
+from pathlib import Path
+
+import pandas as pd
+import pyarrow.feather as feather
+import pytest
+
+from gmx_historical_data.storage import ParquetStorage
+from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+
+
+@pytest.fixture
+def sample_storage():
+    """Create storage with sample data."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        storage = ParquetStorage(Path(tmpdir))
+
+        # Create test candles for ETH
+        df_eth = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(
+                    [
+                        "2024-01-01 00:00:00",
+                        "2024-01-01 01:00:00",
+                        "2024-01-01 02:00:00",
+                    ],
+                    utc=True,
+                ),
+                "open": [2000.0, 2010.0, 2005.0],
+                "high": [2050.0, 2060.0, 2055.0],
+                "low": [1990.0, 2000.0, 1995.0],
+                "close": [2010.0, 2005.0, 2020.0],
+                "symbol": ["ETH", "ETH", "ETH"],
+            }
+        )
+        storage.save_candles(df_eth, "1h", "ETH")
+        storage.save_candles(df_eth, "4h", "ETH")
+
+        # Create test candles for BTC
+        df_btc = df_eth.assign(
+            symbol="BTC",
+            open=[40000.0, 40100.0, 40050.0],
+            high=[40500.0, 40600.0, 40550.0],
+            low=[39900.0, 40000.0, 39950.0],
+            close=[40100.0, 40050.0, 40200.0],
+        )
+        storage.save_candles(df_btc, "1h", "BTC")
+
+        yield Path(tmpdir)
+
+
+def test_export_creates_freqtrade_format(sample_storage):
+    """Test export creates files with correct freqtrade format."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        result = exporter.export()
+
+        # Check files created
+        gmx_dir = Path(output_dir) / "gmx"
+        assert gmx_dir.exists()
+
+        eth_1h = gmx_dir / "ETH_USD-1h.feather"
+        assert eth_1h.exists()
+
+        # Read and verify format
+        df = pd.read_feather(eth_1h)
+        assert list(df.columns) == ["date", "open", "high", "low", "close", "volume"]
+        assert len(df) == 3
+        assert df["volume"].iloc[0] == 0.0
+
+
+def test_export_specific_symbols(sample_storage):
+    """Test export filters by symbol."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        result = exporter.export(symbols=["ETH"])
+
+        gmx_dir = Path(output_dir) / "gmx"
+        assert (gmx_dir / "ETH_USD-1h.feather").exists()
+        assert not (gmx_dir / "BTC_USD-1h.feather").exists()
+
+
+def test_export_specific_timeframes(sample_storage):
+    """Test export filters by timeframe."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        result = exporter.export(timeframes=["1h"])
+
+        gmx_dir = Path(output_dir) / "gmx"
+        assert (gmx_dir / "ETH_USD-1h.feather").exists()
+        assert not (gmx_dir / "ETH_USD-4h.feather").exists()
+
+
+def test_export_returns_stats(sample_storage):
+    """Test export returns statistics."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        result = exporter.export()
+
+        assert "ETH" in result
+        assert "BTC" in result
+        assert result["ETH"]["files"] == 2  # 1h and 4h
+        assert result["BTC"]["files"] == 1  # only 1h
+
+
+def test_date_column_is_datetime(sample_storage):
+    """Test date column is proper datetime type."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        exporter.export()
+
+        df = pd.read_feather(Path(output_dir) / "gmx" / "ETH_USD-1h.feather")
+        assert pd.api.types.is_datetime64_any_dtype(df["date"])

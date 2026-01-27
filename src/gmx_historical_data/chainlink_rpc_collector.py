@@ -27,6 +27,7 @@ class ChainlinkRound:
     :param updated_at: Round update timestamp
     :param answered_in_round: Round ID when answer was computed
     """
+
     round_id: int
     answer: int
     started_at: int
@@ -53,10 +54,10 @@ class ChainlinkRPCCollector:
                 {"name": "answer", "type": "int256"},
                 {"name": "startedAt", "type": "uint256"},
                 {"name": "updatedAt", "type": "uint256"},
-                {"name": "answeredInRound", "type": "uint80"}
+                {"name": "answeredInRound", "type": "uint80"},
             ],
             "stateMutability": "view",
-            "type": "function"
+            "type": "function",
         },
         {
             "inputs": [{"name": "_roundId", "type": "uint80"}],
@@ -66,25 +67,25 @@ class ChainlinkRPCCollector:
                 {"name": "answer", "type": "int256"},
                 {"name": "startedAt", "type": "uint256"},
                 {"name": "updatedAt", "type": "uint256"},
-                {"name": "answeredInRound", "type": "uint80"}
+                {"name": "answeredInRound", "type": "uint80"},
             ],
             "stateMutability": "view",
-            "type": "function"
+            "type": "function",
         },
         {
             "inputs": [],
             "name": "decimals",
             "outputs": [{"name": "", "type": "uint8"}],
             "stateMutability": "view",
-            "type": "function"
+            "type": "function",
         },
         {
             "inputs": [],
             "name": "description",
             "outputs": [{"name": "", "type": "string"}],
             "stateMutability": "view",
-            "type": "function"
-        }
+            "type": "function",
+        },
     ]
 
     def __init__(self, web3: Web3):
@@ -95,10 +96,7 @@ class ChainlinkRPCCollector:
         self.web3 = web3
 
     def _call_with_retry(
-        self,
-        contract_function,
-        max_retries: int = 3,
-        backoff: float = 1.0
+        self, contract_function, max_retries: int = 3, backoff: float = 1.0
     ):
         """Call contract function with retry logic.
 
@@ -120,7 +118,7 @@ class ChainlinkRPCCollector:
                     raise
 
                 if attempt < max_retries - 1:
-                    wait_time = backoff * (2 ** attempt)
+                    wait_time = backoff * (2**attempt)
                     time.sleep(wait_time)
                     continue
 
@@ -135,8 +133,7 @@ class ChainlinkRPCCollector:
         try:
             aggregator_address = Web3.to_checksum_address(aggregator_address)
             contract = self.web3.eth.contract(
-                address=aggregator_address,
-                abi=self.AGGREGATOR_V3_ABI
+                address=aggregator_address, abi=self.AGGREGATOR_V3_ABI
             )
 
             round_id, answer, started_at, updated_at, answered_in_round = (
@@ -148,16 +145,14 @@ class ChainlinkRPCCollector:
                 answer=answer,
                 started_at=started_at,
                 updated_at=updated_at,
-                answered_in_round=answered_in_round
+                answered_in_round=answered_in_round,
             )
         except Exception as e:
             console.print(f"  [red]✗ Failed to get latest round: {e}[/red]")
             return None
 
     def get_round_data(
-        self,
-        aggregator_address: str,
-        round_id: int
+        self, aggregator_address: str, round_id: int
     ) -> Optional[ChainlinkRound]:
         """Get specific round data from aggregator.
 
@@ -168,8 +163,7 @@ class ChainlinkRPCCollector:
         try:
             aggregator_address = Web3.to_checksum_address(aggregator_address)
             contract = self.web3.eth.contract(
-                address=aggregator_address,
-                abi=self.AGGREGATOR_V3_ABI
+                address=aggregator_address, abi=self.AGGREGATOR_V3_ABI
             )
 
             round_id_result, answer, started_at, updated_at, answered_in_round = (
@@ -181,7 +175,7 @@ class ChainlinkRPCCollector:
                 answer=answer,
                 started_at=started_at,
                 updated_at=updated_at,
-                answered_in_round=answered_in_round
+                answered_in_round=answered_in_round,
             )
         except ContractLogicError:
             # Round doesn't exist - this is expected when scanning
@@ -196,7 +190,7 @@ class ChainlinkRPCCollector:
         start_timestamp: Optional[int] = None,
         end_timestamp: Optional[int] = None,
         max_rounds: int = 10000,
-        batch_size: int = 100
+        batch_size: int = 100,
     ) -> list[ChainlinkRound]:
         """Collect historical rounds via RPC using binary search strategy.
 
@@ -212,7 +206,7 @@ class ChainlinkRPCCollector:
         :param batch_size: Rounds to collect per progress update
         :return: List of historical rounds
         """
-        console.print(f"  [cyan]Collecting via RPC (fallback mode)...[/cyan]")
+        console.print("  [cyan]Collecting via RPC (fallback mode)...[/cyan]")
 
         # Get latest round
         latest_round = self.get_latest_round(aggregator_address)
@@ -230,7 +224,7 @@ class ChainlinkRPCCollector:
             end_round_id = self._binary_search_round_by_timestamp(
                 aggregator_address,
                 target_timestamp=end_timestamp,
-                latest_round_id=latest_round.round_id
+                latest_round_id=latest_round.round_id,
             )
         else:
             end_round_id = latest_round.round_id
@@ -241,7 +235,7 @@ class ChainlinkRPCCollector:
                 aggregator_address,
                 target_timestamp=start_timestamp,
                 latest_round_id=end_round_id,
-                search_backwards=True
+                search_backwards=True,
             )
         else:
             # Start from round 1 (earliest)
@@ -269,9 +263,7 @@ class ChainlinkRPCCollector:
 
                 # Progress update
                 if collected % batch_size == 0:
-                    console.print(
-                        f"  [dim]Collected {collected:,} rounds...[/dim]"
-                    )
+                    console.print(f"  [dim]Collected {collected:,} rounds...[/dim]")
 
         console.print(f"  [green]✓ Collected {len(rounds):,} rounds via RPC[/green]")
         return rounds
@@ -281,7 +273,7 @@ class ChainlinkRPCCollector:
         aggregator_address: str,
         target_timestamp: int,
         latest_round_id: int,
-        search_backwards: bool = True
+        search_backwards: bool = True,
     ) -> int:
         """Find round ID closest to target timestamp using binary search.
 

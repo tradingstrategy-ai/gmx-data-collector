@@ -48,7 +48,9 @@ class AggregatorDiscovery:
         """
         self.web3 = web3
 
-    def _call_with_retry(self, contract_function, max_retries: int = 3, backoff: float = 1.0):
+    def _call_with_retry(
+        self, contract_function, max_retries: int = 3, backoff: float = 1.0
+    ):
         """Call contract function with retry logic for RPC failures.
 
         :param contract_function: Web3 contract function to call
@@ -69,7 +71,7 @@ class AggregatorDiscovery:
                     raise
 
                 if attempt < max_retries - 1:
-                    wait_time = backoff * (2 ** attempt)
+                    wait_time = backoff * (2**attempt)
                     time.sleep(wait_time)
                     continue
 

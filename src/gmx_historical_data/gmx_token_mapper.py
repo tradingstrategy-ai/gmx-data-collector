@@ -59,7 +59,9 @@ class GMXTokenMapper:
                 # market_symbol may have suffixes like "ETH2", "ARB2" for different markets
                 # but market_metadata.symbol has the base symbol that GMX API accepts
                 metadata = market_data.get("market_metadata", {})
-                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
+                symbol = metadata.get("symbol", "") or market_data.get(
+                    "market_symbol", ""
+                )
                 if symbol:
                     mapping[addr_lower] = symbol
 
@@ -132,9 +134,7 @@ class GMXTokenMapper:
         mapping = self.get_all_token_mapping()
         return mapping.get(token_address.lower())
 
-    def get_token_addresses_for_symbols(
-        self, symbols: list[str]
-    ) -> dict[str, str]:
+    def get_token_addresses_for_symbols(self, symbols: list[str]) -> dict[str, str]:
         """Get token addresses for a list of symbols.
 
         :param symbols: List of token symbols
@@ -171,7 +171,9 @@ class GMXTokenMapper:
             for market_data in available_markets.values():
                 # Use base symbol from market_metadata (not market_symbol which may have suffix)
                 metadata = market_data.get("market_metadata", {})
-                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
+                symbol = metadata.get("symbol", "") or market_data.get(
+                    "market_symbol", ""
+                )
                 decimals = metadata.get("decimals")
 
                 if symbol and decimals is not None:
@@ -181,9 +183,7 @@ class GMXTokenMapper:
             return decimals_map
 
         except (Web3Exception, AssertionError) as e:
-            raise RuntimeError(
-                f"Failed to fetch GMX market decimals: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to fetch GMX market decimals: {e}") from e
 
     def get_decimals_for_symbol(self, symbol: str) -> int | None:
         """Get decimals for a specific token symbol.

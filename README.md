@@ -105,14 +105,43 @@ cargo --version
 
 **Note:** Commands use `poetry run`. Alternatively, activate `poetry shell` and run commands directly.
 
-### Quick Start
+### Quick Start (Recommended)
 
 ```bash
 # Set required environment variables
 export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
 export HYPERSYNC_API_TOKEN="your_token_here"  # Get free from https://envio.dev
 
-# Full historical collection for all 118 markets
+# Collect all 118 GMX tokens with parallel processing
+gmx_historical_data collect --default --output-dir ./data --concurrency 5
+```
+
+This single command:
+- Fetches recent data (~6 months) from GMX API for all 118 tokens
+- Backfills historical data from Chainlink oracles where available
+- Runs 5 tokens in parallel for faster collection
+- Saves to `./data/` in efficient Parquet format
+
+```bash
+# Collect specific tokens only
+gmx_historical_data collect --default --symbol ETH --symbol BTC --output-dir ./data
+
+# Verify data quality after collection
+gmx_historical_data verify --output-dir ./data
+```
+
+### What --default Does
+
+The `--default` flag is the recommended way to collect data:
+- Fetches recent data from GMX API (~6 months)
+- Backfills historical data from Chainlink oracles (where available)
+- Collects all 118 tokens (or filter with `--symbol`)
+- Uses optimal settings for backtesting
+
+### Legacy Commands
+
+```bash
+# Full historical collection (same as --default)
 gmx_historical_data collect --full --output-dir ./data
 
 # Incremental update (faster, only new data)
@@ -120,9 +149,205 @@ gmx_historical_data collect --update --output-dir ./data
 
 # Single symbol collection
 gmx_historical_data collect --full --symbol ETH --output-dir ./data
+```
 
-# Verify data quality
-gmx_historical_data verify --output-dir ./data
+## Freqtrade Integration
+
+Export collected data to Freqtrade-compatible format for backtesting.
+
+### Installation
+
+> **Dependency Note:** Freqtrade requires `pandas<3.0` while this project uses `pandas>=3.0` for modern DataFrame features. These versions are incompatible, so freqtrade must be installed in a separate Python environment. The exported data files (feather/parquet) work seamlessly across environments.
+
+```bash
+# 1. Collect and export data with gmx_historical_data
+gmx_historical_data collect --default --output-dir ./data --concurrency 5
+gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./freqtrade_data
+
+# 2. Install freqtrade in a separate environment
+python -m venv freqtrade-env
+source freqtrade-env/bin/activate  # Linux/macOS
+pip install freqtrade
+
+# 3. Run backtests using the exported data
+freqtrade backtesting --datadir ./freqtrade_data/gmx --strategy YourStrategy
+```
+
+### Export to Freqtrade
+
+```bash
+# Export all symbols and timeframes
+gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./freqtrade_data
+
+# Export specific symbols
+gmx_historical_data export-freqtrade --data-dir ./data --symbol ETH --symbol BTC
+
+# Export specific timeframes
+gmx_historical_data export-freqtrade --data-dir ./data --timeframe 1h --timeframe 4h
+
+# Export to parquet format (default: feather)
+gmx_historical_data export-freqtrade --data-dir ./data --format parquet
+```
+
+### Output Format
+
+Freqtrade expects OHLCV data with specific columns. The export command:
+- Renames `timestamp` to `date`
+- Adds `volume` column (set to 0, GMX doesn't provide volume)
+- Outputs to `{SYMBOL}_USD-{timeframe}.feather` format
+
+```
+freqtrade_data/
+└── gmx/
+    ├── ETH_USD-1m.feather
+    ├── ETH_USD-5m.feather
+    ├── ETH_USD-1h.feather
+    ├── BTC_USD-1h.feather
+    └── ...
+```
+
+### Freqtrade Configuration
+
+```json
+{
+  "datadir": "freqtrade_data/gmx",
+  "exchange": {
+    "name": "gmx"
+  },
+  "pairs": ["ETH/USD", "BTC/USD", "SOL/USD"],
+  "timeframe": "1h"
+}
+```
+
+### Complete Workflow
+
+```bash
+# 1. Collect data for a single token (quick test)
+gmx_historical_data collect --default --symbol ETH --output-dir ./data
+
+# 2. Export to Freqtrade format
+gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./user_data/data/gmx
+
+# 3. Run Freqtrade backtest (in separate freqtrade environment)
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy ADXMomentum --pairs ETH/USD
+```
+
+**Collect all 118 tokens:**
+
+```bash
+gmx_historical_data collect --default --output-dir ./data --concurrency 5
+```
+
+### Backtesting Commands
+
+```bash
+# Basic backtest with a strategy
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy SampleStrategy
+
+# Backtest specific date range
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy SampleStrategy \
+    --timerange 20240101-20241231
+
+# Backtest with specific pairs
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy SampleStrategy \
+    --pairs ETH/USD BTC/USD SOL/USD
+
+# Backtest with detailed output
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy SampleStrategy \
+    --export trades --export-filename backtest_results.json
+
+# Backtest multiple strategies
+freqtrade backtesting --datadir ./user_data/data/gmx \
+    --strategy-list Strategy1 Strategy2 Strategy3
+
+# Hyperparameter optimization
+freqtrade hyperopt --datadir ./user_data/data/gmx --strategy SampleStrategy \
+    --hyperopt-loss SharpeHyperOptLoss --epochs 100
+
+# Plot backtest results
+freqtrade plot-dataframe --datadir ./user_data/data/gmx --strategy SampleStrategy \
+    --pairs ETH/USD --export-filename backtest_plot.html
+```
+
+### List Available Data
+
+```bash
+# List downloaded pairs
+freqtrade list-data --datadir ./user_data/data/gmx
+
+# Show data for specific pair
+freqtrade list-data --datadir ./user_data/data/gmx --pairs ETH/USD
+```
+
+### Example Strategy
+
+An example ADX Momentum strategy is included in `examples/strategies/ADXMomentum.py`:
+
+```python
+# --- Do not remove these libs ---
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import talib.abstract as ta
+
+class ADXMomentum(IStrategy):
+    """
+    Trend-following momentum strategy that enters long positions during strong upward trends and exits when momentum reverses.
+
+    Entry: ADX > 25 (strong trend), MOM > 0 (positive momentum), PLUS_DI > 25 and PLUS_DI > MINUS_DI (upward directional strength).
+    Exit: ADX > 25, MOM < 0 (negative momentum), MINUS_DI > 25 and PLUS_DI < MINUS_DI (downward directional strength).
+    """
+
+    INTERFACE_VERSION: int = 3
+
+    minimal_roi = {
+        "0": 0.05
+    }
+
+    stoploss = -0.25
+    timeframe = '1h'
+    startup_candle_count: int = 20
+    exit_profit_only = False
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe['adx'] = ta.ADX(dataframe, timeperiod=14)
+        dataframe['plus_di'] = ta.PLUS_DI(dataframe, timeperiod=25)
+        dataframe['minus_di'] = ta.MINUS_DI(dataframe, timeperiod=25)
+        dataframe['sar'] = ta.SAR(dataframe)
+        dataframe['mom'] = ta.MOM(dataframe, timeperiod=14)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                    (dataframe['adx'] > 25) &
+                    (dataframe['mom'] > 0) &
+                    (dataframe['plus_di'] > 25) &
+                    (dataframe['plus_di'] > dataframe['minus_di'])
+            ),
+            'enter_long'] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe.loc[
+            (
+                    (dataframe['adx'] > 25) &
+                    (dataframe['mom'] < 0) &
+                    (dataframe['minus_di'] > 25) &
+                    (dataframe['plus_di'] < dataframe['minus_di'])
+            ),
+            'exit_long'] = 1
+        return dataframe
+```
+
+**Run backtest with this strategy:**
+
+```bash
+# Copy strategy to freqtrade user_data
+cp examples/strategies/ADXMomentum.py ./user_data/strategies/
+
+# Run backtest
+freqtrade backtesting --datadir ./user_data/data/gmx --strategy ADXMomentum \
+    --pairs ETH/USD BTC/USD --timeframe 1h
 ```
 
 ### Collection Commands
@@ -384,9 +609,10 @@ For best performance and rate limit resilience, use multiple API tokens:
 gmx_historical_data [OPTIONS] COMMAND [ARGS]...
 
 Commands:
-  collect       Collect GMX historical price data
-  verify        Verify collected data quality
-  debug-oracle  Debug oracle events for non-Chainlink tokens
+  collect           Collect GMX historical price data
+  verify            Verify collected data quality
+  debug-oracle      Debug oracle events for non-Chainlink tokens
+  export-freqtrade  Export data to Freqtrade-compatible format
 
 Environment Variables:
   JSON_RPC_ARBITRUM     Arbitrum RPC URL (required)
@@ -399,6 +625,7 @@ Environment Variables:
 gmx_historical_data collect [OPTIONS]
 
 Options:
+  --default                 Recommended: GMX API + Chainlink historical backfill
   --full                    Collect full historical data from genesis
   --update                  Incremental update from last checkpoint
   --symbol TEXT             Specific token symbol (e.g., ETH, BTC, SUI)
@@ -432,6 +659,19 @@ Options:
   --symbol TEXT        Token symbol to debug (e.g., SUI, HYPE)
   --show-raw           Show raw event data
   --limit INTEGER      Limit number of events
+```
+
+### export-freqtrade
+
+```
+gmx_historical_data export-freqtrade [OPTIONS]
+
+Options:
+  --data-dir PATH      Source GMX data directory [default: ./data]
+  --output-dir PATH    Output directory for Freqtrade files [default: ./freqtrade_data]
+  --symbol TEXT        Specific symbols to export (can be repeated)
+  --timeframe TEXT     Specific timeframes to export (can be repeated)
+  --format TEXT        Output format: feather or parquet [default: feather]
 ```
 
 ## Troubleshooting

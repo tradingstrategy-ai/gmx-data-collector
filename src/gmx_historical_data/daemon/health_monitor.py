@@ -3,7 +3,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Dict
 
 
@@ -92,7 +92,9 @@ class HealthMonitor:
         self.current_cycle.symbols_succeeded += 1
         self.current_cycle.candles_added[symbol] = candles_by_timeframe
 
-    def record_symbol_failure(self, symbol: str, error: str, timeframe: str = None) -> None:
+    def record_symbol_failure(
+        self, symbol: str, error: str, timeframe: str = None
+    ) -> None:
         """Record failed collection for a symbol.
 
         :param symbol: Token symbol

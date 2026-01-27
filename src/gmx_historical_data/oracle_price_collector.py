@@ -40,8 +40,6 @@ from hypersync import (
 )
 from eth_utils import keccak
 from eth_defi.gmx.events import decode_gmx_event
-from eth_defi.gmx.constants import GMX_EVENT_EMITTER_ABI
-from eth_defi.gmx.contracts import get_contract_addresses
 
 from web3.providers.base import BaseProvider
 from web3.types import RPCEndpoint, RPCResponse
@@ -55,7 +53,9 @@ logger = logging.getLogger(__name__)
 # EventLog1 signature hash from GMX EventEmitter contract
 # EventLog1(address,string,string,bytes32,EventData)
 # This is topic0 for most GMX events including OraclePriceUpdate
-EVENTLOG1_SIGNATURE = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+EVENTLOG1_SIGNATURE = (
+    "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+)
 
 
 class ArbitrumMockProvider(BaseProvider):
@@ -119,7 +119,7 @@ async def retry_with_backoff(
             last_exception = e
             if attempt < max_retries:
                 # Exponential backoff with jitter
-                delay = min(base_delay * (2 ** attempt), max_delay)
+                delay = min(base_delay * (2**attempt), max_delay)
                 jitter = random.uniform(0, delay * 0.1)
                 delay += jitter
 
@@ -373,12 +373,12 @@ class OraclePriceCollector:
         event_data = decode_gmx_event(self._web3, eth_defi_log_dict)
 
         if event_data is None:
-            raise ValueError(f"Failed to decode oracle event from log at block {block_number}")
+            raise ValueError(
+                f"Failed to decode oracle event from log at block {block_number}"
+            )
 
         if event_data.event_name != "OraclePriceUpdate":
-            raise ValueError(
-                f"Expected OraclePriceUpdate, got {event_data.event_name}"
-            )
+            raise ValueError(f"Expected OraclePriceUpdate, got {event_data.event_name}")
 
         return OraclePriceEvent(
             block_number=block_number,
@@ -533,7 +533,7 @@ class OraclePriceCollector:
 
         finally:
             # Ensure stream is closed properly
-            if 'stream' in locals():
+            if "stream" in locals():
                 stream.close()
 
         return events, block_timestamps
@@ -644,10 +644,7 @@ class OraclePriceCollector:
         # Use merge sort O(n) since chunks are already sorted by block range
         # heapq.merge efficiently merges pre-sorted iterables
         all_events = list(
-            heapq.merge(
-                *chunk_events,
-                key=lambda e: (e.block_number, e.log_index)
-            )
+            heapq.merge(*chunk_events, key=lambda e: (e.block_number, e.log_index))
         )
 
         # Aggregate stats from all chunks

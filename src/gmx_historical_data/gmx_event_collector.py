@@ -6,7 +6,15 @@ events, which contain execution prices from real trades.
 
 import logging
 from web3 import Web3
-from hypersync import HypersyncClient, ClientConfig, Query, LogSelection, FieldSelection, LogField, BlockField
+from hypersync import (
+    HypersyncClient,
+    ClientConfig,
+    Query,
+    LogSelection,
+    FieldSelection,
+    LogField,
+    BlockField,
+)
 from eth_utils import keccak
 
 from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
@@ -16,7 +24,9 @@ from gmx_historical_data.gmx_event_parser import GMXPositionEvent, parse_positio
 # EventLog1 signature hash from GMX EventEmitter contract
 # EventLog1(address,string,string,bytes32,EventData)
 # This is topic0 for most GMX events including PositionIncrease/PositionDecrease
-EVENTLOG1_SIGNATURE = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+EVENTLOG1_SIGNATURE = (
+    "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+)
 
 
 def get_position_event_hashes() -> list[str]:
@@ -139,7 +149,9 @@ class GMXEventCollector:
                         "block_number": log.block_number,
                         "block_hash": log.block_hash or "",
                         "transaction_hash": log.transaction_hash or "",
-                        "transaction_index": log.transaction_index if log.transaction_index is not None else 0,
+                        "transaction_index": log.transaction_index
+                        if log.transaction_index is not None
+                        else 0,
                         "log_index": log.log_index if log.log_index is not None else 0,
                         "address": log.address or "",
                         "topics": [t for t in (log.topics or []) if t is not None],

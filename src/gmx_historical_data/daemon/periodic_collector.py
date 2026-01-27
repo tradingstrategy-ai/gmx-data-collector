@@ -52,7 +52,6 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
 
 import pandas as pd
 import schedule
@@ -60,22 +59,33 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+)
 from web3 import Web3
 
-from gmx_historical_data.config import TIMEFRAMES, EXCLUDED_SYMBOLS, GMX_V2_GENESIS_BLOCK, is_excluded_symbol
+from gmx_historical_data.config import (
+    TIMEFRAMES,
+    GMX_V2_GENESIS_BLOCK,
+    is_excluded_symbol,
+)
 from gmx_historical_data.storage import ParquetStorage
-from gmx_historical_data.gmx_api_integration import GMXDataFetcher, map_timeframe_to_gmx_period
+from gmx_historical_data.gmx_api_integration import (
+    GMXDataFetcher,
+    map_timeframe_to_gmx_period,
+)
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
 from gmx_historical_data.daemon.config import (
     DaemonConfig,
     get_gmx_markets_with_chainlink_feeds,
-    get_gmx_markets_without_chainlink_feeds,
 )
 from gmx_historical_data.daemon.gap_detector import (
     GapDetector,
     AdaptiveGapDetector,
-    GapStatus,
 )
 from gmx_historical_data.daemon.health_monitor import HealthMonitor
 from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
@@ -161,7 +171,9 @@ class GMXPeriodicCollector:
         :param frame: Current stack frame
         """
         signal_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
-        console.print(f"\n[yellow]Received {signal_name} - initiating graceful shutdown...[/yellow]")
+        console.print(
+            f"\n[yellow]Received {signal_name} - initiating graceful shutdown...[/yellow]"
+        )
         logger.info(f"Shutdown signal received: {signal_name}")
         self.shutdown_requested = True
 
@@ -176,17 +188,27 @@ class GMXPeriodicCollector:
         # Use configured symbols if specified
         if self.config.collection_symbols:
             symbols = self.config.collection_symbols
-            console.print(f"[cyan]Using configured symbols: {len(symbols)} tokens[/cyan]")
+            console.print(
+                f"[cyan]Using configured symbols: {len(symbols)} tokens[/cyan]"
+            )
         else:
             # Use only markets with Chainlink feeds (34 markets)
             symbols = get_gmx_markets_with_chainlink_feeds()
 
             # Filter out excluded symbols (case-insensitive for global, direct check for config)
             symbols = [s for s in symbols if not is_excluded_symbol(s)]
-            symbols = [s for s in symbols if s.upper() not in {e.upper() for e in self.config.excluded_symbols}]
+            symbols = [
+                s
+                for s in symbols
+                if s.upper() not in {e.upper() for e in self.config.excluded_symbols}
+            ]
 
-            console.print(f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]")
-            console.print(f"[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]")
+            console.print(
+                f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]"
+            )
+            console.print(
+                "[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]"
+            )
 
         return symbols
 
@@ -289,7 +311,9 @@ class GMXPeriodicCollector:
         errors = []
 
         # Collect timeframes concurrently
-        with ThreadPoolExecutor(max_workers=self.config.timeframe_concurrency) as executor:
+        with ThreadPoolExecutor(
+            max_workers=self.config.timeframe_concurrency
+        ) as executor:
             futures = {
                 executor.submit(self._collect_symbol_timeframe, symbol, tf): tf
                 for tf in TIMEFRAMES
@@ -317,7 +341,9 @@ class GMXPeriodicCollector:
         total_candles = sum(candles_by_timeframe.values())
         if total_candles > 0 or errors:
             if errors:
-                console.print(f"  [yellow]{symbol}[/yellow]: {total_candles:,} candles, {len(errors)} errors")
+                console.print(
+                    f"  [yellow]{symbol}[/yellow]: {total_candles:,} candles, {len(errors)} errors"
+                )
             else:
                 console.print(f"  [green]{symbol}[/green]: {total_candles:,} candles")
 
@@ -401,7 +427,9 @@ class GMXPeriodicCollector:
                 candles_by_timeframe[timeframe] = len(ohlcv)
 
             except Exception as e:
-                logger.warning(f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}")
+                logger.warning(
+                    f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}"
+                )
 
         return candles_by_timeframe
 
@@ -417,7 +445,9 @@ class GMXPeriodicCollector:
         if not self.oracle_collector or not self.token_mapper:
             return {}
 
-        console.rule("[bold magenta]Non-Chainlink Markets (Oracle Events)[/bold magenta]")
+        console.rule(
+            "[bold magenta]Non-Chainlink Markets (Oracle Events)[/bold magenta]"
+        )
 
         # Get non-Chainlink token mapping
         try:
@@ -452,7 +482,9 @@ class GMXPeriodicCollector:
             console=console,
             transient=True,
         ) as progress:
-            progress.add_task("[cyan]Fetching oracle events from HyperSync...", total=None)
+            progress.add_task(
+                "[cyan]Fetching oracle events from HyperSync...", total=None
+            )
 
             try:
                 events = await self.oracle_collector.collect_oracle_events(
@@ -470,7 +502,9 @@ class GMXPeriodicCollector:
 
         # Update last processed block
         self._last_oracle_block = max(e.block_number for e in events)
-        console.print(f"[dim]Collected {len(events):,} oracle events up to block {self._last_oracle_block:,}[/dim]")
+        console.print(
+            f"[dim]Collected {len(events):,} oracle events up to block {self._last_oracle_block:,}[/dim]"
+        )
 
         # Group events by token
         events_by_token: dict[str, list] = defaultdict(list)
@@ -501,7 +535,9 @@ class GMXPeriodicCollector:
                     continue
 
                 # Skip excluded symbols (case-insensitive)
-                if is_excluded_symbol(symbol) or symbol.upper() in {e.upper() for e in self.config.excluded_symbols}:
+                if is_excluded_symbol(symbol) or symbol.upper() in {
+                    e.upper() for e in self.config.excluded_symbols
+                }:
                     progress.update(task, advance=1)
                     continue
 
@@ -514,7 +550,10 @@ class GMXPeriodicCollector:
                 for timeframe in TIMEFRAMES:
                     try:
                         ohlcv = aggregate_oracle_events_to_ohlcv(
-                            token_events, timeframe, symbol, token_decimals=token_decimals
+                            token_events,
+                            timeframe,
+                            symbol,
+                            token_decimals=token_decimals,
                         )
 
                         if ohlcv.empty:
@@ -555,11 +594,13 @@ class GMXPeriodicCollector:
         summary_table.add_row("Candles added", f"{total_candles:,}")
         summary_table.add_row("Last block", f"{self._last_oracle_block:,}")
 
-        console.print(Panel(
-            summary_table,
-            title="[bold]Oracle Collection Complete[/bold]",
-            border_style="magenta",
-        ))
+        console.print(
+            Panel(
+                summary_table,
+                title="[bold]Oracle Collection Complete[/bold]",
+                border_style="magenta",
+            )
+        )
 
         return results
 
@@ -603,7 +644,9 @@ class GMXPeriodicCollector:
             for symbol in symbols:
                 # Check for shutdown request
                 if self.shutdown_requested:
-                    console.print("[yellow]Shutdown requested - stopping collection cycle[/yellow]")
+                    console.print(
+                        "[yellow]Shutdown requested - stopping collection cycle[/yellow]"
+                    )
                     break
 
                 progress.update(task, description=f"[cyan]Collecting {symbol}...")
@@ -615,7 +658,9 @@ class GMXPeriodicCollector:
 
                     # Record success if any candles were added
                     if symbol_candles > 0:
-                        self.health_monitor.record_symbol_success(symbol, candles_by_timeframe)
+                        self.health_monitor.record_symbol_success(
+                            symbol, candles_by_timeframe
+                        )
                     else:
                         # No candles added (up to date)
                         self.health_monitor.record_symbol_success(symbol, {})
@@ -628,7 +673,9 @@ class GMXPeriodicCollector:
 
                     # Try oracle event fallback if hybrid mode is enabled
                     if self.config.collect_non_chainlink and self.oracle_collector:
-                        console.print(f"  [yellow]{symbol}[/yellow]: API failed, trying oracle fallback...")
+                        console.print(
+                            f"  [yellow]{symbol}[/yellow]: API failed, trying oracle fallback..."
+                        )
                         try:
                             fallback_candles = asyncio.run(
                                 self._collect_symbol_via_oracle_fallback(symbol)
@@ -636,20 +683,32 @@ class GMXPeriodicCollector:
                             fallback_total = sum(fallback_candles.values())
 
                             if fallback_total > 0:
-                                console.print(f"  [green]{symbol}[/green]: {fallback_total:,} candles via oracle fallback")
+                                console.print(
+                                    f"  [green]{symbol}[/green]: {fallback_total:,} candles via oracle fallback"
+                                )
                                 total_candles += fallback_total
-                                self.health_monitor.record_symbol_success(symbol, fallback_candles)
+                                self.health_monitor.record_symbol_success(
+                                    symbol, fallback_candles
+                                )
                                 succeeded += 1
                                 fallback_succeeded += 1
                             else:
                                 # Fallback returned no data - still mark as failure
-                                console.print(f"  [red]{symbol}[/red]: Oracle fallback returned no data")
-                                self.health_monitor.record_symbol_failure(symbol, error_msg)
+                                console.print(
+                                    f"  [red]{symbol}[/red]: Oracle fallback returned no data"
+                                )
+                                self.health_monitor.record_symbol_failure(
+                                    symbol, error_msg
+                                )
                                 failed += 1
 
                         except Exception as fallback_error:
-                            logger.warning(f"Oracle fallback also failed for {symbol}: {fallback_error}")
-                            console.print(f"  [red]{symbol}[/red]: Both API and oracle fallback failed")
+                            logger.warning(
+                                f"Oracle fallback also failed for {symbol}: {fallback_error}"
+                            )
+                            console.print(
+                                f"  [red]{symbol}[/red]: Both API and oracle fallback failed"
+                            )
                             self.health_monitor.record_symbol_failure(symbol, error_msg)
                             failed += 1
                     else:
@@ -668,7 +727,9 @@ class GMXPeriodicCollector:
 
         summary_table.add_row("Succeeded", f"[green]{succeeded}[/green]")
         if fallback_succeeded > 0:
-            summary_table.add_row("  via oracle fallback", f"[yellow]{fallback_succeeded}[/yellow]")
+            summary_table.add_row(
+                "  via oracle fallback", f"[yellow]{fallback_succeeded}[/yellow]"
+            )
         summary_table.add_row("Failed", f"[red]{failed}[/red]" if failed > 0 else "0")
         summary_table.add_row("Total symbols", str(len(symbols)))
         summary_table.add_row("Candles added", f"{total_candles:,}")
@@ -678,11 +739,13 @@ class GMXPeriodicCollector:
         else:
             summary_table.add_row("Data saved to", str(self.config.output_dir))
 
-        console.print(Panel(
-            summary_table,
-            title="[bold]Cycle Complete[/bold]",
-            border_style="green" if failed == 0 else "yellow",
-        ))
+        console.print(
+            Panel(
+                summary_table,
+                title="[bold]Cycle Complete[/bold]",
+                border_style="green" if failed == 0 else "yellow",
+            )
+        )
 
         # Collect non-Chainlink markets if enabled
         if self.config.collect_non_chainlink and not self.shutdown_requested:
@@ -699,7 +762,9 @@ class GMXPeriodicCollector:
         config_table.add_column("Setting", style="dim")
         config_table.add_column("Value", style="cyan")
 
-        config_table.add_row("Collection interval", f"{self.config.collection_interval_minutes} minutes")
+        config_table.add_row(
+            "Collection interval", f"{self.config.collection_interval_minutes} minutes"
+        )
         config_table.add_row("Output directory", str(self.config.output_dir))
         config_table.add_row("Timeframes", ", ".join(TIMEFRAMES))
 
@@ -713,11 +778,13 @@ class GMXPeriodicCollector:
         config_table.add_row("Mode", " | ".join(mode_parts))
 
         # Display startup panel
-        console.print(Panel(
-            config_table,
-            title="[bold green]GMX Periodic Data Collector[/bold green]",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                config_table,
+                title="[bold green]GMX Periodic Data Collector[/bold green]",
+                border_style="green",
+            )
+        )
 
         # Schedule periodic collection
         schedule.every(self.config.collection_interval_minutes).minutes.do(
@@ -732,19 +799,25 @@ class GMXPeriodicCollector:
         self.running = True
 
         # Calculate next collection time
-        next_run = datetime.now(timezone.utc) + timedelta(seconds=schedule.idle_seconds())
+        next_run = datetime.now(timezone.utc) + timedelta(
+            seconds=schedule.idle_seconds()
+        )
 
         status_table = Table(show_header=False, box=None, padding=(0, 2))
         status_table.add_column("Info", style="dim")
         status_table.add_column("Value", style="cyan")
-        status_table.add_row("Next collection", next_run.strftime("%Y-%m-%d %H:%M:%S %Z"))
+        status_table.add_row(
+            "Next collection", next_run.strftime("%Y-%m-%d %H:%M:%S %Z")
+        )
         status_table.add_row("Stop daemon", "Press Ctrl+C")
 
-        console.print(Panel(
-            status_table,
-            title="[bold green]Daemon Running[/bold green]",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                status_table,
+                title="[bold green]Daemon Running[/bold green]",
+                border_style="green",
+            )
+        )
 
         while self.running and not self.shutdown_requested:
             try:
@@ -759,11 +832,13 @@ class GMXPeriodicCollector:
                 break
 
         # Graceful shutdown
-        console.print(Panel(
-            "[dim]Cleanup complete[/dim]",
-            title="[yellow]Daemon Stopped[/yellow]",
-            border_style="yellow",
-        ))
+        console.print(
+            Panel(
+                "[dim]Cleanup complete[/dim]",
+                title="[yellow]Daemon Stopped[/yellow]",
+                border_style="yellow",
+            )
+        )
         logger.info("Daemon stopped")
 
 

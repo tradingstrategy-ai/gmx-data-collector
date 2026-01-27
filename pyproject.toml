@@ -7,7 +7,7 @@ readme = "README.md"
 packages = [{include = "gmx_historical_data", from = "src"}]
 
 [tool.poetry.dependencies]
-python = ">=3.11,<4.0"
+python = ">=3.13,<4.0"
 hypersync = "0.8.5"
 web3 = ">=7.14.0"
 pyarrow = ">=23.0.0"

@@ -35,6 +35,7 @@ def normalize_timeframe(tf: str) -> str:
     }
     return mapping.get(tf, tf)
 
+
 console = Console()
 
 
@@ -372,8 +373,12 @@ def cli(
             console.print("  [cyan]poetry run gmx_historical_data --full[/cyan]")
             raise typer.Exit(1)
 
-        console.print(f"\n[bold]Found [cyan]{len(symbols)}[/cyan] symbols with collected data[/bold]")
-        console.print(f"[dim]Symbols: {', '.join(symbols[:10])}{' ...' if len(symbols) > 10 else ''}[/dim]")
+        console.print(
+            f"\n[bold]Found [cyan]{len(symbols)}[/cyan] symbols with collected data[/bold]"
+        )
+        console.print(
+            f"[dim]Symbols: {', '.join(symbols[:10])}{' ...' if len(symbols) > 10 else ''}[/dim]"
+        )
 
         successful = 0
         failed = 0
@@ -408,7 +413,7 @@ def cli(
         symbol_upper = symbol.upper()
         plot_symbol(storage, symbol_upper, output_dir, timeframe, raw)
 
-    console.print(f"\n[bold green]✓ Plotting complete![/bold green]")
+    console.print("\n[bold green]✓ Plotting complete![/bold green]")
     console.print(f"[dim]Plots saved to: {output_dir.absolute()}[/dim]")
 
 

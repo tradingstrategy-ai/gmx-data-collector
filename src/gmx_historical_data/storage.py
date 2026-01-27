@@ -11,7 +11,7 @@ import pandas as pd
 
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
-from gmx_historical_data.config import TIMEFRAME_TO_FILENAME, FILENAME_TO_TIMEFRAME
+from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 
 
 # Raw events schema
@@ -42,25 +42,39 @@ OHLCV_SCHEMA = pa.schema(
 )
 
 # Position events schema
-POSITION_EVENTS_SCHEMA = pa.schema([
-    ("block_number", pa.uint64()),
-    ("block_timestamp", pa.uint64()),
-    ("transaction_hash", pa.string()),
-    ("log_index", pa.uint32()),
-    ("event_name", pa.string()),
-    ("market", pa.string()),
-    ("account", pa.string()),
-    ("is_long", pa.bool_()),
-    ("index_token_price_min", pa.string()),  # 30 decimals, oracle min price from Chainlink
-    ("index_token_price_max", pa.string()),  # 30 decimals, oracle max price from Chainlink
-    ("execution_price", pa.string()),  # 30 decimals, execution price (includes price impact)
-    ("size_delta_usd", pa.string()),   # 30 decimals, stored as string
-    ("size_delta_in_tokens", pa.string()),  # Stored as string
-    ("price_impact_usd", pa.string()),  # 30 decimals, stored as string (can be negative)
-    ("position_key", pa.string()),
-    ("collateral_token", pa.string()),
-    ("symbol", pa.string()),
-])
+POSITION_EVENTS_SCHEMA = pa.schema(
+    [
+        ("block_number", pa.uint64()),
+        ("block_timestamp", pa.uint64()),
+        ("transaction_hash", pa.string()),
+        ("log_index", pa.uint32()),
+        ("event_name", pa.string()),
+        ("market", pa.string()),
+        ("account", pa.string()),
+        ("is_long", pa.bool_()),
+        (
+            "index_token_price_min",
+            pa.string(),
+        ),  # 30 decimals, oracle min price from Chainlink
+        (
+            "index_token_price_max",
+            pa.string(),
+        ),  # 30 decimals, oracle max price from Chainlink
+        (
+            "execution_price",
+            pa.string(),
+        ),  # 30 decimals, execution price (includes price impact)
+        ("size_delta_usd", pa.string()),  # 30 decimals, stored as string
+        ("size_delta_in_tokens", pa.string()),  # Stored as string
+        (
+            "price_impact_usd",
+            pa.string(),
+        ),  # 30 decimals, stored as string (can be negative)
+        ("position_key", pa.string()),
+        ("collateral_token", pa.string()),
+        ("symbol", pa.string()),
+    ]
+)
 
 
 class ParquetStorage:
@@ -237,6 +251,42 @@ class ParquetStorage:
             return pd.DataFrame()
 
         return pd.read_parquet(candles_file)
+
+    def list_symbols(self) -> list[str]:
+        """List all symbols with candle data.
+
+        :return: Sorted list of symbol names that have candle data
+        """
+        if not self.candles_dir.exists():
+            return []
+
+        symbols = []
+        for symbol_dir in self.candles_dir.iterdir():
+            if symbol_dir.is_dir():
+                # Check if directory has any parquet files
+                parquet_files = list(symbol_dir.glob("*.parquet"))
+                if parquet_files:
+                    symbols.append(symbol_dir.name)
+
+        return sorted(symbols)
+
+    def list_timeframes(self, symbol: str) -> list[str]:
+        """List available timeframes for a symbol.
+
+        :param symbol: Token symbol (e.g., 'ETH')
+        :return: Sorted list of timeframe strings (e.g., ['1d', '1h', '4h'])
+        """
+        symbol_dir = self.candles_dir / symbol
+        if not symbol_dir.exists():
+            return []
+
+        timeframes = []
+        for parquet_file in symbol_dir.glob("*.parquet"):
+            # Extract timeframe from filename (e.g., '1h.parquet' -> '1h')
+            tf = parquet_file.stem
+            timeframes.append(tf)
+
+        return sorted(timeframes)
 
     def append_raw_events(
         self,

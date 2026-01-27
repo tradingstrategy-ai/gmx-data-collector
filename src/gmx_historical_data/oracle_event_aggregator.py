@@ -80,10 +80,14 @@ def aggregate_oracle_events_to_ohlcv(
     df = df.sort_values(["timestamp", "original_order"])
 
     # Resample to OHLC (no volume)
-    ohlcv = df.set_index("timestamp").resample(timeframe).agg(
-        {
-            "price": ["first", "max", "min", "last"],
-        }
+    ohlcv = (
+        df.set_index("timestamp")
+        .resample(timeframe)
+        .agg(
+            {
+                "price": ["first", "max", "min", "last"],
+            }
+        )
     )
 
     # Flatten column names

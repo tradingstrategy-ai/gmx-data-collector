@@ -34,29 +34,37 @@ def aggregate_events_to_ohlcv(
     """
     if not events:
         # Return empty DataFrame with correct schema
-        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "symbol"])
+        return pd.DataFrame(
+            columns=["timestamp", "open", "high", "low", "close", "symbol"]
+        )
 
     # Convert events to DataFrame
     if use_execution_price:
         # Use actual execution price (includes slippage) for backtesting
         # This reflects what you'd actually get when executing trades
-        df = pd.DataFrame([
-            {
-                "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
-                "price": e.execution_price / GMX_USD_PRECISION,
-            }
-            for e in events
-        ])
+        df = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
+                    "price": e.execution_price / GMX_USD_PRECISION,
+                }
+                for e in events
+            ]
+        )
     else:
         # Use oracle mid-price: average of Chainlink's min/max prices
         # This gives clean market prices without price impact from executions
-        df = pd.DataFrame([
-            {
-                "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
-                "price": (e.index_token_price_min + e.index_token_price_max) / 2 / GMX_USD_PRECISION,
-            }
-            for e in events
-        ])
+        df = pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
+                    "price": (e.index_token_price_min + e.index_token_price_max)
+                    / 2
+                    / GMX_USD_PRECISION,
+                }
+                for e in events
+            ]
+        )
 
     # Add original order column to ensure deterministic sorting
     df["original_order"] = range(len(df))
@@ -65,9 +73,15 @@ def aggregate_events_to_ohlcv(
     df = df.sort_values(["timestamp", "original_order"])
 
     # Resample to OHLC (no volume)
-    ohlcv = df.set_index("timestamp").resample(timeframe).agg({
-        "price": ["first", "max", "min", "last"],
-    })
+    ohlcv = (
+        df.set_index("timestamp")
+        .resample(timeframe)
+        .agg(
+            {
+                "price": ["first", "max", "min", "last"],
+            }
+        )
+    )
 
     # Flatten column names
     ohlcv.columns = ["open", "high", "low", "close"]

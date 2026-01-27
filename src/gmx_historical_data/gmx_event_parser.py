@@ -121,7 +121,11 @@ def parse_position_event(
     # Extract position-specific fields - trust eth_defi to return correct types
     # Convert bytes32 position_key to hex string for storage
     position_key_bytes = event_data.get_bytes32("positionKey")
-    position_key_hex = position_key_bytes.hex() if isinstance(position_key_bytes, bytes) else str(position_key_bytes)
+    position_key_hex = (
+        position_key_bytes.hex()
+        if isinstance(position_key_bytes, bytes)
+        else str(position_key_bytes)
+    )
 
     return GMXPositionEvent(
         block_number=block_number,

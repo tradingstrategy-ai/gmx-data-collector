@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 
-import pandas as pd
 
 from gmx_historical_data.storage import ParquetStorage
 

@@ -1,7 +1,6 @@
 """Verify data collection completeness and quality."""
 
 import pandas as pd
-from pathlib import Path
 from dataclasses import dataclass
 from gmx_historical_data.storage import ParquetStorage
 
