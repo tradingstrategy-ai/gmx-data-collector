@@ -76,7 +76,7 @@ cp configs/adxmomentum_gmx.example.json configs/adxmomentum_gmx.json
 **N.B.**: The following step is very essential as we are saving the data as [`parquet`](https://en.wikipedia.org/wiki/Apache_Parquet) file but `freqtrade` expects the data as [`feather`](https://en.wikipedia.org/wiki/Feather_file_format) file format.
 
 ```bash
-# Export data to freqtrade format
+# Export data to freqtrade format (use --symbol for each token)
 gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./user_data/data/gmx \
     --symbol BTC --symbol ETH --timeframe 1h
 ```
@@ -256,9 +256,43 @@ data/
 
 ### Common Options
 
-- `--output-dir PATH` - Output directory (default: `./data`)
-- `--symbol TEXT` - Specific token (can repeat)
-- `--concurrency INT` - Parallel collection (default: 1)
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--output-dir PATH` | Output directory | `./data` |
+| `--symbol TEXT` | Token(s) - comma-separated for `collect`, repeatable for `export-freqtrade` | All tokens |
+| `--concurrency INT` | Parallelism level (see below) | `4` |
+
+> **Note:** `collect` uses comma-separated: `--symbol ETH,BTC,SUI`
+> `export-freqtrade` uses repeatable: `--symbol ETH --symbol BTC`
+
+### Concurrency & Performance
+
+The `--concurrency` option controls both:
+- **Symbol parallelism**: How many tokens are processed simultaneously
+- **RPC batch workers**: Concurrent Chainlink data fetchers (auto-capped at 8)
+
+| `--concurrency` | Symbols parallel | RPC batch workers | Use case |
+|-----------------|------------------|-------------------|----------|
+| 1 | 1 | 1 | Slow/rate-limited RPC |
+| 4 (default) | 4 | 4 | Balanced |
+| 8 | 8 | 8 | Fast RPC endpoint |
+| 10+ | 10+ | 8 (capped) | Maximum speed |
+
+**Examples:**
+```bash
+# Default speed (4 parallel)
+gmx_historical_data collect --default --output-dir ./data
+
+# Fast collection (10 symbols + 8 RPC workers)
+gmx_historical_data collect --full --output-dir ./data --concurrency 10
+
+# Specific tokens with parallelism
+gmx_historical_data collect --default --symbol ETH,BTC,SUI --concurrency 8
+```
+
+**Estimated times** (with `--concurrency 10`):
+- Single token (Chainlink): ~2-3 minutes
+- All 118 tokens: ~4-5 hours
 
 ## Troubleshooting
 

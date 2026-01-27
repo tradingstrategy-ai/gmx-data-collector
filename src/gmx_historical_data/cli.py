@@ -52,16 +52,24 @@ class DataCollector:
 
     :param config: Collection configuration
     :param use_gmx_api: If True, fetch latest data from GMX API and historical from Chainlink
+    :param chainlink_concurrency: Number of concurrent workers for Chainlink RPC batch requests
     """
 
-    def __init__(self, config: CollectionConfig, use_gmx_api: bool = True) -> None:
+    def __init__(
+        self,
+        config: CollectionConfig,
+        use_gmx_api: bool = True,
+        chainlink_concurrency: int = 4,
+    ) -> None:
         """Initialize data collector.
 
         :param config: Collection configuration
         :param use_gmx_api: If True, fetch latest data from GMX API
+        :param chainlink_concurrency: Concurrent workers for Chainlink RPC batches
         """
         self.config = config
         self.use_gmx_api = use_gmx_api
+        self.chainlink_concurrency = chainlink_concurrency
         self.web3 = Web3(Web3.HTTPProvider(config.rpc_url))
         self.hypersync = HyperSyncCollector(
             config.hypersync_endpoint,
@@ -347,6 +355,7 @@ class DataCollector:
                                 end_timestamp=backfill_end,  # Up to GMX coverage start
                                 max_rounds=1000000,  # 1M rounds limit
                                 batch_size=2000,  # Optimal batch size
+                                concurrency=self.chainlink_concurrency,
                             )
 
                             if rounds:
@@ -762,6 +771,7 @@ class DataCollector:
         self,
         start_block: int | None = None,
         end_block: int | None = None,
+        symbols: list[str] | None = None,
     ) -> None:
         """Collect data for non-Chainlink markets via GMX API + OraclePriceUpdate events.
 
@@ -770,6 +780,7 @@ class DataCollector:
 
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
+        :param symbols: List of specific symbols to collect (None = all non-Chainlink)
         """
         from gmx_historical_data.oracle_price_collector import OraclePriceCollector
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
@@ -809,12 +820,40 @@ class DataCollector:
             return
 
         # Get unique symbols (filter excluded, case-insensitive)
-        symbols = sorted(set(token_mapping.values()))
-        symbols = [s for s in symbols if not is_excluded_symbol(s)]
+        all_non_chainlink_symbols = sorted(set(token_mapping.values()))
+        all_non_chainlink_symbols = [
+            s for s in all_non_chainlink_symbols if not is_excluded_symbol(s)
+        ]
 
-        console.print(
-            f"[green]✓[/green] Found [cyan]{len(symbols)}[/cyan] non-Chainlink markets"
-        )
+        # Filter to requested symbols if specified
+        if symbols:
+            requested_upper = [s.upper() for s in symbols]
+            # Only include symbols that are both requested AND non-Chainlink
+            filtered_symbols = [
+                s for s in all_non_chainlink_symbols if s.upper() in requested_upper
+            ]
+            if not filtered_symbols:
+                console.print(
+                    f"[yellow]None of the requested symbols ({', '.join(symbols)}) "
+                    f"are non-Chainlink markets[/yellow]"
+                )
+                return
+            symbols_to_collect = filtered_symbols
+            # Filter token_mapping to only include tokens for requested symbols
+            token_mapping = {
+                addr: sym
+                for addr, sym in token_mapping.items()
+                if sym.upper() in requested_upper
+            }
+            console.print(
+                f"[green]✓[/green] Collecting [cyan]{len(symbols_to_collect)}[/cyan] "
+                f"non-Chainlink market(s): {', '.join(symbols_to_collect)}"
+            )
+        else:
+            symbols_to_collect = all_non_chainlink_symbols
+            console.print(
+                f"[green]✓[/green] Found [cyan]{len(symbols_to_collect)}[/cyan] non-Chainlink markets"
+            )
 
         # Get token decimals for price conversion
         try:
@@ -830,7 +869,7 @@ class DataCollector:
         gmx_data_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
 
         if self.use_gmx_api and self.gmx_fetcher:
-            for symbol in symbols:
+            for symbol in symbols_to_collect:
                 console.print(f"\n[cyan]{symbol}[/cyan]")
                 gmx_candles = {}
 
@@ -913,12 +952,12 @@ class DataCollector:
         # Step 3: Combine GMX API + Oracle events per symbol
         console.print("\n[bold]Step 3: Combining GMX API + Oracle data...[/bold]")
 
-        total = len(symbols)
+        total = len(symbols_to_collect)
         successful = 0
         failed = 0
         failed_symbols = []
 
-        for symbol in symbols:
+        for symbol in symbols_to_collect:
             console.print(f"\n[cyan]{symbol}[/cyan]")
 
             # Get GMX API data
@@ -1033,7 +1072,7 @@ def cli(
     symbol: Optional[str] = typer.Option(
         None,
         "--symbol",
-        help="Specific token symbol to collect (e.g., ETH, BTC)",
+        help="Token symbol(s) to collect, comma-separated (e.g., ETH,BTC,SUI)",
     ),
     output_dir: Path = typer.Option(
         Path("./data"),
@@ -1078,9 +1117,9 @@ def cli(
         help="Collect data for markets without Chainlink feeds using OraclePriceUpdate events (enabled by default)",
     ),
     concurrency: int = typer.Option(
-        1,
+        4,
         "--concurrency",
-        help="Number of symbols to process in parallel (default: 1 for sequential, set higher for parallel)",
+        help="Parallelism level: symbols processed concurrently + RPC batch workers (default: 4)",
         min=1,
         max=50,
     ),
@@ -1122,8 +1161,8 @@ def cli(
       # Recommended: Use --default for simplest full collection
       gmx_historical_data collect --default
 
-      # Collect specific tokens with default approach
-      gmx_historical_data collect --default --symbol ETH --symbol BTC
+      # Collect specific tokens (comma-separated)
+      gmx_historical_data collect --default --symbol ETH,BTC,SUI
 
       # Full historical collection for all 118 markets
       export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
@@ -1133,17 +1172,17 @@ def cli(
       # Incremental update (faster, only new data since last collection)
       gmx_historical_data collect --update --output-dir ./data
 
-      # Single symbol - Chainlink market (uses GMX API + Chainlink backfill)
-      gmx_historical_data collect --full --symbol ETH --output-dir ./data
+      # Chainlink + non-Chainlink mix (auto-detected)
+      gmx_historical_data collect --full --symbol ETH,SUI --output-dir ./data
 
-      # Single symbol - Non-Chainlink market (uses oracle events)
+      # Single non-Chainlink market
       gmx_historical_data collect --full --symbol SUI --output-dir ./data
 
       # Collect only Chainlink markets (skip 84 non-Chainlink markets)
       gmx_historical_data collect --full --no-collect-non-chainlink --output-dir ./data
 
-      # Parallel collection (faster but uses more resources)
-      gmx_historical_data collect --update --concurrency 4 --output-dir ./data
+      # Fast parallel collection (10 symbols + RPC batches concurrently)
+      gmx_historical_data collect --full --concurrency 10 --output-dir ./data
 
     VERIFICATION:
       After collection, verify data quality:
@@ -1207,40 +1246,60 @@ def cli(
     )
 
     # Create collector
-    collector = DataCollector(config, use_gmx_api=use_gmx_api)
+    # Auto-derive chainlink RPC concurrency: use concurrency but cap at 8 to avoid RPC rate limits
+    chainlink_concurrency = min(concurrency, 8)
+    collector = DataCollector(
+        config, use_gmx_api=use_gmx_api, chainlink_concurrency=chainlink_concurrency
+    )
 
     # Run collection
     try:
         if symbol:
-            # Single symbol collection
-            symbol_upper = symbol.upper()
-            if is_excluded_symbol(symbol_upper):
-                console.print(
-                    f"[yellow]Warning: {symbol_upper} is excluded (deprecated/problematic)[/yellow]"
-                )
-                console.print(f"[dim]Skipping collection for {symbol_upper}[/dim]")
+            # Parse comma-separated symbols
+            symbols_list = [s.strip().upper() for s in symbol.split(",") if s.strip()]
+
+            # Filter out excluded symbols
+            valid_symbols = []
+            for sym in symbols_list:
+                if is_excluded_symbol(sym):
+                    console.print(
+                        f"[yellow]Warning: {sym} is excluded (deprecated/problematic) - skipping[/yellow]"
+                    )
+                else:
+                    valid_symbols.append(sym)
+
+            if not valid_symbols:
+                console.print("[red]No valid symbols to collect[/red]")
                 raise typer.Exit(0)
 
-            # Check if symbol is non-Chainlink
-            non_chainlink_symbols = get_gmx_markets_without_chainlink_feeds()
-            if symbol_upper in non_chainlink_symbols:
-                # Non-Chainlink symbol - use oracle events
+            # Separate Chainlink and non-Chainlink symbols
+            non_chainlink_set = get_gmx_markets_without_chainlink_feeds()
+            chainlink_symbols = [s for s in valid_symbols if s not in non_chainlink_set]
+            non_chainlink_symbols = [s for s in valid_symbols if s in non_chainlink_set]
+
+            # Collect Chainlink symbols
+            for sym in chainlink_symbols:
+                if use_events:
+                    console.print(
+                        "[red]Error: Single symbol collection with --use-events is not supported. "
+                        "Use collect_all_symbols instead.[/red]"
+                    )
+                    raise typer.Exit(1)
+                asyncio.run(collector.collect_symbol(sym, full=full))
+
+            # Collect non-Chainlink symbols
+            if non_chainlink_symbols:
                 console.print(
-                    f"[cyan]{symbol_upper} is a non-Chainlink market - using oracle events[/cyan]"
+                    f"[cyan]Non-Chainlink market(s): {', '.join(non_chainlink_symbols)} "
+                    f"- using oracle events[/cyan]"
                 )
                 asyncio.run(
                     collector.collect_non_chainlink_markets(
                         start_block=start_block,
                         end_block=end_block,
+                        symbols=non_chainlink_symbols,
                     )
                 )
-            elif use_events:
-                console.print(
-                    "[red]Error: Single symbol collection with --use-events is not supported. Use collect_all_symbols instead.[/red]"
-                )
-                raise typer.Exit(1)
-            else:
-                asyncio.run(collector.collect_symbol(symbol_upper, full=full))
         else:
             # Collect all symbols
             # Step 1: Collect Chainlink markets via GMX API

@@ -10,6 +10,7 @@ Reference: https://docs.chain.link/data-feeds/api-reference
 """
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Callable
 from dataclasses import dataclass
 
@@ -321,6 +322,7 @@ class ChainlinkRPCCollector:
         end_timestamp: Optional[int] = None,
         max_rounds: int = 1000000,
         batch_size: int = 2000,
+        concurrency: int = 4,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ChainlinkRound]:
         """Collect historical rounds via RPC using JSON-RPC batch requests.
@@ -328,13 +330,14 @@ class ChainlinkRPCCollector:
         Strategy:
         1. Get latest round
         2. Binary search to find start/end round IDs
-        3. Batch fetch rounds using JSON-RPC batching (~700 rounds/sec)
+        3. Batch fetch rounds using JSON-RPC batching with concurrent workers
 
         :param aggregator_address: Aggregator contract address
         :param start_timestamp: Start timestamp (None = collect all)
         :param end_timestamp: End timestamp (None = latest)
         :param max_rounds: Maximum rounds to collect (safety limit)
         :param batch_size: Rounds per batch request (default: 2000)
+        :param concurrency: Number of concurrent batch workers (default: 4)
         :param progress_callback: Optional callback for progress updates
         :return: List of historical rounds
         """
@@ -390,31 +393,60 @@ class ChainlinkRPCCollector:
         round_ids = list(range(start_round_id, min(start_round_id + total_rounds, end_round_id + 1)))
 
         num_batches = (len(round_ids) + batch_size - 1) // batch_size
-        console.print(f"  [dim]Fetching in {num_batches:,} batches of {batch_size} rounds each...[/dim]")
+        console.print(
+            f"  [dim]Fetching in {num_batches:,} batches of {batch_size} rounds "
+            f"({concurrency} concurrent workers)...[/dim]"
+        )
 
-        # Collect rounds in batches using Multicall3
-        all_rounds = []
-        collected = 0
-        failed = 0
-
+        # Create batches
+        batches = []
         for i in range(0, len(round_ids), batch_size):
             batch = round_ids[i : i + batch_size]
-            batch_results = self.get_rounds_batch(aggregator_address, batch)
+            batch_idx = i // batch_size
+            batches.append((batch_idx, batch))
 
-            for result in batch_results:
+        # Collect rounds in batches using concurrent workers
+        all_results: dict[int, list] = {}  # batch_idx -> results
+        collected = 0
+        failed = 0
+        completed_batches = 0
+
+        def process_batch(batch_info: tuple[int, list[int]]) -> tuple[int, list]:
+            """Process a single batch and return (batch_idx, results)."""
+            batch_idx, batch_round_ids = batch_info
+            results = self.get_rounds_batch(aggregator_address, batch_round_ids)
+            return batch_idx, results
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(process_batch, b): b[0] for b in batches}
+
+            for future in as_completed(futures):
+                batch_idx, batch_results = future.result()
+                all_results[batch_idx] = batch_results
+                completed_batches += 1
+
+                # Count successes/failures for this batch
+                batch_collected = sum(1 for r in batch_results if r is not None)
+                batch_failed = len(batch_results) - batch_collected
+                collected += batch_collected
+                failed += batch_failed
+
+                # Progress update every 10 batches or at end
+                if completed_batches % 10 == 0 or completed_batches == num_batches:
+                    progress_msg = (
+                        f"Batch {completed_batches:,}/{num_batches:,}: "
+                        f"{collected:,} rounds collected ({failed:,} failed)"
+                    )
+                    console.print(f"  [dim]{progress_msg}[/dim]")
+                    if progress_callback:
+                        progress_callback(progress_msg)
+
+        # Merge results in order
+        all_rounds = []
+        for batch_idx in sorted(all_results.keys()):
+            for result in all_results[batch_idx]:
                 if result:
                     all_rounds.append(result)
-                    collected += 1
-                else:
-                    failed += 1
-
-            # Progress update
-            batch_num = i // batch_size + 1
-            if batch_num % 10 == 0 or batch_num == num_batches:
-                progress_msg = f"Batch {batch_num:,}/{num_batches:,}: {collected:,} rounds collected ({failed:,} failed)"
-                console.print(f"  [dim]{progress_msg}[/dim]")
-                if progress_callback:
-                    progress_callback(progress_msg)
 
         console.print(
             f"  [green]✓ Collected {len(all_rounds):,} rounds via Multicall3 "
