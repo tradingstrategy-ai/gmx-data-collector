@@ -64,7 +64,7 @@ GMX requires [gmx-ccxt-freqtrade](https://github.com/tradingstrategy-ai/gmx-ccxt
 ```bash
 # Create isolated environment for freqtrade
 python -m venv .venv && source .venv/bin/activate
-pip install freqtrade web3-ethereum-defi
+pip install "freqtrade>=2025.11" "web3-ethereum-defi[web3v7,ccxt]>=0.38"
 
 # Run backtest with GMX support
 ./freqtrade-gmx backtesting --datadir ./freqtrade_data/gmx --strategy ADXMomentum
