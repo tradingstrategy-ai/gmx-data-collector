@@ -103,6 +103,11 @@ test_gmx_tokens/
 test_structure/
 *.parquet
 checkpoints/
+freqtrade_data/
+user_data/
+
+# Plans
+docs/plans/
 
 # Generated plots
 *.png

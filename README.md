@@ -55,14 +55,14 @@ gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./freqtrade_
 gmx_historical_data export-freqtrade --data-dir ./data --symbol ETH --timeframe 1h
 ```
 
-> **Note:** Freqtrade requires `pandas<3.0` (incompatible with this project). Install freqtrade in a separate environment.
-
 ### Run Backtests
 
-GMX requires [gmx-ccxt-freqtrade](https://github.com/tradingstrategy-ai/gmx-ccxt-freqtrade) monkeypatch. Use the included `freqtrade-gmx` wrapper:
+GMX requires [gmx-ccxt-freqtrade](https://github.com/tradingstrategy-ai/gmx-ccxt-freqtrade) monkeypatch. Use the included `freqtrade-gmx` wrapper.
+
+> **Important:** Install `freqtrade` and `web3-ethereum-defi` in a separate isolated environment. Freqtrade requires `pandas<3.0` which conflicts with this project's `pandas>=3.0`. Even though `web3-ethereum-defi` is a project dependency, a clean install in an isolated venv avoids dependency conflicts.
 
 ```bash
-# Setup freqtrade environment
+# Create isolated environment for freqtrade
 python -m venv .venv && source .venv/bin/activate
 pip install freqtrade web3-ethereum-defi
 
