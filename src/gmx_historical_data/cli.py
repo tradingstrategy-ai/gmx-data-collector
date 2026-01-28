@@ -406,7 +406,7 @@ class DataCollector:
                         start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
                         end_timestamp=boundaries_1h.chainlink_end_timestamp,      # Use calculated boundary
                         max_rounds=1000000,
-                        batch_size=2000,
+                        batch_size=3000,  # Multicall3 batch size (optimized for RPC limits)
                         concurrency=self.chainlink_concurrency,
                     )
 

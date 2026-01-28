@@ -43,11 +43,44 @@ class ChainlinkRound:
 class ChainlinkRPCCollector:
     """Collect historical Chainlink data via RPC calls.
 
-    Uses JSON-RPC batch requests with getAnswer/getTimestamp for efficient
-    bulk data fetching. Falls back to getRoundData for single queries.
+    Uses Multicall3 contract aggregation for efficient bulk data fetching.
+    Falls back to getRoundData for single queries.
 
     :param web3: Web3 instance connected to Arbitrum RPC
     """
+
+    # Multicall3 contract address (same on all chains)
+    MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
+
+    # Multicall3 ABI (only aggregate3 function needed)
+    MULTICALL3_ABI = [
+        {
+            "inputs": [
+                {
+                    "components": [
+                        {"name": "target", "type": "address"},
+                        {"name": "allowFailure", "type": "bool"},
+                        {"name": "callData", "type": "bytes"},
+                    ],
+                    "name": "calls",
+                    "type": "tuple[]",
+                }
+            ],
+            "name": "aggregate3",
+            "outputs": [
+                {
+                    "components": [
+                        {"name": "success", "type": "bool"},
+                        {"name": "returnData", "type": "bytes"},
+                    ],
+                    "name": "returnData",
+                    "type": "tuple[]",
+                }
+            ],
+            "stateMutability": "payable",
+            "type": "function",
+        }
+    ]
 
     # Aggregator V3 Interface ABI (official Chainlink interface)
     AGGREGATOR_V3_ABI = [
@@ -218,10 +251,10 @@ class ChainlinkRPCCollector:
     def get_rounds_batch(
         self, aggregator_address: str, round_ids: list[int]
     ) -> list[Optional[ChainlinkRound]]:
-        """Get multiple rounds using JSON-RPC batch requests.
+        """Get multiple rounds using Multicall3 aggregation.
 
-        Uses getAnswer() and getTimestamp() from the old AggregatorInterface
-        which work with JSON-RPC batching (getRoundData has access control issues).
+        Uses Multicall3 contract to aggregate getAnswer() and getTimestamp() calls
+        into a single RPC request for maximum efficiency.
 
         :param aggregator_address: Aggregator contract address
         :param round_ids: List of round IDs to query
@@ -231,79 +264,62 @@ class ChainlinkRPCCollector:
             return []
 
         aggregator_address = Web3.to_checksum_address(aggregator_address)
-        contract = self.web3.eth.contract(
+
+        # Create contract instances
+        aggregator_contract = self.web3.eth.contract(
             address=aggregator_address, abi=self.AGGREGATOR_OLD_ABI
         )
+        multicall3_contract = self.web3.eth.contract(
+            address=self.MULTICALL3_ADDRESS, abi=self.MULTICALL3_ABI
+        )
 
-        # Build JSON-RPC batch request - interleave getAnswer and getTimestamp
-        batch_requests = []
-        for i, round_id in enumerate(round_ids):
-            answer_data = contract.encode_abi("getAnswer", [round_id])
-            timestamp_data = contract.encode_abi("getTimestamp", [round_id])
+        # Build Multicall3 calls - interleave getAnswer and getTimestamp
+        multicall_calls = []
+        for round_id in round_ids:
+            # getAnswer call
+            answer_data = aggregator_contract.encode_abi("getAnswer", [round_id])
+            multicall_calls.append({
+                "target": aggregator_address,
+                "allowFailure": True,  # Don't revert entire batch if one call fails
+                "callData": answer_data,
+            })
 
-            batch_requests.append(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "eth_call",
-                    "params": [{"to": aggregator_address, "data": answer_data}, "latest"],
-                    "id": i * 2,  # Even IDs for answers
-                }
-            )
-            batch_requests.append(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "eth_call",
-                    "params": [{"to": aggregator_address, "data": timestamp_data}, "latest"],
-                    "id": i * 2 + 1,  # Odd IDs for timestamps
-                }
-            )
+            # getTimestamp call
+            timestamp_data = aggregator_contract.encode_abi("getTimestamp", [round_id])
+            multicall_calls.append({
+                "target": aggregator_address,
+                "allowFailure": True,
+                "callData": timestamp_data,
+            })
 
-        # Execute batch request
+        # Execute Multicall3.aggregate3
         try:
-            response = requests.post(
-                self.rpc_url,
-                json=batch_requests,
-                headers={"Content-Type": "application/json"},
-                timeout=120,
-            )
-            results = response.json()
+            results = multicall3_contract.functions.aggregate3(multicall_calls).call()
         except Exception as e:
-            console.print(f"  [yellow]⚠ Batch RPC failed: {e}[/yellow]")
+            console.print(f"  [yellow]⚠ Multicall3 failed: {e}[/yellow]")
             return [None] * len(round_ids)
-
-        # Handle both list and single response
-        if not isinstance(results, list):
-            results = [results]
-
-        # Index by ID for fast lookup
-        results_by_id = {r.get("id"): r for r in results}
 
         # Decode results
         rounds = []
         for i, round_id in enumerate(round_ids):
-            answer_result = results_by_id.get(i * 2)
-            timestamp_result = results_by_id.get(i * 2 + 1)
+            answer_result = results[i * 2]  # Even indices for answers
+            timestamp_result = results[i * 2 + 1]  # Odd indices for timestamps
 
-            if (
-                answer_result
-                and "result" in answer_result
-                and answer_result["result"]
-                and timestamp_result
-                and "result" in timestamp_result
-                and timestamp_result["result"]
-            ):
+            if answer_result[0] and timestamp_result[0]:  # Both calls succeeded
                 try:
-                    answer = int(answer_result["result"], 16)
-                    # Handle signed int256
-                    if answer >= 2**255:
-                        answer -= 2**256
-                    timestamp = int(timestamp_result["result"], 16)
+                    # Decode answer (int256)
+                    answer_bytes = answer_result[1]
+                    answer = int.from_bytes(answer_bytes, byteorder="big", signed=True)
+
+                    # Decode timestamp (uint256)
+                    timestamp_bytes = timestamp_result[1]
+                    timestamp = int.from_bytes(timestamp_bytes, byteorder="big", signed=False)
 
                     rounds.append(
                         ChainlinkRound(
                             round_id=round_id,
                             answer=answer,
-                            started_at=timestamp,  # Use same as updated_at
+                            started_at=timestamp,
                             updated_at=timestamp,
                             answered_in_round=round_id,
                         )
@@ -311,6 +327,7 @@ class ChainlinkRPCCollector:
                 except Exception:
                     rounds.append(None)
             else:
+                # One or both calls failed (round doesn't exist)
                 rounds.append(None)
 
         return rounds
@@ -321,27 +338,27 @@ class ChainlinkRPCCollector:
         start_timestamp: Optional[int] = None,
         end_timestamp: Optional[int] = None,
         max_rounds: int = 1000000,
-        batch_size: int = 2000,
-        concurrency: int = 4,
+        batch_size: int = 3000,
+        concurrency: int = 8,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ChainlinkRound]:
-        """Collect historical rounds via RPC using JSON-RPC batch requests.
+        """Collect historical rounds via RPC using Multicall3 aggregation.
 
         Strategy:
         1. Get latest round
         2. Binary search to find start/end round IDs
-        3. Batch fetch rounds using JSON-RPC batching with concurrent workers
+        3. Batch fetch rounds using Multicall3 contract with concurrent workers
 
         :param aggregator_address: Aggregator contract address
         :param start_timestamp: Start timestamp (None = collect all)
         :param end_timestamp: End timestamp (None = latest)
         :param max_rounds: Maximum rounds to collect (safety limit)
-        :param batch_size: Rounds per batch request (default: 2000)
-        :param concurrency: Number of concurrent batch workers (default: 4)
+        :param batch_size: Rounds per batch request (default: 3000, optimized for RPC limits)
+        :param concurrency: Number of concurrent batch workers (default: 8)
         :param progress_callback: Optional callback for progress updates
         :return: List of historical rounds
         """
-        console.print("  [cyan]Collecting via RPC (JSON-RPC batch mode)...[/cyan]")
+        console.print("  [cyan]Collecting via RPC (Multicall3 aggregation)...[/cyan]")
 
         # Get latest round
         latest_round = self.get_latest_round(aggregator_address)
