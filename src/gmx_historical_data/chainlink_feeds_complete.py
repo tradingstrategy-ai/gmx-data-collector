@@ -9,13 +9,14 @@ Use aggregator_discovery.py to get the actual aggregator addresses for event col
 
 # Chainlink Price Feeds on Arbitrum Mainnet (Proxy Addresses)
 # Format: "SYMBOL": "proxy_address"
+# Source: https://data.chain.link/feeds/arbitrum/mainnet/ (verified 2026-01-28)
 CHAINLINK_FEEDS_ARBITRUM: dict[str, str] = {
     # ========================================
     # Major Cryptocurrencies
     # ========================================
     "BTC": "0x6ce185860a4963106506C203335A2910413708e9",  # Bitcoin - Most liquid crypto asset
     "ETH": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",  # Ethereum - Smart contract platform
-    "WBTC": "0x6ce185860a4963106506C203335A2910413708e9",  # Wrapped Bitcoin - ERC20 BTC (same feed as BTC)
+    "WBTC": "0xd0C7101eACbB49F3deCcCc166d238410D6D46d57",  # Wrapped Bitcoin - ERC20 BTC (separate feed)
     "WETH": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",  # Wrapped Ethereum - ERC20 ETH (same feed as ETH)
     # ========================================
     # Stablecoins
@@ -31,8 +32,10 @@ CHAINLINK_FEEDS_ARBITRUM: dict[str, str] = {
     "SOL": "0x24ceA4b8ce57cdA5058b924B9B9987992450590c",  # Solana - High-performance blockchain
     "AVAX": "0x8bf61728eeDCE2F32c456454d87B5d6eD6150208",  # Avalanche - Smart contracts platform
     "BNB": "0x6970460aabF80C5BE983C6b74e5D06dEDCA95D4A",  # BNB - Binance ecosystem token
-    "MATIC": "0x52099D4523531f678Dfc568a7B1e5038aadcE1d6",  # Polygon (POL) - Ethereum scaling and infrastructure
+    "POL": "0x82BA56a2fADF9C14f17D08bc51bDA0bDB83A8934",  # Polygon (formerly MATIC) - Ethereum scaling
     "OP": "0x205aaD468a11fd5D34fA7211bC6Bad5b3deB9b98",  # Optimism - Ethereum Layer 2 with optimistic rollups
+    "ATOM": "0xCDA67618e51762235eacA373894F0C79256768fa",  # Cosmos - Inter-blockchain communication protocol
+    "NEAR": "0xBF5C3fB2633e924598A46B9D07a174a9DBcF57C0",  # Near Protocol - Sharded proof-of-stake blockchain
     # ========================================
     # DeFi Protocol Tokens
     # ========================================
@@ -41,7 +44,7 @@ CHAINLINK_FEEDS_ARBITRUM: dict[str, str] = {
     "UNI": "0x9C917083fDb403ab5ADbEC26Ee294f6EcAda2720",  # Uniswap - Leading decentralized exchange
     "LINK": "0x86E53CF1B870786351Da77A57575e79CB55812CB",  # Chainlink - Decentralized oracle network
     "GMX": "0xDB98056FecFff59D032aB628337A4887110df3dB",  # GMX - Decentralized perpetual exchange
-    "LDO": "0x0Dbb4B3c65D72F64fbC0aCAab93b6C02b8db27d1",  # Lido DAO - Liquid staking governance token
+    "LDO": "0xA43A34030088E6510FecCFb77E88ee5e7ed0fE64",  # Lido DAO - Liquid staking governance token
     "COMP": "0xe7C53FFd03Eb6ceF7d208bC4C13446c76d1E5884",  # Compound - Algorithmic money market protocol
     "MKR": "0xdE9f0894670c4EFcacF370426F10C3AD2Cdf147e",  # Maker - MakerDAO governance token
     "SNX": "0x054296f0D036b95531B4E14aFB578B80CFb41252",  # Synthetix - Synthetic asset issuance protocol
@@ -49,52 +52,46 @@ CHAINLINK_FEEDS_ARBITRUM: dict[str, str] = {
     "YFI": "0x745Ab5b69E01E2BE1104Ca84937Bb71f96f5fB21",  # Yearn Finance - Yield optimization protocol
     "BAL": "0xBE5eA816870D11239c543F84b71439511D70B94f",  # Balancer - Automated portfolio manager and DEX
     "1INCH": "0x4bC735Ef24bf286983024CAd5D03f0738865Aaef",  # 1inch - DEX aggregator
+    "PENDLE": "0x66853E19d73c0F9301fe099c324A1E9726953433",  # Pendle - Yield tokenization and trading
+    "RDNT": "0x20d0Fcab0ECFD078B036b6CAf1FaC69A6453b352",  # Radiant Capital - Cross-chain lending protocol
     # ========================================
-    # Liquid Staking Derivatives
+    # Liquid Staking Derivatives (NOTE: Only ETH-denominated feeds available, not USD)
     # ========================================
-    "WSTETH": "0xB1552C5e96B312d0Bf8b554186F846C40614a540",  # Wrapped Staked ETH - Lido wrapped stETH
-    "STETH": "0xded2c52b75B24732e9107377B7Ba93eC1fFa4BAf",  # Staked ETH - Lido liquid staking token
-    "RETH": "0xD6aB2298946840262FcC278fF31516D39fF611eF",  # Rocket Pool ETH - Decentralized liquid staking
-    "CBETH": "0x0C1E8d72b9D861b9E4e68e2f47eF1b30C0Fa2E9c",  # Coinbase Wrapped Staked ETH
+    "STETH": "0x07C5b924399cc23c24a95c8743DE4006a32b7f2a",  # Staked ETH - Lido liquid staking (stETH/USD)
+    # NOTE: wstETH, rETH, cbETH only have ETH-denominated feeds on Arbitrum:
+    # - wstETH/ETH: 0xb523AE262D20A936BC152e6023996e46FDC2A95D
+    # - rETH/ETH: 0xD6aB2298946840262FcC278fF31516D39fF611eF
+    # - cbETH/ETH: 0xa668682974E3f121185a3cD94f00322beC674275
+    # To get USD prices, multiply by ETH/USD feed
     # ========================================
     # Meme Tokens
     # ========================================
-    "DOGE": "0x9A7FB1b3950837a8D9b40517f8F2e7a0E9a2Fcc3",  # Dogecoin - Original meme cryptocurrency
-    "SHIB": "0xd7C3ecF45b3c03eFdBE5c462ff57aCe4c61c9b9e",  # Shiba Inu - Ethereum-based dog-themed token
-    "PEPE": "0x02DEd5a7EDDA750E3Eb240b54B5cBDb4Eaf4e2f1",  # Pepe - Frog-themed meme token
-    "WIF": "0x4b71024A3C47661F6f8a93C59d28C60CED5666De",  # Dogwifhat - Solana meme token
-    "BONK": "0x7ca333013c1b6C38bE4D0D79b9f5c8E207cD0D2C",  # Bonk - Solana ecosystem meme token
+    "DOGE": "0x9A7FB1b3950837a8D9b40517626E11D4127C098C",  # Dogecoin - Original meme cryptocurrency
+    "SHIB": "0x0E278D14B4bf6429dDB0a1B353e2Ae8A4e128C93",  # Shiba Inu - Ethereum-based dog-themed token
+    "PEPE": "0x02DEd5a7EDDA750E3Eb240b54437a54d57b74dBE",  # Pepe - Frog-themed meme token
+    "WIF": "0xF7Ee427318d2Bd0EEd3c63382D0d52Ad8A68f90D",  # Dogwifhat - Solana meme token
+    # NOTE: BONK does not have a Chainlink feed on Arbitrum
     # ========================================
-    # Additional Layer 1 & Ecosystem Tokens
+    # Additional Cryptocurrencies
     # ========================================
-    "FTM": "0x2e9E1d0AB9dc94eDb7CFa5F4D83a0e8EF5dDa6e6",  # Fantom - High-throughput smart contract platform
-    "ATOM": "0x09c38e2792e5eDd02be2AAA18e52Bfea93c9D097",  # Cosmos - Inter-blockchain communication protocol
-    "NEAR": "0xb1a7D7a76e2EAEE9cDc6c9E50a7Ae44fEe02F4C6",  # Near Protocol - Sharded proof-of-stake blockchain
-    "FIL": "0x92Fe6f31a9Ecc041f09a7ae4cB0BA324D2ce4e8E",  # Filecoin - Decentralized storage network
-    "APE": "0x77cBF3dB9a5D2f11d10e79Fd0Ed378c6A7E3aA1E",  # ApeCoin - Governance token for APE ecosystem
-    "LTC": "0x83EBc16D3b7088B2B39a86F6F1C8C52d68C7C58A",  # Litecoin - Peer-to-peer cryptocurrency
-    "BCH": "0x911D6FFecb72e3C3d1DBbF0e96bDB93c83D3c5B7",  # Bitcoin Cash - Bitcoin fork with larger blocks
-    "XRP": "0xA67f75eBF0Eb83aB90fFB13bf7D8FD1EAEC4f07c",  # Ripple - Payment settlement and remittance network
-    # ========================================
-    # Arbitrum Native & Emerging DeFi
-    # ========================================
-    "RDNT": "0x20d0Fcab0ECFD078B036b6CAf1FaC69A6453b352",  # Radiant Capital - Cross-chain lending protocol
-    "PENDLE": "0x66853E19d73c0F9301fe099c324A1E9726953433",  # Pendle - Yield tokenization and trading
+    "APE": "0x221912ce795669f628c51c69b7d0873eDA9C03bB",  # ApeCoin - Governance token for APE ecosystem
+    "LTC": "0x5698690a7B7B84F6aa985ef7690A8A7288FBc9c8",  # Litecoin - Peer-to-peer cryptocurrency
+    "XRP": "0xB4AD57B52aB9141de9926a3e0C8dc6264c2ef205",  # Ripple - Payment settlement and remittance network
+    # NOTE: FTM, FIL, BCH do not have Chainlink feeds on Arbitrum
 }
 
 # Manual symbol overrides for GMX to Chainlink mapping
 # Use this when GMX uses different symbols than Chainlink
 # NOTE: Keys must be uppercase to match the uppercased input in find_chainlink_symbol()
 GMX_TO_CHAINLINK_SYMBOL_OVERRIDES: dict[str, str] = {
-    "WBTC.B": "BTC",
-    "WBTC": "BTC",
+    "WBTC.B": "WBTC",
+    "WBTC": "WBTC",
     "BTC.B": "BTC",
     "WETH": "ETH",
     "USDC.E": "USDC",
     "USDT.E": "USDT",
     "DAI.E": "DAI",
-    "WSTETH": "WSTETH",
-    "POL": "MATIC",  # Polygon rebrand
+    "MATIC": "POL",  # Polygon rebranded to POL - use POL feed for MATIC
 }
 
 

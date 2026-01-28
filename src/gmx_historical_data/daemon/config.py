@@ -11,21 +11,24 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
     This function filters the GMX markets to only those with available Chainlink
     oracle data, ensuring we can collect reliable OHLCV candles.
 
-    Markets WITH Chainlink feeds (34 total):
-        AAVE, APE, ARB, ATOM, AVAX, BCH, BNB, BONK, BTC, CRV, DAI, DOGE,
-        ETH, FIL, GMX, LDO, LINK, LTC, MKR, NEAR, OP, PENDLE, PEPE, POL,
-        SHIB, SOL, UNI, USDC, USDC.e, USDT, WBTC.b, WIF, XRP, wstETH
+    Markets WITH Chainlink feeds (30 total):
+        AAVE, APE, ARB, ATOM, AVAX, BNB, BTC, CRV, DAI, DOGE, ETH, GMX,
+        LDO, LINK, LTC, MKR, NEAR, OP, PENDLE, PEPE, POL, SHIB, SOL,
+        STETH, UNI, USDC, USDC.e, USDT, WBTC.b, WIF, XRP
 
-    Markets WITHOUT Chainlink feeds (84 total - not collected by default):
+    Markets WITHOUT Chainlink feeds (88 total - not collected by default):
         0G, ADA, AERO, AI16Z, AIXBT, ALGO, ANIME, APE_deprecated, APT, AR,
-        ASTER, AVNT, BERA, BOME, BRETT, CAKE, CHZ, CRO, CVX, DASH, DOLO,
-        DOT, DYDX, EIGEN, ENA, FARTCOIN, FET, FLOKI, GLV [ETH-USDC],
-        GLV [WBTC.b-USDC], HBAR, HYPE, ICP, INJ, IP, JTO, JUP, KAS, KTA,
-        LINEA, LIT, MELANIA, MEME, MEW, MNT, MON, MOODENG, MORPHO, OKB,
-        OM, ONDO, ORDI, PENGU, PI, PUMP, RENDER, S, SATS, SEI, SKY,
-        SPX6900, STX, SUI, SYRUP, TAO, TIA, TON, TRUMP, TRX, USDe, VIRTUAL,
-        VVV, WELL, WLD, WLFI, XAUT, XAUT.v2, XLM, XMR, XPL, ZEC, ZORA, ZRO,
-        tBTC
+        ASTER, AVNT, BCH, BERA, BOME, BONK, BRETT, CAKE, CHZ, CRO, CVX,
+        DASH, DOLO, DOT, DYDX, EIGEN, ENA, FARTCOIN, FET, FIL, FLOKI,
+        FTM, GLV [ETH-USDC], GLV [WBTC.b-USDC], HBAR, HYPE, ICP, INJ, IP,
+        JTO, JUP, KAS, KTA, LINEA, LIT, MELANIA, MEME, MEW, MNT, MON,
+        MOODENG, MORPHO, OKB, OM, ONDO, ORDI, PENGU, PI, PUMP, RENDER, S,
+        SATS, SEI, SKY, SPX6900, STX, SUI, SYRUP, TAO, TIA, TON, TRUMP,
+        TRX, USDe, VIRTUAL, VVV, WELL, WLD, WLFI, XAUT, XAUT.v2, XLM, XMR,
+        XPL, ZEC, ZORA, ZRO, tBTC, wstETH, rETH, cbETH
+
+    NOTE: wstETH, rETH, and cbETH only have ETH-denominated feeds (not USD) on Arbitrum.
+          STETH has a USD feed, so it's included in the Chainlink list.
 
     :return: List of GMX market symbols with Chainlink feeds
     """
@@ -35,15 +38,12 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         "ARB",
         "ATOM",
         "AVAX",
-        "BCH",
         "BNB",
-        "BONK",
         "BTC",
         "CRV",
         "DAI",
         "DOGE",
         "ETH",
-        "FIL",
         "GMX",
         "LDO",
         "LINK",
@@ -56,6 +56,7 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         "POL",
         "SHIB",
         "SOL",
+        "STETH",
         "UNI",
         "USDC",
         "USDC.e",
@@ -63,14 +64,13 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         "WBTC.b",
         "WIF",
         "XRP",
-        "wstETH",
     ]
 
 
 def get_gmx_markets_without_chainlink_feeds() -> list[str]:
     """Get list of GMX markets that do NOT have public Chainlink price feeds.
 
-    These 84 markets require OraclePriceUpdate event collection from
+    These 88 markets require OraclePriceUpdate event collection from
     GMX EventEmitter contract to build OHLCV candles.
 
     :return: List of GMX market symbols without Chainlink feeds
@@ -87,8 +87,10 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "AR",
         "ASTER",
         "AVNT",
+        "BCH",  # No Chainlink feed on Arbitrum
         "BERA",
         "BOME",
+        "BONK",  # No Chainlink feed on Arbitrum
         "BRETT",
         "CAKE",
         "CHZ",
@@ -102,7 +104,9 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "ENA",
         "FARTCOIN",
         "FET",
+        "FIL",  # No Chainlink feed on Arbitrum
         "FLOKI",
+        "FTM",  # No Chainlink feed on Arbitrum
         "HBAR",
         "HYPE",
         "ICP",
@@ -157,6 +161,9 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "ZORA",
         "ZRO",
         "tBTC",
+        "wstETH",  # Only has ETH-denominated feed (wstETH/ETH), not USD
+        "rETH",    # Only has ETH-denominated feed (rETH/ETH), not USD
+        "cbETH",   # Only has ETH-denominated feed (cbETH/ETH), not USD
     ]
 
 
