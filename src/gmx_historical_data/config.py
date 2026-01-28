@@ -1,7 +1,20 @@
 """Configuration for GMX historical data collection via HyperSync."""
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
+
+
+class FetchMode(Enum):
+    """Collection mode for data fetching.
+
+    :cvar FULL: Collect all available historical data from genesis
+    :cvar INCREMENTAL: Only fetch new data since last collection
+    :cvar NO_FETCH: Data is current, no fetch needed
+    """
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    NO_FETCH = "no_fetch"
 
 
 @dataclass

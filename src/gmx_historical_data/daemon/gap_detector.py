@@ -228,7 +228,7 @@ class AdaptiveGapDetector:
     | 15min     | ~100 days  | Every 30 days           |
     | 1h        | ~416 days  | Every 180 days          |
     | 4h        | ~1,664 days| Every 365 days          |
-    | 1D        | ~27 years  | Effectively never       |
+    | 1d        | ~27 years  | Effectively never       |
 
     This detector compares our storage against the API's actual data range
     to detect permanent data loss scenarios.

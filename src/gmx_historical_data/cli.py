@@ -17,6 +17,7 @@ console = Console()
 
 from gmx_historical_data.config import (
     CollectionConfig,
+    FetchMode,
     TIMEFRAMES,
     GMX_V2_GENESIS_BLOCK,
     is_excluded_symbol,
@@ -45,6 +46,7 @@ from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 from gmx_historical_data.daemon.config import get_gmx_markets_without_chainlink_feeds
 from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector
 from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
+from gmx_historical_data.fetch_boundary_calculator import FetchBoundaryCalculator
 
 
 class DataCollector:
@@ -60,21 +62,29 @@ class DataCollector:
         config: CollectionConfig,
         use_gmx_api: bool = True,
         chainlink_concurrency: int = 4,
+        use_hypersync: bool = True,
     ) -> None:
         """Initialize data collector.
 
         :param config: Collection configuration
         :param use_gmx_api: If True, fetch latest data from GMX API
         :param chainlink_concurrency: Concurrent workers for Chainlink RPC batches
+        :param use_hypersync: If True, initialize HyperSync for oracle events (required for non-Chainlink symbols)
         """
         self.config = config
         self.use_gmx_api = use_gmx_api
         self.chainlink_concurrency = chainlink_concurrency
         self.web3 = Web3(Web3.HTTPProvider(config.rpc_url))
-        self.hypersync = HyperSyncCollector(
-            config.hypersync_endpoint,
-            config.hypersync_api_token,
-        )
+
+        # Only initialize HyperSync if needed (for non-Chainlink symbols or oracle events)
+        if use_hypersync:
+            self.hypersync = HyperSyncCollector(
+                config.hypersync_endpoint,
+                config.hypersync_api_token,
+            )
+        else:
+            self.hypersync = None
+
         self.rpc_collector = ChainlinkRPCCollector(self.web3)
         self.storage = ParquetStorage(config.output_dir)
         self.checkpoint_mgr = CheckpointManager(config.checkpoints_dir)
@@ -102,6 +112,16 @@ class DataCollector:
         else:
             self.adaptive_gap_detector = None
             self.data_loss_handler = None
+
+        # Fetch boundary calculator for smart incremental updates
+        if use_gmx_api:
+            self.boundary_calculator = FetchBoundaryCalculator(
+                storage=self.storage,
+                adaptive_gap_detector=self.adaptive_gap_detector,
+                gap_analyzer=self.gap_analyzer,
+            )
+        else:
+            self.boundary_calculator = None
 
         # Ensure directories exist
         config.ensure_directories()
@@ -203,18 +223,104 @@ class DataCollector:
                     f"  [cyan]→ {needs_update} timeframe(s) need incremental update[/cyan]"
                 )
 
-        # Step 1: Fetch GMX data (all timeframes in parallel)
-        console.print("\n[bold]Fetching latest data from GMX API...[/bold]")
-        gmx_candles = {}
+        # Step 0.5: Determine collection mode and calculate fetch boundaries
+        fetch_mode = FetchMode.FULL if full else FetchMode.INCREMENTAL
+        console.print(f"\n[bold]Collection mode: {fetch_mode.value}[/bold]")
 
-        if self.use_gmx_api and self.gmx_fetcher:
-            # Create async tasks for parallel timeframe fetching
+        # Check Chainlink availability early for boundary calculation
+        chainlink_symbol = find_chainlink_symbol(symbol)
+        chainlink_available = get_feed_address_for_gmx_symbol(symbol) is not None
+
+        # Step 1: Fetch GMX data with boundary-aware logic
+        console.print("\n[bold]Fetching data from GMX API...[/bold]")
+        gmx_candles = {}
+        fetch_boundaries_by_tf = {}
+
+        if self.use_gmx_api and self.gmx_fetcher and self.boundary_calculator:
+            # Calculate boundaries for each timeframe
+            for tf in TIMEFRAMES:
+                boundaries = self.boundary_calculator.calculate_boundaries(
+                    symbol=symbol,
+                    timeframe=tf,
+                    mode=fetch_mode,
+                    chainlink_available=chainlink_available,
+                    gmx_earliest=None,  # Will be determined from GMX API response
+                )
+                fetch_boundaries_by_tf[tf] = boundaries
+
+                if not boundaries.gmx_api_needed:
+                    console.print(
+                        f"  [green]✓[/green] {tf}: Data is current, skipping GMX API fetch"
+                    )
+                    # Load existing data from storage
+                    existing_df = self.storage.read_candles(tf, symbol)
+                    if not existing_df.empty:
+                        gmx_candles[tf] = existing_df
+                else:
+                    mode_label = "full" if boundaries.mode == FetchMode.FULL else "incremental"
+                    console.print(
+                        f"  [cyan]→[/cyan] {tf}: Fetching from GMX API ({mode_label})"
+                    )
+
+            # Fetch only timeframes that need updates
             async def fetch_timeframe(tf: str, timeout: float = 120.0):
                 """Fetch GMX data for a single timeframe with timeout.
 
                 :param tf: Timeframe string
                 :param timeout: Timeout in seconds (default: 120s = 2min)
                 """
+                boundaries = fetch_boundaries_by_tf[tf]
+                if not boundaries.gmx_api_needed:
+                    return tf, None  # Skip
+
+                gmx_period = map_timeframe_to_gmx_period(tf)
+                try:
+                    df = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
+                        ),
+                        timeout=timeout,
+                    )
+
+                    # Filter to boundary range if incremental
+                    if boundaries.mode == FetchMode.INCREMENTAL and boundaries.gmx_api_start:
+                        df = df[df["timestamp"] >= boundaries.gmx_api_start]
+
+                    return tf, df
+                except asyncio.TimeoutError:
+                    console.print(
+                        f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
+                    )
+                    return tf, pd.DataFrame()  # Return empty DataFrame on timeout
+
+            # Execute fetches in parallel (only for timeframes that need updates)
+            timeframe_tasks = [
+                fetch_timeframe(tf)
+                for tf in TIMEFRAMES
+                if fetch_boundaries_by_tf[tf].gmx_api_needed
+            ]
+
+            if timeframe_tasks:
+                results = await asyncio.gather(*timeframe_tasks, return_exceptions=True)
+
+                for result in results:
+                    if isinstance(result, Exception):
+                        console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
+                        continue
+
+                    timeframe, gmx_df = result
+                    if gmx_df is not None and not gmx_df.empty:
+                        earliest, latest = (
+                            gmx_df["timestamp"].min(),
+                            gmx_df["timestamp"].max(),
+                        )
+                        console.print(
+                            f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]"
+                        )
+                        gmx_candles[timeframe] = gmx_df
+        elif self.use_gmx_api and self.gmx_fetcher:
+            # Fallback to old behavior if boundary calculator not available
+            async def fetch_timeframe(tf: str, timeout: float = 120.0):
                 gmx_period = map_timeframe_to_gmx_period(tf)
                 try:
                     df = await asyncio.wait_for(
@@ -228,13 +334,11 @@ class DataCollector:
                     console.print(
                         f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
                     )
-                    return tf, pd.DataFrame()  # Return empty DataFrame on timeout
+                    return tf, pd.DataFrame()
 
-            # Execute all timeframe fetches in parallel
             timeframe_tasks = [fetch_timeframe(tf) for tf in TIMEFRAMES]
             results = await asyncio.gather(*timeframe_tasks, return_exceptions=True)
 
-            # Process results
             for result in results:
                 if isinstance(result, Exception):
                     console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
@@ -242,88 +346,127 @@ class DataCollector:
 
                 timeframe, gmx_df = result
                 if not gmx_df.empty:
-                    earliest, latest = (
-                        gmx_df["timestamp"].min(),
-                        gmx_df["timestamp"].max(),
-                    )
-                    console.print(
-                        f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]"
-                    )
                     gmx_candles[timeframe] = gmx_df
-                else:
-                    console.print(
-                        f"  [yellow]○[/yellow] {timeframe}: No GMX data available"
-                    )
 
         if not gmx_candles:
             console.print(f"[yellow]No GMX data available for {symbol}[/yellow]")
             return
 
-        # Step 2: Find Chainlink feed (if exists)
-        console.print("\n[bold]Checking for Chainlink feed...[/bold]")
-        chainlink_symbol = find_chainlink_symbol(symbol)
+        # Step 2: Find Chainlink feed (already determined earlier)
         chainlink_feed_address = (
-            get_feed_address_for_gmx_symbol(symbol) if chainlink_symbol else None
+            get_feed_address_for_gmx_symbol(symbol) if chainlink_available else None
         )
 
         if chainlink_feed_address:
+            console.print("\n[bold]Checking for Chainlink feed...[/bold]")
             console.print(
                 f"  [green]✓[/green] Found Chainlink feed: [yellow]{chainlink_feed_address}[/yellow]"
             )
             console.print(f"  [dim]Mapped symbol:[/dim] {symbol} → {chainlink_symbol}")
         else:
             console.print(
-                "  [yellow]○[/yellow] No Chainlink feed found - will use oracle events for historical data"
+                "\n[bold]No Chainlink feed found[/bold] - will use oracle events for historical data"
             )
 
-        # Step 3: Calculate gap and backfill with Chainlink or Oracle events
+        # Step 3: Backfill with Chainlink based on calculated boundaries
         chainlink_candles = {}
 
         if chainlink_feed_address:
-            # Use 1h candles to determine the gap (representative)
-            gmx_1h = gmx_candles.get("1h")
+            # Use 1h timeframe boundaries (representative)
+            boundaries_1h = fetch_boundaries_by_tf.get("1h")
 
-            if gmx_1h is not None:
-                backfill_start, backfill_end = self.gap_analyzer.calculate_gap(
-                    gmx_df=gmx_1h,
-                    chainlink_available=True,
-                    gmx_v2_genesis_block=GMX_V2_GENESIS_BLOCK,
+            if boundaries_1h and boundaries_1h.chainlink_needed:
+                console.print("\n[bold]Backfilling with Chainlink data...[/bold]")
+                console.print(
+                    f"  [dim]Mode:[/dim] {boundaries_1h.mode.value}"
                 )
-
-                console.print("\n[bold]Analyzing data gap...[/bold]")
-                if backfill_end is not None:
-                    gmx_earliest = gmx_1h["timestamp"].min()
-                    console.print(f"  [dim]GMX API coverage starts:[/dim] {gmx_earliest}")
+                if boundaries_1h.chainlink_end_timestamp:
                     console.print(
-                        "  [dim]Chainlink backfill:[/dim] Will collect all historical data"
+                        f"  [dim]Fetch range:[/dim] all historical to timestamp {boundaries_1h.chainlink_end_timestamp}"
                     )
                 else:
                     console.print(
-                        "  [green]✓[/green] No gap - GMX data covers full history"
+                        f"  [dim]Fetch range:[/dim] all available historical data"
                     )
 
-                # Collect Chainlink data to fill the gap
-                if backfill_start is not None:
-                    console.print("\n[bold]Backfilling with Chainlink data...[/bold]")
+                # Discover aggregator address
+                discovery = AggregatorDiscovery(self.web3)
+                try:
+                    aggregator_info = discovery.get_aggregator_info(
+                        chainlink_feed_address
+                    )
+                    aggregator_address = aggregator_info["current_aggregator"]
+                    console.print(
+                        f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]"
+                    )
 
-                    # Discover aggregator address
-                    discovery = AggregatorDiscovery(self.web3)
-                    try:
-                        aggregator_info = discovery.get_aggregator_info(
-                            chainlink_feed_address
-                        )
-                        aggregator_address = aggregator_info["current_aggregator"]
+                    # Collect with boundary-aware timestamps
+                    rounds = self.rpc_collector.collect_historical_rounds(
+                        aggregator_address=aggregator_address,
+                        start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
+                        end_timestamp=boundaries_1h.chainlink_end_timestamp,      # Use calculated boundary
+                        max_rounds=1000000,
+                        batch_size=2000,
+                        concurrency=self.chainlink_concurrency,
+                    )
+
+                    if rounds:
+                        # Convert rounds to events for storage compatibility
+                        events = []
+                        for round_data in rounds:
+                            event = AnswerUpdatedEvent(
+                                block_number=0,
+                                block_timestamp=round_data.updated_at,
+                                transaction_hash="",
+                                log_index=0,
+                                aggregator_address=aggregator_address,
+                                price=round_data.answer,
+                                round_id=round_data.round_id,
+                                timestamp=round_data.updated_at,
+                            )
+                            events.append(event)
+
                         console.print(
-                            f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]"
+                            f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink rounds via RPC"
                         )
-                    except Exception as e:
-                        console.print(f"[red]✗ Aggregator discovery failed: {e}[/red]")
+
+                        # Save raw events
+                        if full:
+                            self.storage.save_raw_events(
+                                events, symbol, partition_id=0
+                            )
+                        else:
+                            self.storage.append_raw_events(events, symbol)
+
+                        # Resample to OHLCV
+                        raw_df = self.storage.read_raw_events(symbol)
+                        chainlink_candles = (
+                            self.resampler.resample_all_timeframes(
+                                raw_df, symbol
+                            )
+                        )
+
+                        console.print(
+                            "  [green]✓[/green] Resampled to OHLCV candles"
+                        )
+                    else:
+                        console.print(
+                            "  [yellow]⚠ RPC collection returned no data[/yellow]"
+                        )
+
+                except Exception as e:
+                    console.print(f"[red]✗ Chainlink backfill failed: {e}[/red]")
+                    chainlink_feed_address = None  # Disable Chainlink backfill
+
+                    # Try oracle event fallback for this symbol (requires HyperSync)
+                    if self.hypersync is None:
+                        console.print(
+                            "[yellow]  Oracle events unavailable (HyperSync not initialized)[/yellow]"
+                        )
+                    else:
                         console.print(
                             "[cyan]  Falling back to oracle events for historical data...[/cyan]"
                         )
-                        chainlink_feed_address = None  # Disable Chainlink backfill
-
-                        # Try oracle event fallback for this symbol
                         try:
                             await self._collect_symbol_via_oracle_fallback(symbol)
                             # Read back from storage into chainlink_candles
@@ -339,123 +482,83 @@ class DataCollector:
                             console.print(
                                 f"[yellow]  Oracle fallback also failed: {fallback_e}[/yellow]"
                             )
-
-                    if chainlink_feed_address:
-                        # Collect Chainlink historical data via RPC batch requests
-                        # Uses JSON-RPC batching with getAnswer/getTimestamp (~800 rounds/sec)
-                        # This provides COMPLETE historical data from all rounds
-                        try:
-                            console.print(
-                                "  [dim]Collecting via RPC batch (complete historical data)...[/dim]"
-                            )
-
-                            rounds = self.rpc_collector.collect_historical_rounds(
-                                aggregator_address=aggregator_address,
-                                start_timestamp=None,  # Get all historical data
-                                end_timestamp=backfill_end,  # Up to GMX coverage start
-                                max_rounds=1000000,  # 1M rounds limit
-                                batch_size=2000,  # Optimal batch size
-                                concurrency=self.chainlink_concurrency,
-                            )
-
-                            if rounds:
-                                # Convert rounds to events for storage compatibility
-                                events = []
-                                for round_data in rounds:
-                                    event = AnswerUpdatedEvent(
-                                        block_number=0,
-                                        block_timestamp=round_data.updated_at,
-                                        transaction_hash="",
-                                        log_index=0,
-                                        aggregator_address=aggregator_address,
-                                        price=round_data.answer,
-                                        round_id=round_data.round_id,
-                                        timestamp=round_data.updated_at,
-                                    )
-                                    events.append(event)
-
-                                console.print(
-                                    f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink rounds via RPC"
-                                )
-
-                                # Save raw events
-                                if full:
-                                    self.storage.save_raw_events(
-                                        events, symbol, partition_id=0
-                                    )
-                                else:
-                                    self.storage.append_raw_events(events, symbol)
-
-                                # Resample to OHLCV
-                                raw_df = self.storage.read_raw_events(symbol)
-                                chainlink_candles = (
-                                    self.resampler.resample_all_timeframes(
-                                        raw_df, symbol
-                                    )
-                                )
-
-                                console.print(
-                                    "  [green]✓[/green] Resampled to OHLCV candles"
-                                )
-                            else:
-                                console.print(
-                                    "  [yellow]⚠ RPC collection returned no data[/yellow]"
-                                )
-
-                        except Exception as e:
-                            console.print(f"  [red]✗ RPC collection failed: {e}[/red]")
-        else:
-            # No Chainlink feed - use oracle events for historical data
-            console.print("\n[bold]Backfilling with oracle events...[/bold]")
-            try:
-                await self._collect_symbol_via_oracle_fallback(symbol)
-                # Read back from storage into chainlink_candles
-                # so the combining step can merge historical + GMX data
-                for tf in TIMEFRAMES:
-                    stored_df = self.storage.read_candles(tf, symbol)
-                    if not stored_df.empty:
-                        chainlink_candles[tf] = stored_df
-                        console.print(
-                            f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
-                        )
-            except Exception as fallback_e:
+            else:
                 console.print(
-                    f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]"
+                    "\n[green]✓[/green] Chainlink backfill not needed - data is complete"
                 )
+        else:
+            # No Chainlink feed - use oracle events for historical data (requires HyperSync)
+            if self.hypersync is None:
+                console.print(
+                    "\n[yellow]⚠ No Chainlink feed found and HyperSync not initialized[/yellow]"
+                )
+                console.print(
+                    "[dim]This symbol requires oracle events, which need HyperSync[/dim]"
+                )
+            else:
+                console.print("\n[bold]Backfilling with oracle events...[/bold]")
+                try:
+                    await self._collect_symbol_via_oracle_fallback(symbol)
+                    # Read back from storage into chainlink_candles
+                    # so the combining step can merge historical + GMX data
+                    for tf in TIMEFRAMES:
+                        stored_df = self.storage.read_candles(tf, symbol)
+                        if not stored_df.empty:
+                            chainlink_candles[tf] = stored_df
+                            console.print(
+                                f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
+                            )
+                except Exception as fallback_e:
+                    console.print(
+                        f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]"
+                    )
 
-        # Step 4: Combine and save
-        console.print("\n[bold]Saving combined candles...[/bold]")
+        # Step 4: Merge and save (incremental mode merges with existing data)
+        console.print("\n[bold]Saving candles...[/bold]")
+
         for timeframe in TIMEFRAMES:
+            boundaries = fetch_boundaries_by_tf.get(timeframe) if fetch_boundaries_by_tf else None
+
+            if boundaries and boundaries.mode == FetchMode.NO_FETCH:
+                console.print(f"  [green]✓[/green] {timeframe}: Already up to date, skipped")
+                continue
+
             chainlink_df = chainlink_candles.get(timeframe)
             gmx_df = gmx_candles.get(timeframe)
 
-            # Combine if both sources have data
+            # Combine sources
             if chainlink_df is not None and gmx_df is not None and not gmx_df.empty:
-                combined_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
-                self.storage.save_candles(combined_df, timeframe, symbol)
-                earliest, latest = (
-                    combined_df["timestamp"].min(),
-                    combined_df["timestamp"].max(),
-                )
-                console.print(
-                    f"  [green]✓[/green] {timeframe}: [cyan]{len(combined_df):,}[/cyan] total candles [dim]({earliest} to {latest})[/dim]"
-                )
+                new_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
             elif chainlink_df is not None:
-                # Only Chainlink data
-                self.storage.save_candles(chainlink_df, timeframe, symbol)
-                earliest, latest = (
-                    chainlink_df["timestamp"].min(),
-                    chainlink_df["timestamp"].max(),
-                )
-                console.print(
-                    f"  [green]✓[/green] {timeframe}: [cyan]{len(chainlink_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]"
-                )
+                new_df = chainlink_df
             elif gmx_df is not None and not gmx_df.empty:
-                # Only GMX data
-                self.storage.save_candles(gmx_df, timeframe, symbol)
-                earliest, latest = gmx_df["timestamp"].min(), gmx_df["timestamp"].max()
+                new_df = gmx_df
+            else:
+                continue
+
+            # Merge with existing data if incremental mode
+            if boundaries and boundaries.mode == FetchMode.INCREMENTAL:
+                existing_df = self.storage.read_candles(timeframe, symbol)
+                if not existing_df.empty:
+                    # Concatenate and deduplicate
+                    combined = pd.concat([existing_df, new_df], ignore_index=True)
+                    combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
+                    combined = combined.sort_values("timestamp").reset_index(drop=True)
+                    added_count = len(combined) - len(existing_df)
+                    new_df = combined
+                    console.print(
+                        f"  [cyan]→[/cyan] {timeframe}: Merged {len(new_df):,} total candles "
+                        f"(added {added_count} new)"
+                    )
+
+            # Save to storage
+            self.storage.save_candles(new_df, timeframe, symbol)
+            earliest, latest = new_df["timestamp"].min(), new_df["timestamp"].max()
+
+            if not boundaries or boundaries.mode != FetchMode.INCREMENTAL:
                 console.print(
-                    f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles [dim]({earliest} to {latest})[/dim]"
+                    f"  [green]✓[/green] {timeframe}: {len(new_df):,} candles saved "
+                    f"[dim]({earliest} to {latest})[/dim]"
                 )
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
@@ -581,7 +684,16 @@ class DataCollector:
         :param use_events: Use event-based collection (batch all markets) instead of oracle-based
         """
         if use_events:
-            # Event-based collection mode
+            # Event-based collection mode requires HyperSync
+            if self.hypersync is None:
+                console.print(
+                    "[red]✗ HyperSync not initialized - cannot use event-based collection[/red]"
+                )
+                console.print(
+                    "[dim]Event-based collection requires HyperSync API token.[/dim]"
+                )
+                return
+
             console.print(
                 "[cyan]Using event-based collection (indexing position events)[/cyan]\n"
             )
@@ -782,6 +894,19 @@ class DataCollector:
         :param end_block: Ending block (default: latest)
         :param symbols: List of specific symbols to collect (None = all non-Chainlink)
         """
+        # Check HyperSync availability (required for oracle events)
+        if self.hypersync is None:
+            console.print(
+                "[red]✗ HyperSync not initialized - cannot collect non-Chainlink markets[/red]"
+            )
+            console.print(
+                "[dim]Non-Chainlink markets require oracle events via HyperSync.[/dim]"
+            )
+            console.print(
+                "[dim]Use --collect-non-chainlink (default) or set HYPERSYNC_API_TOKEN.[/dim]"
+            )
+            return
+
         from gmx_historical_data.oracle_price_collector import OraclePriceCollector
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.oracle_event_aggregator import (
@@ -1215,8 +1340,14 @@ def cli(
         )
         raise typer.Exit(1)
 
-    # Validate HyperSync API token
-    if not hypersync_token:
+    # Determine if HyperSync is needed
+    # HyperSync is required for:
+    # 1. Non-Chainlink market collection (oracle events)
+    # 2. Event-based collection mode (--use-events)
+    use_hypersync = collect_non_chainlink or use_events
+
+    # Validate HyperSync API token (only if needed)
+    if use_hypersync and not hypersync_token:
         warning_panel = Panel(
             "[bold red]HyperSync API token not set![/bold red]\n\n"
             "HyperSync requires an API token to access historical data.\n"
@@ -1226,8 +1357,9 @@ def cli(
             "  2. Set the environment variable:\n"
             '     [yellow]export HYPERSYNC_API_TOKEN="your_token_here"[/yellow]\n'
             "  3. Or use --hypersync-token argument\n\n"
-            "[dim]If you only want GMX API data (last ~6 months), you can skip\n"
-            "Chainlink historical data collection.[/dim]",
+            "[bold]Alternatively:[/bold]\n"
+            "  • Use --no-collect-non-chainlink to skip oracle events (Chainlink symbols only)\n"
+            "  • This only requires RPC for Chainlink historical data",
             title="⚠️  Warning",
             box=box.HEAVY,
         )
@@ -1249,7 +1381,10 @@ def cli(
     # Auto-derive chainlink RPC concurrency: use concurrency but cap at 8 to avoid RPC rate limits
     chainlink_concurrency = min(concurrency, 8)
     collector = DataCollector(
-        config, use_gmx_api=use_gmx_api, chainlink_concurrency=chainlink_concurrency
+        config,
+        use_gmx_api=use_gmx_api,
+        chainlink_concurrency=chainlink_concurrency,
+        use_hypersync=use_hypersync,
     )
 
     # Run collection
