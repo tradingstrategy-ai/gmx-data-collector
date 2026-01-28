@@ -36,6 +36,8 @@ CHAINLINK_FEEDS_ARBITRUM: dict[str, str] = {
     "OP": "0x205aaD468a11fd5D34fA7211bC6Bad5b3deB9b98",  # Optimism - Ethereum Layer 2 with optimistic rollups
     "ATOM": "0xCDA67618e51762235eacA373894F0C79256768fa",  # Cosmos - Inter-blockchain communication protocol
     "NEAR": "0xBF5C3fB2633e924598A46B9D07a174a9DBcF57C0",  # Near Protocol - Sharded proof-of-stake blockchain
+    "SEI": "0xCc9742d77622eE9abBF1Df03530594f9097bDcB3",  # Sei - High-performance Layer 1 blockchain
+    "TAO": "0x6aCcBB82aF71B8a576B4C05D4aF92A83A035B991",  # Bittensor - Decentralized machine learning network
     # ========================================
     # DeFi Protocol Tokens
     # ========================================
