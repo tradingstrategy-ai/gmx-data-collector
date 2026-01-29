@@ -532,7 +532,12 @@ class ChainlinkRPCCollector:
                 search_backwards=True,
             )
         else:
-            start_round_id = 1
+            # Find first valid round using binary search instead of assuming round 1 exists
+            console.print("  [dim]Finding first available round...[/dim]")
+            start_round_id = self._find_first_valid_round(
+                aggregator_address,
+                latest_round_id=end_round_id
+            )
 
         total_rounds = end_round_id - start_round_id + 1
         console.print(
@@ -710,3 +715,35 @@ class ChainlinkRPCCollector:
                 return mid
 
         return result_round_id
+
+    def _find_first_valid_round(
+        self,
+        aggregator_address: str,
+        latest_round_id: int,
+    ) -> int:
+        """Find the first valid round ID using binary search.
+
+        Chainlink aggregators don't always start from round 1. This method
+        efficiently finds the first round that actually exists.
+
+        :param aggregator_address: Aggregator contract address
+        :param latest_round_id: Latest known round ID
+        :return: First valid round ID
+        """
+        low, high = 1, latest_round_id
+        first_valid = latest_round_id
+
+        while low <= high:
+            mid = (low + high) // 2
+            round_data = self.get_round_data(aggregator_address, mid)
+
+            if round_data:
+                # This round exists, search for earlier ones
+                first_valid = mid
+                high = mid - 1
+            else:
+                # This round doesn't exist, search later
+                low = mid + 1
+
+        console.print(f"  [dim]First valid round: {first_valid:,}[/dim]")
+        return first_valid
