@@ -19,6 +19,8 @@ from web3 import Web3
 from web3.exceptions import ContractLogicError, BadFunctionCallOutput
 from rich.console import Console
 
+from gmx_historical_data.rpc_provider import MultiRPCProvider, RPCProviderError
+
 console = Console()
 
 
@@ -46,7 +48,10 @@ class ChainlinkRPCCollector:
     Uses Multicall3 contract aggregation for efficient bulk data fetching.
     Falls back to getRoundData for single queries.
 
-    :param web3: Web3 instance connected to Arbitrum RPC
+    Supports multi-provider setup with automatic failover.
+
+    :param web3: Web3 instance (for backward compatibility, single provider)
+    :param rpc_urls: List of RPC URLs for multi-provider setup with failover
     """
 
     # Multicall3 contract address (same on all chains)
@@ -151,13 +156,41 @@ class ChainlinkRPCCollector:
         },
     ]
 
-    def __init__(self, web3: Web3):
-        """Initialize RPC collector.
+    def __init__(
+        self,
+        web3: Optional[Web3] = None,
+        rpc_urls: Optional[list[str]] = None,
+    ):
+        """Initialize RPC collector with optional multi-provider support.
 
-        :param web3: Web3 instance connected to Arbitrum
+        :param web3: Web3 instance (backward compatibility, single provider)
+        :param rpc_urls: List of RPC URLs for multi-provider setup
+        :raises ValueError: If neither web3 nor rpc_urls provided
         """
-        self.web3 = web3
-        self.rpc_url = web3.provider.endpoint_uri
+        if rpc_urls:
+            # Create multi-provider wrapper
+            self.multi_provider = MultiRPCProvider(
+                rpc_urls=rpc_urls,
+                max_retries=3,
+                initial_backoff=2.0,
+                auto_fallback=True,
+            )
+            self.web3 = self.multi_provider.web3
+            self.rpc_url = self.multi_provider.get_current_rpc_url()
+            console.print(
+                f"  [green]Chainlink collector: {len(rpc_urls)} RPC provider(s) with automatic failover[/green]"
+            )
+        elif web3:
+            # Use provided Web3 instance (backward compatibility)
+            self.multi_provider = None
+            self.web3 = web3
+            self.rpc_url = web3.provider.endpoint_uri
+            console.print(
+                "  [yellow]Chainlink collector: Single RPC provider (no automatic failover)[/yellow]"
+            )
+        else:
+            raise ValueError("Either web3 or rpc_urls must be provided")
+
         self._rate_limited = False  # Track if we're currently rate limited
         self._consecutive_failures = 0  # Track consecutive batch failures
         self._optimal_batch_size = 3000  # Start with default, reduce if payload too large
@@ -312,70 +345,90 @@ class ChainlinkRPCCollector:
                 "callData": timestamp_data,
             })
 
-        # Execute Multicall3.aggregate3 with retry logic
-        max_retries = 3
-        backoff = 2.0  # Initial backoff in seconds
-        last_error = None
-        payload_too_large = False
+        # Execute Multicall3.aggregate3 with multi-provider retry or fallback
+        if self.multi_provider:
+            # Use multi-provider retry logic with automatic failover
+            def call_multicall():
+                return multicall3_contract.functions.aggregate3(multicall_calls).call()
 
-        for attempt in range(max_retries):
             try:
-                results = multicall3_contract.functions.aggregate3(multicall_calls).call()
+                results = self.multi_provider.call_with_retry(
+                    call_multicall,
+                    error_msg=f"Multicall3 batch ({len(round_ids)} rounds)"
+                )
                 # Success - reset failure counter
                 self._consecutive_failures = 0
-                break
-            except Exception as e:
-                last_error = e
-                error_str = str(e)
-
-                # Check for 413 Payload Too Large error
-                if "413" in error_str or "Payload Too Large" in error_str:
-                    payload_too_large = True
-
-                    # Reduce optimal batch size
-                    new_batch_size = max(500, len(round_ids) // 2)
-
-                    if not self._batch_size_reduced:
-                        console.print(
-                            f"  [yellow]⚠ Payload too large ({len(round_ids)} rounds). "
-                            f"Reducing batch size to {new_batch_size}[/yellow]"
-                        )
-                        self._optimal_batch_size = new_batch_size
-                        self._batch_size_reduced = True
-
-                    # Split this batch into smaller chunks and retry
-                    chunk_size = new_batch_size
-                    all_rounds = []
-
-                    for i in range(0, len(round_ids), chunk_size):
-                        chunk = round_ids[i : i + chunk_size]
-                        console.print(
-                            f"  [dim]Retrying with smaller batch: {len(chunk)} rounds "
-                            f"(chunk {i // chunk_size + 1}/{(len(round_ids) + chunk_size - 1) // chunk_size})[/dim]"
-                        )
-                        chunk_results = self.get_rounds_batch(aggregator_address, chunk)
-                        all_rounds.extend(chunk_results)
-
-                    return all_rounds
-
-                # Not a payload error, handle as regular retry
+            except RPCProviderError as e:
+                console.print(
+                    f"  [red]✗ All RPC providers failed for Multicall3 batch: {e}[/red]"
+                )
                 self._consecutive_failures += 1
+                return [None] * len(round_ids)
+        else:
+            # Fallback to manual retry logic (backward compatibility)
+            max_retries = 3
+            backoff = 2.0  # Initial backoff in seconds
+            last_error = None
+            payload_too_large = False
 
-                if attempt < max_retries - 1:
-                    wait_time = backoff * (2 ** attempt)
-                    console.print(
-                        f"  [yellow]⚠ Multicall3 attempt {attempt + 1}/{max_retries} failed: {e}[/yellow]"
-                    )
-                    console.print(f"  [dim]Retrying in {wait_time:.1f}s...[/dim]")
-                    time.sleep(wait_time)
-                else:
-                    console.print(
-                        f"  [red]✗ Multicall3 failed after {max_retries} attempts: {e}[/red]"
-                    )
-                    return [None] * len(round_ids)
+            for attempt in range(max_retries):
+                try:
+                    results = multicall3_contract.functions.aggregate3(multicall_calls).call()
+                    # Success - reset failure counter
+                    self._consecutive_failures = 0
+                    break
+                except Exception as e:
+                    last_error = e
+                    error_str = str(e)
 
-        if last_error and attempt == max_retries - 1 and not payload_too_large:
-            return [None] * len(round_ids)
+                    # Check for 413 Payload Too Large error
+                    if "413" in error_str or "Payload Too Large" in error_str:
+                        payload_too_large = True
+
+                        # Reduce optimal batch size
+                        new_batch_size = max(500, len(round_ids) // 2)
+
+                        if not self._batch_size_reduced:
+                            console.print(
+                                f"  [yellow]⚠ Payload too large ({len(round_ids)} rounds). "
+                                f"Reducing batch size to {new_batch_size}[/yellow]"
+                            )
+                            self._optimal_batch_size = new_batch_size
+                            self._batch_size_reduced = True
+
+                        # Split this batch into smaller chunks and retry
+                        chunk_size = new_batch_size
+                        all_rounds = []
+
+                        for i in range(0, len(round_ids), chunk_size):
+                            chunk = round_ids[i : i + chunk_size]
+                            console.print(
+                                f"  [dim]Retrying with smaller batch: {len(chunk)} rounds "
+                                f"(chunk {i // chunk_size + 1}/{(len(round_ids) + chunk_size - 1) // chunk_size})[/dim]"
+                            )
+                            chunk_results = self.get_rounds_batch(aggregator_address, chunk)
+                            all_rounds.extend(chunk_results)
+
+                        return all_rounds
+
+                    # Not a payload error, handle as regular retry
+                    self._consecutive_failures += 1
+
+                    if attempt < max_retries - 1:
+                        wait_time = backoff * (2 ** attempt)
+                        console.print(
+                            f"  [yellow]⚠ Multicall3 attempt {attempt + 1}/{max_retries} failed: {e}[/yellow]"
+                        )
+                        console.print(f"  [dim]Retrying in {wait_time:.1f}s...[/dim]")
+                        time.sleep(wait_time)
+                    else:
+                        console.print(
+                            f"  [red]✗ Multicall3 failed after {max_retries} attempts: {e}[/red]"
+                        )
+                        return [None] * len(round_ids)
+
+            if last_error and attempt == max_retries - 1 and not payload_too_large:
+                return [None] * len(round_ids)
 
         # Decode results
         rounds = []

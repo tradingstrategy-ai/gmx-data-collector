@@ -74,7 +74,15 @@ class DataCollector:
         self.config = config
         self.use_gmx_api = use_gmx_api
         self.chainlink_concurrency = chainlink_concurrency
-        self.web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+
+        # Get all RPC URLs (primary + fallbacks)
+        rpc_urls = config.get_all_rpc_urls()
+
+        if not rpc_urls:
+            raise ValueError("At least one RPC URL is required")
+
+        # Create Web3 with primary RPC for basic operations
+        self.web3 = Web3(Web3.HTTPProvider(rpc_urls[0]))
 
         # Only initialize HyperSync if needed (for non-Chainlink symbols or oracle events)
         if use_hypersync:
@@ -85,7 +93,18 @@ class DataCollector:
         else:
             self.hypersync = None
 
-        self.rpc_collector = ChainlinkRPCCollector(self.web3)
+        # Create ChainlinkRPCCollector with multi-provider support
+        if len(rpc_urls) > 1:
+            console.print(
+                f"[green]Using {len(rpc_urls)} RPC provider(s) with automatic failover[/green]"
+            )
+            self.rpc_collector = ChainlinkRPCCollector(rpc_urls=rpc_urls)
+        else:
+            console.print(
+                "[yellow]Using single RPC provider (no automatic failover configured)[/yellow]"
+            )
+            self.rpc_collector = ChainlinkRPCCollector(web3=self.web3)
+
         self.storage = ParquetStorage(config.output_dir)
         self.checkpoint_mgr = CheckpointManager(config.checkpoints_dir)
         self.resampler = OHLCVResampler(decimals=8)
