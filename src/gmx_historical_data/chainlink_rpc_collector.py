@@ -158,6 +158,10 @@ class ChainlinkRPCCollector:
         """
         self.web3 = web3
         self.rpc_url = web3.provider.endpoint_uri
+        self._rate_limited = False  # Track if we're currently rate limited
+        self._consecutive_failures = 0  # Track consecutive batch failures
+        self._optimal_batch_size = 3000  # Start with default, reduce if payload too large
+        self._batch_size_reduced = False  # Track if we've reduced batch size
 
     def _call_with_retry(
         self, contract_function, max_retries: int = 3, backoff: float = 1.0
@@ -256,12 +260,28 @@ class ChainlinkRPCCollector:
         Uses Multicall3 contract to aggregate getAnswer() and getTimestamp() calls
         into a single RPC request for maximum efficiency.
 
+        Automatically splits into smaller batches if payload is too large (413 error).
+
         :param aggregator_address: Aggregator contract address
         :param round_ids: List of round IDs to query
         :return: List of round data (None for failed/missing rounds)
         """
         if not round_ids:
             return []
+
+        # Check if batch is too large and needs splitting
+        if len(round_ids) > 1500:  # If batch is large, check against optimal size
+            if len(round_ids) > self._optimal_batch_size:
+                # Split into smaller chunks based on optimal batch size
+                chunk_size = self._optimal_batch_size
+                all_rounds = []
+
+                for i in range(0, len(round_ids), chunk_size):
+                    chunk = round_ids[i : i + chunk_size]
+                    chunk_results = self.get_rounds_batch(aggregator_address, chunk)
+                    all_rounds.extend(chunk_results)
+
+                return all_rounds
 
         aggregator_address = Web3.to_checksum_address(aggregator_address)
 
@@ -292,11 +312,69 @@ class ChainlinkRPCCollector:
                 "callData": timestamp_data,
             })
 
-        # Execute Multicall3.aggregate3
-        try:
-            results = multicall3_contract.functions.aggregate3(multicall_calls).call()
-        except Exception as e:
-            console.print(f"  [yellow]⚠ Multicall3 failed: {e}[/yellow]")
+        # Execute Multicall3.aggregate3 with retry logic
+        max_retries = 3
+        backoff = 2.0  # Initial backoff in seconds
+        last_error = None
+        payload_too_large = False
+
+        for attempt in range(max_retries):
+            try:
+                results = multicall3_contract.functions.aggregate3(multicall_calls).call()
+                # Success - reset failure counter
+                self._consecutive_failures = 0
+                break
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+
+                # Check for 413 Payload Too Large error
+                if "413" in error_str or "Payload Too Large" in error_str:
+                    payload_too_large = True
+
+                    # Reduce optimal batch size
+                    new_batch_size = max(500, len(round_ids) // 2)
+
+                    if not self._batch_size_reduced:
+                        console.print(
+                            f"  [yellow]⚠ Payload too large ({len(round_ids)} rounds). "
+                            f"Reducing batch size to {new_batch_size}[/yellow]"
+                        )
+                        self._optimal_batch_size = new_batch_size
+                        self._batch_size_reduced = True
+
+                    # Split this batch into smaller chunks and retry
+                    chunk_size = new_batch_size
+                    all_rounds = []
+
+                    for i in range(0, len(round_ids), chunk_size):
+                        chunk = round_ids[i : i + chunk_size]
+                        console.print(
+                            f"  [dim]Retrying with smaller batch: {len(chunk)} rounds "
+                            f"(chunk {i // chunk_size + 1}/{(len(round_ids) + chunk_size - 1) // chunk_size})[/dim]"
+                        )
+                        chunk_results = self.get_rounds_batch(aggregator_address, chunk)
+                        all_rounds.extend(chunk_results)
+
+                    return all_rounds
+
+                # Not a payload error, handle as regular retry
+                self._consecutive_failures += 1
+
+                if attempt < max_retries - 1:
+                    wait_time = backoff * (2 ** attempt)
+                    console.print(
+                        f"  [yellow]⚠ Multicall3 attempt {attempt + 1}/{max_retries} failed: {e}[/yellow]"
+                    )
+                    console.print(f"  [dim]Retrying in {wait_time:.1f}s...[/dim]")
+                    time.sleep(wait_time)
+                else:
+                    console.print(
+                        f"  [red]✗ Multicall3 failed after {max_retries} attempts: {e}[/red]"
+                    )
+                    return [None] * len(round_ids)
+
+        if last_error and attempt == max_retries - 1 and not payload_too_large:
             return [None] * len(round_ids)
 
         # Decode results
@@ -338,7 +416,7 @@ class ChainlinkRPCCollector:
         start_timestamp: Optional[int] = None,
         end_timestamp: Optional[int] = None,
         max_rounds: int = 1000000,
-        batch_size: int = 3000,
+        batch_size: int = 1500,
         concurrency: int = 8,
         progress_callback: Optional[Callable[[str], None]] = None,
     ) -> list[ChainlinkRound]:
@@ -349,15 +427,25 @@ class ChainlinkRPCCollector:
         2. Binary search to find start/end round IDs
         3. Batch fetch rounds using Multicall3 contract with concurrent workers
 
+        Note: Batch size automatically adapts if RPC returns 413 Payload Too Large.
+        Alchemy limit: 2.6MB payload (~1200-1500 rounds safe).
+
         :param aggregator_address: Aggregator contract address
         :param start_timestamp: Start timestamp (None = collect all)
         :param end_timestamp: End timestamp (None = latest)
         :param max_rounds: Maximum rounds to collect (safety limit)
-        :param batch_size: Rounds per batch request (default: 3000, optimized for RPC limits)
+        :param batch_size: Rounds per batch request (default: 1500, safe for Alchemy)
         :param concurrency: Number of concurrent batch workers (default: 8)
         :param progress_callback: Optional callback for progress updates
         :return: List of historical rounds
         """
+        # Use adaptive batch size if already reduced
+        if self._batch_size_reduced:
+            batch_size = min(batch_size, self._optimal_batch_size)
+            console.print(
+                f"  [dim]Using adaptive batch size: {batch_size} rounds "
+                f"(learned from previous 413 errors)[/dim]"
+            )
         console.print("  [cyan]Collecting via RPC (Multicall3 aggregation)...[/cyan]")
 
         # Get latest round
@@ -422,11 +510,13 @@ class ChainlinkRPCCollector:
             batch_idx = i // batch_size
             batches.append((batch_idx, batch))
 
-        # Collect rounds in batches using concurrent workers
+        # Collect rounds in batches using concurrent workers with adaptive backoff
         all_results: dict[int, list] = {}  # batch_idx -> results
         collected = 0
         failed = 0
         completed_batches = 0
+        current_concurrency = concurrency
+        remaining_batches = batches.copy()
 
         def process_batch(batch_info: tuple[int, list[int]]) -> tuple[int, list]:
             """Process a single batch and return (batch_idx, results)."""
@@ -434,29 +524,81 @@ class ChainlinkRPCCollector:
             results = self.get_rounds_batch(aggregator_address, batch_round_ids)
             return batch_idx, results
 
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {executor.submit(process_batch, b): b[0] for b in batches}
+        while remaining_batches:
+            # Process current batch set with current concurrency level
+            current_batch_set = remaining_batches[:min(len(remaining_batches), current_concurrency * 10)]
+            remaining_batches = remaining_batches[len(current_batch_set):]
 
-            for future in as_completed(futures):
-                batch_idx, batch_results = future.result()
-                all_results[batch_idx] = batch_results
-                completed_batches += 1
+            with ThreadPoolExecutor(max_workers=current_concurrency) as executor:
+                futures = {executor.submit(process_batch, b): b[0] for b in current_batch_set}
+                batch_set_collected = 0
+                batch_set_failed = 0
+                batch_set_completed = 0
 
-                # Count successes/failures for this batch
-                batch_collected = sum(1 for r in batch_results if r is not None)
-                batch_failed = len(batch_results) - batch_collected
-                collected += batch_collected
-                failed += batch_failed
+                for future in as_completed(futures):
+                    batch_idx, batch_results = future.result()
+                    all_results[batch_idx] = batch_results
+                    completed_batches += 1
+                    batch_set_completed += 1
 
-                # Progress update every 10 batches or at end
-                if completed_batches % 10 == 0 or completed_batches == num_batches:
-                    progress_msg = (
-                        f"Batch {completed_batches:,}/{num_batches:,}: "
-                        f"{collected:,} rounds collected ({failed:,} failed)"
-                    )
-                    console.print(f"  [dim]{progress_msg}[/dim]")
-                    if progress_callback:
-                        progress_callback(progress_msg)
+                    # Count successes/failures for this batch
+                    batch_collected = sum(1 for r in batch_results if r is not None)
+                    batch_failed = len(batch_results) - batch_collected
+                    collected += batch_collected
+                    failed += batch_failed
+                    batch_set_collected += batch_collected
+                    batch_set_failed += batch_failed
+
+                    # Progress update every 10 batches or at end
+                    if completed_batches % 10 == 0 or completed_batches == num_batches:
+                        progress_msg = (
+                            f"Batch {completed_batches:,}/{num_batches:,}: "
+                            f"{collected:,} rounds collected ({failed:,} failed)"
+                        )
+                        console.print(f"  [dim]{progress_msg}[/dim]")
+                        if progress_callback:
+                            progress_callback(progress_msg)
+
+                # Check failure rate after processing batch set (minimum 10 batches for meaningful stats)
+                if batch_set_completed >= 10:
+                    total_batch_set = batch_set_collected + batch_set_failed
+                    if total_batch_set > 0:
+                        failure_rate = batch_set_failed / total_batch_set
+
+                        # If failure rate exceeds 70%, trigger emergency backoff
+                        if failure_rate > 0.7 and current_concurrency > 1:
+                            console.print(
+                                f"\n[bold yellow]⚠ WARNING: High failure rate detected ({failure_rate:.1%})[/bold yellow]"
+                            )
+                            console.print(
+                                f"[yellow]Failed: {batch_set_failed:,} / Total: {total_batch_set:,}[/yellow]"
+                            )
+                            console.print(
+                                "[yellow]Possible RPC rate limiting detected. Initiating emergency backoff...[/yellow]"
+                            )
+
+                            # Wait 5-6 minutes to let rate limits reset
+                            backoff_time = 330  # 5.5 minutes
+                            console.print(
+                                f"[yellow]Waiting {backoff_time // 60} minutes {backoff_time % 60} seconds "
+                                "for rate limits to reset...[/yellow]"
+                            )
+                            time.sleep(backoff_time)
+
+                            # Reduce to single concurrent worker
+                            current_concurrency = 1
+                            self._rate_limited = True
+                            console.print(
+                                "[yellow]Resuming with reduced concurrency (1 worker) to avoid further rate limiting[/yellow]"
+                            )
+                        elif failure_rate < 0.2 and self._rate_limited and current_concurrency == 1:
+                            # Recovery: if failure rate drops below 20% and we're in degraded mode, restore concurrency
+                            current_concurrency = min(2, concurrency)
+                            self._rate_limited = False
+                            console.print(
+                                f"[green]✓ Failure rate improved ({failure_rate:.1%}). "
+                                f"Restoring concurrency to {current_concurrency}[/green]"
+                            )
 
         # Merge results in order
         all_rounds = []

@@ -406,7 +406,7 @@ class DataCollector:
                         start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
                         end_timestamp=boundaries_1h.chainlink_end_timestamp,      # Use calculated boundary
                         max_rounds=1000000,
-                        batch_size=3000,  # Multicall3 batch size (optimized for RPC limits)
+                        batch_size=1500,  # Safe for Alchemy 2.6MB limit; auto-reduces on 413 errors
                         concurrency=self.chainlink_concurrency,
                     )
 
@@ -1242,9 +1242,9 @@ def cli(
         help="Collect data for markets without Chainlink feeds using OraclePriceUpdate events (enabled by default)",
     ),
     concurrency: int = typer.Option(
-        4,
+        2,
         "--concurrency",
-        help="Parallelism level: symbols processed concurrently + RPC batch workers (default: 4)",
+        help="Parallelism level: symbols processed concurrently + RPC batch workers (default: 2)",
         min=1,
         max=50,
     ),
@@ -1378,8 +1378,8 @@ def cli(
     )
 
     # Create collector
-    # Auto-derive chainlink RPC concurrency: use concurrency but cap at 8 to avoid RPC rate limits
-    chainlink_concurrency = min(concurrency, 8)
+    # Auto-derive chainlink RPC concurrency: use concurrency but cap at 3 to avoid RPC rate limits
+    chainlink_concurrency = min(concurrency, 3)
     collector = DataCollector(
         config,
         use_gmx_api=use_gmx_api,
