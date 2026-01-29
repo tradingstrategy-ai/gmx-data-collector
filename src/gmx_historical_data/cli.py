@@ -75,14 +75,19 @@ class DataCollector:
         self.use_gmx_api = use_gmx_api
         self.chainlink_concurrency = chainlink_concurrency
 
-        # Get all RPC URLs (primary + fallbacks)
-        rpc_urls = config.get_all_rpc_urls()
-
-        if not rpc_urls:
-            raise ValueError("At least one RPC URL is required")
-
-        # Create Web3 with primary RPC for basic operations
-        self.web3 = Web3(Web3.HTTPProvider(rpc_urls[0]))
+        # Check if RPC URL contains multiple providers (space-separated)
+        rpc_urls = config.rpc_url.strip().split()
+        if len(rpc_urls) > 1:
+            # Multiple RPC URLs - use multi-provider
+            console.print(f"[green]Using {len(rpc_urls)} RPC provider(s) with automatic failover[/green]")
+            self.rpc_collector = ChainlinkRPCCollector(rpc_config=config.rpc_url)
+            # Create Web3 with first URL for basic operations
+            self.web3 = Web3(Web3.HTTPProvider(rpc_urls[0]))
+        else:
+            # Single RPC URL - use simple provider
+            console.print("[yellow]Using single RPC provider (no automatic failover)[/yellow]")
+            self.web3 = Web3(Web3.HTTPProvider(config.rpc_url))
+            self.rpc_collector = ChainlinkRPCCollector(self.web3)
 
         # Only initialize HyperSync if needed (for non-Chainlink symbols or oracle events)
         if use_hypersync:
@@ -92,19 +97,6 @@ class DataCollector:
             )
         else:
             self.hypersync = None
-
-        # Create ChainlinkRPCCollector with multi-provider support
-        if len(rpc_urls) > 1:
-            console.print(
-                f"[green]Using {len(rpc_urls)} RPC provider(s) with automatic failover[/green]"
-            )
-            self.rpc_collector = ChainlinkRPCCollector(rpc_urls=rpc_urls)
-        else:
-            console.print(
-                "[yellow]Using single RPC provider (no automatic failover configured)[/yellow]"
-            )
-            self.rpc_collector = ChainlinkRPCCollector(web3=self.web3)
-
         self.storage = ParquetStorage(config.output_dir)
         self.checkpoint_mgr = CheckpointManager(config.checkpoints_dir)
         self.resampler = OHLCVResampler(decimals=8)
@@ -408,24 +400,20 @@ class DataCollector:
                         f"  [dim]Fetch range:[/dim] all available historical data"
                     )
 
-                # Discover aggregator address
-                discovery = AggregatorDiscovery(self.web3)
+                # Use feed proxy address directly (NOT underlying aggregator!)
+                # The aggregator blocks contract-to-contract calls with "No access"
                 try:
-                    aggregator_info = discovery.get_aggregator_info(
-                        chainlink_feed_address
-                    )
-                    aggregator_address = aggregator_info["current_aggregator"]
                     console.print(
-                        f"  [dim]Aggregator:[/dim] [yellow]{aggregator_address}[/yellow]"
+                        f"  [dim]Feed proxy:[/dim] [yellow]{chainlink_feed_address}[/yellow]"
                     )
 
-                    # Collect with boundary-aware timestamps
+                    # Collect with boundary-aware timestamps using feed proxy
                     rounds = self.rpc_collector.collect_historical_rounds(
-                        aggregator_address=aggregator_address,
+                        feed_address=chainlink_feed_address,  # Use feed proxy, NOT aggregator!
                         start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
                         end_timestamp=boundaries_1h.chainlink_end_timestamp,      # Use calculated boundary
                         max_rounds=1000000,
-                        batch_size=1500,  # Safe for Alchemy 2.6MB limit; auto-reduces on 413 errors
+                        batch_size=1500,  # Safe for most RPC providers; auto-reduces on 413
                         concurrency=self.chainlink_concurrency,
                     )
 
@@ -438,7 +426,7 @@ class DataCollector:
                                 block_timestamp=round_data.updated_at,
                                 transaction_hash="",
                                 log_index=0,
-                                aggregator_address=aggregator_address,
+                                aggregator_address=chainlink_feed_address,  # Use feed address
                                 price=round_data.answer,
                                 round_id=round_data.round_id,
                                 timestamp=round_data.updated_at,

@@ -22,7 +22,8 @@ def test_calculate_gap_with_chainlink_available():
     )
 
     # Should backfill from beginning to just before GMX start
-    assert backfill_start == 0  # Start from genesis
+    # backfill_start is None to indicate "fetch all available"
+    assert backfill_start is None
     assert backfill_end is not None
 
     # backfill_end should be ~1 second before GMX earliest
@@ -59,6 +60,6 @@ def test_calculate_gap_empty_gmx_data():
         gmx_df=gmx_df, chainlink_available=True
     )
 
-    # Should collect all historical data
-    assert backfill_start == 0
-    assert backfill_end is None  # No upper limit (collect to latest)
+    # With empty GMX data, no backfill needed (nothing to backfill before)
+    assert backfill_start is None
+    assert backfill_end is None
