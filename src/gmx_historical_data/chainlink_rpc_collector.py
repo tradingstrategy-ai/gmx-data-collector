@@ -592,16 +592,27 @@ class ChainlinkRPCCollector:
     ) -> int:
         """Find first valid round ID using binary search.
 
-        Chainlink feeds don't necessarily start at round 1. This method
-        finds the first round that returns valid data.
+        Chainlink round IDs on L2s (Arbitrum) encode phase information:
+        roundId = (phaseId << 64) + aggregatorRoundId
+
+        This method searches within the current phase for the first valid round,
+        since older phases may have been deprecated or use different aggregators.
 
         :param feed_address: Feed proxy contract address
         :param latest_round_id: Latest known round ID
         :return: First valid round ID
         """
-        # Binary search for first valid round
-        # We assume rounds are monotonically increasing with some gaps
-        low, high = 1, latest_round_id
+        # Extract phase ID from latest round (upper 64 bits)
+        # Round ID format: (phaseId << 64) + aggregatorRoundId
+        phase_id = latest_round_id >> 64
+
+        # First round in current phase
+        first_in_phase = (phase_id << 64) + 1
+
+        console.print(f"  [dim]Phase ID: {phase_id}, first round in phase: {first_in_phase:,}[/dim]")
+
+        # Binary search within current phase
+        low, high = first_in_phase, latest_round_id
         first_valid = latest_round_id
 
         while low <= high:
