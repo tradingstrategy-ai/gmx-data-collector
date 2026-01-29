@@ -21,7 +21,7 @@ RAW_EVENTS_SCHEMA = pa.schema(
         ("block_timestamp", pa.uint64()),
         ("transaction_hash", pa.string()),
         ("log_index", pa.uint32()),
-        ("round_id", pa.uint64()),
+        ("round_id", pa.string()),  # String to handle L2 Chainlink round IDs > 2^64
         ("price", pa.int64()),  # Raw price (divide by 10^decimals)
         ("timestamp", pa.uint64()),  # Event timestamp
         ("symbol", pa.string()),
@@ -135,7 +135,7 @@ class ParquetStorage:
             "block_timestamp": [e.block_timestamp for e in events],
             "transaction_hash": [e.transaction_hash for e in events],
             "log_index": [e.log_index for e in events],
-            "round_id": [e.round_id for e in events],
+            "round_id": [str(e.round_id) for e in events],  # String for L2 round IDs > 2^64
             "price": [e.price for e in events],
             "timestamp": [e.timestamp for e in events],
             "symbol": [symbol] * len(events),
