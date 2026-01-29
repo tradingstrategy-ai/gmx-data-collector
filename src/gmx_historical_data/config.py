@@ -26,7 +26,8 @@ class CollectionConfig:
     :param hypersync_api_token: Optional API token for HyperSync
                                (recommended for production)
     :param output_dir: Base directory for storing collected data
-    :param rpc_url: Arbitrum RPC URL for aggregator discovery
+    :param rpc_url: Primary Arbitrum RPC URL (comma-separated for multiple providers)
+    :param fallback_rpc_urls: List of fallback RPC URLs (optional)
     :param chain_id: Chain ID (42161 for Arbitrum)
     :param start_block: Optional starting block number for collection
     :param end_block: Optional ending block number for collection
@@ -35,15 +36,47 @@ class CollectionConfig:
     hypersync_endpoint: str = "https://arbitrum.hypersync.xyz"
     hypersync_api_token: str | None = None
     output_dir: Path = Path("./data")
-    rpc_url: str = ""  # Must be set by user
+    rpc_url: str = ""  # Primary RPC or comma-separated list
+    fallback_rpc_urls: list[str] = None  # Explicit fallback list
     chain_id: int = 42161  # Arbitrum
     start_block: int | None = None  # None = from genesis
     end_block: int | None = None  # None = latest
 
     def __post_init__(self):
-        """Ensure output_dir is a Path object."""
+        """Ensure output_dir is a Path object and parse RPC URLs."""
         if not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
+
+        # Initialize fallback_rpc_urls if None
+        if self.fallback_rpc_urls is None:
+            self.fallback_rpc_urls = []
+
+    def get_all_rpc_urls(self) -> list[str]:
+        """Get all RPC URLs (primary + fallbacks).
+
+        Supports comma-separated RPC URLs in rpc_url field for backward compatibility.
+
+        :return: List of all RPC URLs (primary first, then fallbacks)
+        """
+        urls = []
+
+        # Parse primary rpc_url (may be comma-separated)
+        if self.rpc_url:
+            primary_urls = [url.strip() for url in self.rpc_url.split(",") if url.strip()]
+            urls.extend(primary_urls)
+
+        # Add explicit fallback URLs
+        urls.extend(self.fallback_rpc_urls)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+
+        return unique_urls
 
     @property
     def raw_data_dir(self) -> Path:

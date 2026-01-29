@@ -173,7 +173,8 @@ class DaemonConfig:
 
     :param collection_interval_minutes: How often to collect data (in minutes)
     :param output_dir: Directory for storing collected data
-    :param rpc_url: Arbitrum RPC URL for GMX API
+    :param rpc_url: Primary Arbitrum RPC URL (comma-separated for multiple providers)
+    :param fallback_rpc_urls: List of fallback RPC URLs
     :param collection_symbols: Optional list of symbols to collect (None = all)
     :param excluded_symbols: Set of symbols to exclude from collection
     :param timeframe_concurrency: Number of timeframes to fetch concurrently (1-6)
@@ -189,6 +190,7 @@ class DaemonConfig:
     collection_interval_minutes: int = 60
     output_dir: Path = Path("./data")
     rpc_url: str = ""
+    fallback_rpc_urls: list[str] = None
     collection_symbols: list[str] | None = None
     excluded_symbols: set[str] = None
     timeframe_concurrency: int = 6
@@ -205,6 +207,10 @@ class DaemonConfig:
         # Ensure output_dir is a Path object
         if not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
+
+        # Initialize fallback_rpc_urls if None
+        if self.fallback_rpc_urls is None:
+            self.fallback_rpc_urls = []
 
         # Validate interval
         if self.collection_interval_minutes < 1:
@@ -229,7 +235,8 @@ class DaemonConfig:
         """Create configuration from environment variables.
 
         Environment Variables:
-            JSON_RPC_ARBITRUM: Required - Arbitrum RPC URL
+            JSON_RPC_ARBITRUM: Required - Primary Arbitrum RPC URL (comma-separated for multiple)
+            FALLBACK_RPC_URLS: Optional - Comma-separated fallback RPC URLs
             COLLECTION_INTERVAL_MINUTES: Collection interval in minutes (default: 60)
             COLLECTION_SYMBOLS: Comma-separated symbols (empty = all tokens)
             EXCLUDED_SYMBOLS: Comma-separated symbols to exclude
@@ -250,6 +257,12 @@ class DaemonConfig:
         rpc_url = os.getenv("JSON_RPC_ARBITRUM")
         if not rpc_url:
             raise ValueError("JSON_RPC_ARBITRUM environment variable is required")
+
+        # Optional - fallback RPC URLs (comma-separated)
+        fallback_str = os.getenv("FALLBACK_RPC_URLS", "").strip()
+        fallback_rpc_urls = []
+        if fallback_str:
+            fallback_rpc_urls = [url.strip() for url in fallback_str.split(",") if url.strip()]
 
         # Optional - collection interval
         interval_str = os.getenv("COLLECTION_INTERVAL_MINUTES", "60")
@@ -316,6 +329,7 @@ class DaemonConfig:
             collection_interval_minutes=collection_interval_minutes,
             output_dir=output_dir,
             rpc_url=rpc_url,
+            fallback_rpc_urls=fallback_rpc_urls,
             collection_symbols=collection_symbols,
             excluded_symbols=excluded_symbols,
             timeframe_concurrency=timeframe_concurrency,
