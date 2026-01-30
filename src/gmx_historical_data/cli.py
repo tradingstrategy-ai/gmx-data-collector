@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import defaultdict
+import logging
 from pathlib import Path
 import traceback
 from typing import Optional
@@ -12,6 +13,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich import box
 from web3 import Web3
+
+logger = logging.getLogger(__name__)
 
 console = Console()
 
@@ -919,22 +922,44 @@ class DataCollector:
         from gmx_historical_data.oracle_event_aggregator import (
             aggregate_oracle_events_to_ohlcv,
         )
+        from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
+        from gmx_historical_data.block_timestamp_cache import BlockTimestampCache
+        from gmx_historical_data.data_coverage_analyzer import DataCoverageAnalyzer
 
         console.print(
             Panel(
-                "[bold magenta]Non-Chainlink Market Collection[/bold magenta]\n\n"
+                "[bold magenta]Non-Chainlink Market Collection (Incremental)[/bold magenta]\n\n"
                 "Collecting OHLCV data using:\n"
                 "  • GMX API: Recent data (~6 months)\n"
-                "  • OraclePriceUpdate events: Historical backfill",
+                "  • OraclePriceUpdate events: Historical backfill (incremental)",
                 box=box.ROUNDED,
             )
         )
 
         # Initialize oracle collector (pure HyperSync, no RPC needed)
         console.print("\n[bold]Initializing collectors...[/bold]")
+
+        # Initialize key rotator if multiple keys provided
+        key_rotator = None
+        if self.config.hypersync_api_token and ' ' in self.config.hypersync_api_token:
+            key_rotator = HyperSyncKeyRotator(self.config.hypersync_api_token)
+            console.print(
+                f"[green]✓[/green] Initialized HyperSync key rotation "
+                f"with {key_rotator.total_keys} key(s)"
+            )
+
+        # Initialize block-timestamp cache
+        console.print("\n[bold]Initializing block-timestamp cache...[/bold]")
+        cache_path = self.config.output_dir / ".cache" / "block_timestamps.parquet"
+        block_cache = BlockTimestampCache(cache_path, self.web3)
+
+        # Initialize coverage analyzer
+        coverage_analyzer = DataCoverageAnalyzer(self.config.output_dir)
+
         oracle_collector = OraclePriceCollector(
             hypersync_endpoint=self.config.hypersync_endpoint,
             api_token=self.config.hypersync_api_token,
+            key_rotator=key_rotator,
         )
 
         # Initialize token mapper
@@ -1040,46 +1065,100 @@ class DataCollector:
                 else:
                     console.print("  [yellow]○[/yellow] No GMX API data available")
 
-        # Step 2: Collect oracle events for historical backfill
-        console.print(
-            "\n[bold]Step 2: Collecting oracle events for historical backfill...[/bold]"
-        )
-
-        # Determine block range
-        start = start_block or GMX_V2_GENESIS_BLOCK
-        console.print(f"  [dim]Start block:[/dim] {start:,}")
-        console.print(f"  [dim]End block:[/dim] {end_block or 'latest'}")
-
-        # Collect ALL oracle events at once (efficient batch query)
-        token_addresses = list(token_mapping.keys())
-        try:
-            events = await oracle_collector.collect_oracle_events(
-                start_block=start,
-                end_block=end_block,
-                token_addresses=token_addresses,
-            )
-        except Exception as e:
-            console.print(f"[red]Failed to collect oracle events: {e}[/red]")
-            events = []
-
-        if events:
-            console.print(
-                f"[green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events"
-            )
-        else:
-            console.print(
-                "[yellow]No oracle events found - using GMX API data only[/yellow]"
-            )
-
-        # Group events by token
-        events_by_token: dict[str, list] = defaultdict(list)
-        for event in events:
-            events_by_token[event.token.lower()].append(event)
-
-        # Build reverse mapping: symbol -> token_addr
+        # Build reverse mapping: symbol -> token_addr (needed for Step 2)
         symbol_to_token = {}
         for addr, sym in token_mapping.items():
             symbol_to_token[sym] = addr
+
+        # Step 2: Analyze coverage and collect oracle events per symbol (incremental)
+        console.print(
+            "\n[bold]Step 2: Analyzing existing coverage and collecting missing oracle events...[/bold]"
+        )
+
+        # Determine default block range
+        default_start = start_block or GMX_V2_GENESIS_BLOCK
+        default_end = end_block  # None = latest
+
+        # Process each symbol individually for incremental collection
+        oracle_events_by_symbol: dict[str, list] = {}
+
+        for symbol in symbols_to_collect:
+            console.print(f"\n[cyan]{symbol}[/cyan]")
+
+            # Analyze existing coverage
+            console.print("  [dim]Analyzing existing data coverage...[/dim]")
+            coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
+
+            if coverage.has_data:
+                console.print(
+                    f"  [green]✓[/green] Found existing data covering "
+                    f"{len(coverage.timeframe_coverage)} timeframe(s)"
+                )
+                for tf, tf_cov in coverage.timeframe_coverage.items():
+                    earliest_dt = pd.to_datetime(tf_cov.earliest, unit='s', utc=True)
+                    latest_dt = pd.to_datetime(tf_cov.latest, unit='s', utc=True)
+                    console.print(
+                        f"    {tf}: {tf_cov.candle_count:,} candles "
+                        f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
+                    )
+            else:
+                console.print("  [yellow]○[/yellow] No existing data - full historical collection")
+
+            # Calculate missing block range
+            symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
+                coverage,
+                block_cache,
+                genesis_block=default_start,
+                safety_margin=1000,  # 1000 blocks overlap for safety
+            )
+
+            if symbol_start is None and symbol_end is None:
+                console.print("  [green]✓[/green] Data already complete - no oracle events needed")
+                oracle_events_by_symbol[symbol] = []
+                continue
+
+            # Display range to fetch
+            if symbol_end is None:
+                console.print(
+                    f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to latest"
+                )
+            else:
+                blocks_to_fetch = symbol_end - symbol_start
+                console.print(
+                    f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to {symbol_end:,} "
+                    f"({blocks_to_fetch:,} blocks)"
+                )
+
+            # Get token address for this symbol
+            token_addr = symbol_to_token.get(symbol, "").lower()
+            if not token_addr:
+                console.print("  [red]✗[/red] Token address not found")
+                oracle_events_by_symbol[symbol] = []
+                continue
+
+            # Collect oracle events for this symbol's range
+            try:
+                events = await oracle_collector.collect_oracle_events(
+                    start_block=symbol_start,
+                    end_block=symbol_end,
+                    token_addresses=[token_addr],  # Only this token
+                    concurrency=4,
+                )
+
+                oracle_events_by_symbol[symbol] = events
+
+                if events:
+                    console.print(
+                        f"  [green]✓[/green] Collected {len(events):,} oracle events"
+                    )
+                else:
+                    console.print("  [yellow]○[/yellow] No oracle events found in range")
+
+            except Exception as e:
+                console.print(f"  [red]✗[/red] Failed to collect oracle events: {e}")
+                logger.error(f"Oracle collection failed for {symbol}: {e}")
+                traceback.print_exc()
+                oracle_events_by_symbol[symbol] = []
 
         # Step 3: Combine GMX API + Oracle events per symbol
         console.print("\n[bold]Step 3: Combining GMX API + Oracle data...[/bold]")
@@ -1095,9 +1174,8 @@ class DataCollector:
             # Get GMX API data
             gmx_candles = gmx_data_by_symbol.get(symbol, {})
 
-            # Get oracle events for this symbol
-            token_addr = symbol_to_token.get(symbol, "").lower()
-            token_events = events_by_token.get(token_addr, [])
+            # Get oracle events for this symbol (from incremental collection)
+            token_events = oracle_events_by_symbol.get(symbol, [])
 
             # Get decimals for this token
             decimals = token_decimals_map.get(symbol, 18)
@@ -1221,7 +1299,7 @@ def cli(
         None,
         "--hypersync-token",
         envvar="HYPERSYNC_API_TOKEN",
-        help="HyperSync API token(s) - comma-separated for multiple tokens (or set HYPERSYNC_API_TOKEN env var)",
+        help="HyperSync API token(s) - space-separated for multiple tokens (or set HYPERSYNC_API_TOKEN env var)",
     ),
     start_block: Optional[int] = typer.Option(
         None,
@@ -1282,6 +1360,13 @@ def cli(
 
     TIMEFRAMES COLLECTED:
       1min, 5min, 15min, 1h, 4h, 1d
+
+    INCREMENTAL COLLECTION:
+      • Checks existing data coverage before fetching
+      • Only fetches missing oracle events (saves bandwidth and time)
+      • Supports HyperSync API key rotation (space-separated keys)
+      • Uses block-timestamp cache for fast block-to-timestamp lookups
+      • Automatically detects gaps and fetches only what's needed
 
     OUTPUT STRUCTURE:
       data/
@@ -1432,11 +1517,17 @@ def _cli_impl(
         console.print()
         raise typer.Exit(1)
 
+    # Parse HyperSync API token(s) - space-separated for multiple keys
+    hypersync_tokens = None
+    if hypersync_token:
+        # Support space-separated tokens for rotation
+        hypersync_tokens = hypersync_token.strip()
+
     # Create configuration
     config = CollectionConfig(
         output_dir=output_dir,
         rpc_url=rpc_url,
-        hypersync_api_token=hypersync_token,
+        hypersync_api_token=hypersync_tokens,  # Now supports space-separated
         start_block=start_block,
         end_block=end_block,
     )
