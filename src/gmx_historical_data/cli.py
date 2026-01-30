@@ -1260,6 +1260,16 @@ def cli(
         "--default",
         help="Recommended: GMX API + Chainlink historical backfill for all tokens",
     ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        "--log-file",
+        help="Path to log file. If not specified, logs to ./logs/gmx-YYYY-MM-DD-HH-MM-SS.log",
+    ),
+    quiet: bool = typer.Option(
+        False,
+        "--quiet",
+        help="Suppress console output when logging to file (file-only mode)",
+    ),
 ) -> None:
     """Collect GMX historical price data.
 
@@ -1320,6 +1330,53 @@ def cli(
       After collection, verify data quality:
       gmx_historical_data verify --output-dir ./data
     """
+    # Setup logging first, before any output
+    from datetime import datetime
+    from gmx_historical_data.log_capture import LogCapture
+
+    # Determine log file path
+    if log_file:
+        log_path = Path(log_file)
+    else:
+        # Default: ./logs/gmx-YYYY-MM-DD-HH-MM-SS.log
+        timestamp = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        log_path = Path(f"./logs/gmx-{timestamp}.log")
+
+    # Wrap entire execution in log capture context
+    with LogCapture(log_path, quiet=quiet):
+        _cli_impl(
+            full=full,
+            update=update,
+            symbol=symbol,
+            output_dir=output_dir,
+            rpc_url=rpc_url,
+            hypersync_token=hypersync_token,
+            start_block=start_block,
+            end_block=end_block,
+            use_gmx_api=use_gmx_api,
+            use_events=use_events,
+            collect_non_chainlink=collect_non_chainlink,
+            concurrency=concurrency,
+            default_mode=default_mode,
+        )
+
+
+def _cli_impl(
+    full: bool,
+    update: bool,
+    symbol: Optional[str],
+    output_dir: Path,
+    rpc_url: Optional[str],
+    hypersync_token: Optional[str],
+    start_block: Optional[int],
+    end_block: Optional[int],
+    use_gmx_api: bool,
+    use_events: bool,
+    collect_non_chainlink: bool,
+    concurrency: int,
+    default_mode: bool,
+) -> None:
+    """Internal implementation of CLI logic."""
     # Validate --default flag
     if default_mode:
         if use_events:
