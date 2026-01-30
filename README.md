@@ -141,6 +141,52 @@ For detailed guide including troubleshooting, advanced configuration, and FAQs, 
 
 **[📘 Incremental Collection Guide](docs/incremental-collection.md)**
 
+## Docker Usage (Recommended)
+
+The easiest way to collect GMX data is using Docker Compose with 3 pre-configured options:
+
+### Quick Start with Docker
+
+```bash
+# 1. Copy environment template
+cp .env.example .env
+
+# 2. Edit .env with your API keys
+nano .env
+
+# 3. Choose your collection option:
+
+# Option 1: Collect everything (all 118 markets)
+docker-compose --profile all up gmx-collect-all
+
+# Option 2: Chainlink feed tokens only (34 markets)
+docker-compose --profile chainlink up gmx-collect-chainlink-only
+
+# Option 3: Custom symbols (user configurable)
+SYMBOLS=ETH,BTC,SUI docker-compose --profile custom up gmx-collect-custom
+```
+
+### Docker Features
+
+- ✅ **No Python/Rust installation needed** - Everything runs in containers
+- ✅ **3 pre-configured profiles** - All markets, Chainlink-only, or custom
+- ✅ **Incremental updates** - `--profile update` for daily updates
+- ✅ **Data verification** - `--profile verify` to check data quality
+- ✅ **Persistent storage** - Data and logs saved to `./data` and `./logs`
+- ✅ **HyperSync key rotation** - Automatic rotation for rate limit protection
+
+### Docker Profiles
+
+| Profile | Markets | Duration (First Run) | Use Case |
+|---------|---------|---------------------|----------|
+| `all` | 118 | 6-8 hours | Complete dataset |
+| `chainlink` | 34 | 2-3 hours | Major tokens only |
+| `custom` | User defined | Varies | Specific tokens |
+| `update` | All existing | 10-30 minutes | Daily updates |
+| `verify` | N/A | 1-2 minutes | Quality check |
+
+**See [Docker Usage Guide](docs/docker-usage.md) for detailed documentation.**
+
 ## Installation
 
 **Prerequisites:** Python 3.11 or 3.12 (recommended), Rust toolchain (for hypersync)

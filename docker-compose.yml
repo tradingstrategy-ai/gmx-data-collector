@@ -1,0 +1,120 @@
+version: '3.8'
+
+services:
+  # Option 1: Collect everything (all 118 GMX markets)
+  gmx-collect-all:
+    build: .
+    container_name: gmx-collect-all
+    profiles:
+      - all
+    environment:
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN:?Error: HYPERSYNC_API_TOKEN environment variable is required}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: >
+      collect
+      --default
+      --output-dir /app/data
+      --log-file /app/logs/gmx-all-$(date +%Y-%m-%d-%H-%M-%S).log
+      --concurrency ${CONCURRENCY:-4}
+    restart: "no"
+    networks:
+      - gmx-network
+
+  # Option 2: Collect only GMX + Chainlink feed tokens (34 markets)
+  gmx-collect-chainlink-only:
+    build: .
+    container_name: gmx-collect-chainlink-only
+    profiles:
+      - chainlink
+    environment:
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: >
+      collect
+      --default
+      --output-dir /app/data
+      --log-file /app/logs/gmx-chainlink-$(date +%Y-%m-%d-%H-%M-%S).log
+      --no-collect-non-chainlink
+      --concurrency ${CONCURRENCY:-4}
+    restart: "no"
+    networks:
+      - gmx-network
+
+  # Option 3: User configurable (custom symbols)
+  gmx-collect-custom:
+    build: .
+    container_name: gmx-collect-custom
+    profiles:
+      - custom
+    environment:
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
+      - SYMBOLS=${SYMBOLS:-ETH,BTC}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: >
+      collect
+      --default
+      --output-dir /app/data
+      --log-file /app/logs/gmx-custom-$(date +%Y-%m-%d-%H-%M-%S).log
+      --symbol ${SYMBOLS}
+      --concurrency ${CONCURRENCY:-4}
+    restart: "no"
+    networks:
+      - gmx-network
+
+  # Incremental update service (runs periodically)
+  gmx-update:
+    build: .
+    container_name: gmx-update
+    profiles:
+      - update
+    environment:
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN:?Error: HYPERSYNC_API_TOKEN environment variable is required}
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: >
+      collect
+      --update
+      --output-dir /app/data
+      --log-file /app/logs/gmx-update-$(date +%Y-%m-%d-%H-%M-%S).log
+      --concurrency ${CONCURRENCY:-4}
+    restart: "no"
+    networks:
+      - gmx-network
+
+  # Data verification service
+  gmx-verify:
+    build: .
+    container_name: gmx-verify
+    profiles:
+      - verify
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: >
+      verify
+      --output-dir /app/data
+      --timeframe 1h
+    restart: "no"
+    networks:
+      - gmx-network
+
+networks:
+  gmx-network:
+    driver: bridge
+
+volumes:
+  data:
+    driver: local
+  logs:
+    driver: local
