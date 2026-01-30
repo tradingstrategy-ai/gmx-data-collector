@@ -24,9 +24,11 @@ import heapq
 import logging
 import random
 import time
+import traceback
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Optional
 
+from rich.console import Console
 from web3 import Web3
 from hypersync import (
     HypersyncClient,
@@ -46,8 +48,13 @@ from web3.types import RPCEndpoint, RPCResponse
 
 from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
 
+# Forward reference for type hints
+if False:  # TYPE_CHECKING
+    from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
+
 
 logger = logging.getLogger(__name__)
+console = Console()
 
 
 # EventLog1 signature hash from GMX EventEmitter contract
@@ -99,39 +106,81 @@ async def retry_with_backoff(
     base_delay: float = DEFAULT_BASE_DELAY,
     max_delay: float = DEFAULT_MAX_DELAY,
     operation_name: str = "operation",
+    key_rotator: Optional['HyperSyncKeyRotator'] = None,
 ):
-    """Execute async function with exponential backoff retry.
+    """Execute async function with progressive backoff retry and key rotation.
+
+    Progressive delays: 2s, 5s, 10s, 30s, 60s (with 10% jitter).
+    Detects rate limit errors and rotates API keys without counting as retry.
 
     :param coro_func: Async function to call (will be awaited)
     :param max_retries: Maximum number of retry attempts
-    :param base_delay: Initial delay between retries (seconds)
-    :param max_delay: Maximum delay between retries (seconds)
+    :param base_delay: Initial delay between retries (seconds, legacy parameter)
+    :param max_delay: Maximum delay between retries (seconds, legacy parameter)
     :param operation_name: Name for logging
+    :param key_rotator: Optional HyperSyncKeyRotator for API key rotation
     :return: Result from successful call
-    :raises: Last exception if all retries fail
+    :raises: Last exception if all retries fail or all keys exhausted
     """
+    # Progressive delays in seconds: 2, 5, 10, 30, 60
+    progressive_delays = [2.0, 5.0, 10.0, 30.0, 60.0]
     last_exception = None
+    attempt = 0
 
-    for attempt in range(max_retries + 1):
+    while attempt <= max_retries:
         try:
             return await coro_func()
         except Exception as e:
             last_exception = e
+
+            # Log full traceback
+            tb_str = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+            console.print(f"[red]Error in {operation_name}:[/red]\n{tb_str}")
+            logger.warning(
+                f"{operation_name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}"
+            )
+
+            # Check if this is a rate limit error
+            error_msg_lower = str(e).lower()
+            is_rate_limit = any(
+                keyword in error_msg_lower
+                for keyword in ['rate limit', 'too many requests', '429', 'quota']
+            )
+
+            if is_rate_limit and key_rotator is not None:
+                # Rate limit detected - try rotating key
+                logger.warning(f"Rate limit detected: {e}")
+                try:
+                    next_key = key_rotator.rotate()
+                    logger.info(f"Rotated to next API key: {next_key[:8]}...")
+                    # Don't count rate limit as retry, don't sleep, retry immediately
+                    continue
+                except RuntimeError as rotate_error:
+                    # All keys exhausted
+                    logger.error(f"All API keys exhausted: {rotate_error}")
+                    raise rotate_error
+
+            # Not a rate limit error, or no key rotator - use normal retry logic
             if attempt < max_retries:
-                # Exponential backoff with jitter
-                delay = min(base_delay * (2**attempt), max_delay)
+                # Use progressive delays
+                delay_index = min(attempt, len(progressive_delays) - 1)
+                delay = progressive_delays[delay_index]
+
+                # Add 10% jitter
                 jitter = random.uniform(0, delay * 0.1)
                 delay += jitter
 
                 logger.warning(
-                    f"{operation_name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}. "
-                    f"Retrying in {delay:.1f}s..."
+                    f"{operation_name} will retry in {delay:.1f}s "
+                    f"(attempt {attempt + 1}/{max_retries + 1})..."
                 )
                 await asyncio.sleep(delay)
+                attempt += 1
             else:
                 logger.error(
                     f"{operation_name} failed after {max_retries + 1} attempts: {e}"
                 )
+                attempt += 1
 
     raise last_exception
 
@@ -230,6 +279,7 @@ class OraclePriceCollector:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
+        key_rotator: Optional['HyperSyncKeyRotator'] = None,
     ):
         """Initialize oracle price collector.
 
@@ -238,11 +288,13 @@ class OraclePriceCollector:
         :param max_retries: Maximum retry attempts for failed queries
         :param retry_base_delay: Initial retry delay in seconds
         :param retry_max_delay: Maximum retry delay in seconds
+        :param key_rotator: Optional HyperSyncKeyRotator for API key rotation on rate limits
         """
         self.hypersync_endpoint = hypersync_endpoint
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
         self.retry_max_delay = retry_max_delay
+        self.key_rotator = key_rotator
 
         # Initialize HyperSync client
         config = ClientConfig(url=hypersync_endpoint, bearer_token=api_token)
@@ -251,6 +303,12 @@ class OraclePriceCollector:
         # Create a Web3 instance with a mock provider that returns Arbitrum chain_id
         # This avoids RPC calls while allowing eth_defi decoder to work
         self._web3 = Web3(ArbitrumMockProvider())
+
+        # Log if key rotation is enabled
+        if key_rotator:
+            logger.info(
+                f"Enhanced error handling enabled with {key_rotator.total_keys} API key(s) for rotation"
+            )
 
     def _address_to_bytes32(self, address: str) -> str:
         """Convert address to bytes32 format (left-padded with zeros).
@@ -566,6 +624,7 @@ class OraclePriceCollector:
                 base_delay=self.retry_base_delay,
                 max_delay=self.retry_max_delay,
                 operation_name="HyperSync get_height",
+                key_rotator=self.key_rotator,
             )
 
         total_blocks = end_block - start_block
