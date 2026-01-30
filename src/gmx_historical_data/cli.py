@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 import logging
 from pathlib import Path
 import traceback
@@ -1416,7 +1417,6 @@ def cli(
       gmx_historical_data verify --output-dir ./data
     """
     # Setup logging first, before any output
-    from datetime import datetime
     from gmx_historical_data.log_capture import LogCapture
 
     # Determine log file path
