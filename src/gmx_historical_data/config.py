@@ -147,3 +147,9 @@ def is_excluded_symbol(symbol: str) -> bool:
     :return: True if the symbol should be excluded
     """
     return symbol.upper() in EXCLUDED_SYMBOLS
+
+
+# Block-timestamp cache configuration
+BLOCK_SAMPLE_INTERVAL = 1000  # Sample every 1000 blocks (~4 minutes on Arbitrum)
+CACHE_STALE_THRESHOLD = 10000  # Rebuild if cache is 10k blocks behind (~11 hours)
+ARBITRUM_AVG_BLOCK_TIME = 0.25  # seconds per block (used for estimation)
