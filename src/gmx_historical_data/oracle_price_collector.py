@@ -504,6 +504,50 @@ class OraclePriceCollector:
             self._decode_batch_sync, logs, block_timestamps, stats
         )
 
+    async def _collect_chunk_with_retry(
+        self,
+        chunk_start: int,
+        chunk_end: int,
+        token_addresses: list[str] | None,
+        chunk_id: int,
+        total_chunks: int,
+        progress_callback: Callable[[str], None] | None = None,
+        stats: CollectionStats | None = None,
+    ) -> tuple[list[OraclePriceEvent], dict[int, int]]:
+        """Collect oracle events with retry logic for HyperSync failures.
+
+        Wraps _collect_chunk with retry_with_backoff to handle transient
+        HyperSync failures like "failed to get arrow data from server".
+
+        :param chunk_start: Start block for this chunk
+        :param chunk_end: End block for this chunk
+        :param token_addresses: Optional filter for specific token addresses
+        :param chunk_id: Chunk identifier for logging
+        :param total_chunks: Total number of chunks for progress calculation
+        :param progress_callback: Optional callback for progress updates
+        :param stats: Optional CollectionStats for tracking errors
+        :return: Tuple of (events list, block_timestamps dict)
+        """
+        async def collect_chunk_operation():
+            return await self._collect_chunk(
+                chunk_start,
+                chunk_end,
+                token_addresses,
+                chunk_id,
+                total_chunks,
+                progress_callback,
+                stats,
+            )
+
+        return await retry_with_backoff(
+            collect_chunk_operation,
+            max_retries=self.max_retries,
+            base_delay=self.retry_base_delay,
+            max_delay=self.retry_max_delay,
+            operation_name=f"HyperSync chunk collection (blocks {chunk_start:,}-{chunk_end:,})",
+            key_rotator=self.key_rotator,
+        )
+
     async def _collect_chunk(
         self,
         chunk_start: int,
@@ -642,7 +686,7 @@ class OraclePriceCollector:
 
         # For small ranges, use single chunk
         if total_blocks < 1_000_000 or concurrency == 1:
-            events, _ = await self._collect_chunk(
+            events, _ = await self._collect_chunk_with_retry(
                 start_block,
                 end_block,
                 token_addresses,
@@ -683,7 +727,7 @@ class OraclePriceCollector:
         # Process chunks in parallel (each chunk gets its own stats instance)
         chunk_stats = [CollectionStats() for _ in chunks]
         tasks = [
-            self._collect_chunk(
+            self._collect_chunk_with_retry(
                 chunk_start,
                 chunk_end,
                 token_addresses,
