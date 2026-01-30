@@ -68,9 +68,9 @@ class LogCapture:
         self.original_console_file = console.file
 
         if self.quiet:
-            console._file = self.log_file
+            console.file = self.log_file
         else:
-            console._file = TeeWriter(self.original_console_file, self.log_file)
+            console.file = TeeWriter(self.original_console_file, self.log_file)
 
         return self
 
@@ -83,7 +83,7 @@ class LogCapture:
         sys.stderr = self.original_stderr
 
         # Restore console
-        console._file = self.original_console_file
+        console.file = self.original_console_file
 
         # Close log file
         if self.log_file:
@@ -108,8 +108,12 @@ class TeeWriter:
         self.primary = primary
         self.secondary = secondary
 
-    def write(self, text: str):
-        """Write text to both streams, stripping ANSI codes for file output."""
+    def write(self, text: str) -> int:
+        """Write text to both streams, stripping ANSI codes for file output.
+
+        :param text: Text to write
+        :return: Number of characters written
+        """
         # Strip ANSI codes for file output
         clean_text = self._strip_ansi(text)
 
@@ -117,10 +121,43 @@ class TeeWriter:
         self.primary.write(text)  # Console gets colors
         self.secondary.write(clean_text)  # File gets clean text
 
-    def flush(self):
+        return len(text)
+
+    def flush(self) -> None:
         """Flush both output streams."""
         self.primary.flush()
         self.secondary.flush()
+
+    def isatty(self) -> bool:
+        """Check if primary stream is a TTY.
+
+        :return: True if primary stream is a TTY
+        """
+        return self.primary.isatty() if hasattr(self.primary, 'isatty') else False
+
+    def writable(self) -> bool:
+        """Check if stream is writable.
+
+        :return: Always True for TeeWriter
+        """
+        return True
+
+    @property
+    def encoding(self) -> str:
+        """Get encoding from primary stream.
+
+        :return: Encoding name
+        """
+        enc = getattr(self.primary, 'encoding', None)
+        return enc if enc is not None else 'utf-8'
+
+    def __getattr__(self, name: str):
+        """Delegate unknown attributes to primary stream.
+
+        :param name: Attribute name
+        :return: Attribute value from primary stream
+        """
+        return getattr(self.primary, name)
 
     @staticmethod
     def _strip_ansi(text: str) -> str:
