@@ -3,21 +3,26 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies and build tools
 RUN apt-get update && apt-get install -y \
     git \
+    curl \
+    gcc \
+    g++ \
+    python3-dev \
+    capnproto \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt requirements-dev.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install uv for fast dependency installation
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
 
-# Copy source code
+# Copy project files
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
-COPY setup.py ./
 
-# Install the package
-RUN pip install --no-cache-dir -e .
+# Install dependencies using uv
+RUN uv pip install --system --no-cache -e .
 
 # Create data and logs directories
 RUN mkdir -p /app/data /app/logs
