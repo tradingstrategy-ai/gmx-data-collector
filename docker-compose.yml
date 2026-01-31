@@ -8,8 +8,8 @@ services:
     profiles:
       - all
     environment:
-      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
-      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN:?Error: HYPERSYNC_API_TOKEN environment variable is required}
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -30,7 +30,7 @@ services:
     profiles:
       - chainlink
     environment:
-      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM}
       - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
     volumes:
       - ./data:/app/data
@@ -53,7 +53,7 @@ services:
     profiles:
       - custom
     environment:
-      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM}
       - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
       - SYMBOLS=${SYMBOLS:-ETH,BTC}
     volumes:
@@ -77,8 +77,8 @@ services:
     profiles:
       - update
     environment:
-      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM:?Error: JSON_RPC_ARBITRUM environment variable is required}
-      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN:?Error: HYPERSYNC_API_TOKEN environment variable is required}
+      - JSON_RPC_ARBITRUM=${JSON_RPC_ARBITRUM}
+      - HYPERSYNC_API_TOKEN=${HYPERSYNC_API_TOKEN}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
