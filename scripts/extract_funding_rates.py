@@ -22,6 +22,11 @@ Based on the original extract_funding_rates_v2.py script with improved decoding:
 - Topic filtering to download only relevant events (not ALL logs)
 - Correct field extraction from GMX's nested key-value structure
 
+Supports two modes:
+
+- **Backfill** (one-shot): ``--from-block 200000000``
+- **Incremental** (cronjob): ``--resume`` with checkpoint
+
 QUICK START
 -----------
     uv run scripts/extract_funding_rates.py --network arbitrum --from-block 200000000
@@ -32,11 +37,17 @@ USAGE
 
 OPTIONS
 -------
-    --network      Network: "arbitrum" or "avalanche" (default: arbitrum)
-    --from-block   Starting block number (default: 0)
-    --to-block     Ending block number (default: latest)
-    --output       Output format: "json", "csv", or "parquet" (default: json)
-    --market       Filter by market symbol (e.g., "ETH/USD", "BTC/USD")
+    --network        Network: "arbitrum" or "avalanche" (default: arbitrum)
+    --from-block     Starting block number (default: 0, or checkpoint if --resume)
+    --to-block       Ending block number (default: latest)
+    --output-dir     Base output directory (default: ./data/funding)
+    --output         Output format: "json", "csv", or "parquet" (default: json)
+    --market         Filter by market symbol (e.g., "ETH/USD", "BTC/USD")
+    --resume         Enable checkpoint-based incremental mode (for cronjob)
+    --checkpoint-dir Override checkpoint directory
+    --background     Run in background (daemonize)
+    --log-file       Log file for background mode
+    --pid-file       PID file for background mode
 
 EXAMPLES
 --------
@@ -48,6 +59,20 @@ EXAMPLES
 
     # Filter by specific market
     uv run scripts/extract_funding_rates.py --network arbitrum --from-block 280000000 --market "ETH/USD"
+
+    # Incremental cronjob (resumes from checkpoint)
+    uv run scripts/extract_funding_rates.py --resume
+
+    # Run in background with checkpoint
+    uv run scripts/extract_funding_rates.py --resume --background
+
+CRONJOB SETUP
+=============
+    # Initial backfill (one-time)
+    uv run scripts/extract_funding_rates.py --from-block 200000000
+
+    # Daily cron (2 AM UTC)
+    0 2 * * * cd /path/to/project && uv run scripts/extract_funding_rates.py --resume 2>&1 >> logs/funding.log
 
 OUTPUT FORMAT (CEX-STYLE)
 =========================
@@ -71,10 +96,13 @@ The output mimics centralized exchange funding rate APIs:
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
-from datetime import datetime, timezone
+from collections import defaultdict
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import hypersync
@@ -106,6 +134,9 @@ console = Console()
 # Retry settings
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2.0  # seconds
+
+# GMX V2 genesis block on Arbitrum (approximate deployment)
+GMX_V2_GENESIS_BLOCK = 120_000_000
 
 
 # =============================================================================
@@ -356,6 +387,108 @@ def decode_event_log_data(hex_data: str) -> dict:
         result["strings"][key] = val
 
     return result
+
+
+# =============================================================================
+# CHECKPOINT
+# =============================================================================
+
+def load_checkpoint(path: Path) -> Optional[dict]:
+    """Load checkpoint from JSON file.
+
+    :param path: Path to checkpoint JSON file
+    :return: Checkpoint dict or None if not found
+    """
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        console.print(f"[yellow]Warning: could not load checkpoint {path}: {e}[/yellow]")
+        return None
+
+
+def save_checkpoint(
+    path: Path,
+    last_block: int,
+    last_timestamp: int,
+    total_events: int,
+    markets_seen: int,
+) -> None:
+    """Save checkpoint to JSON file.
+
+    :param path: Path to checkpoint JSON file
+    :param last_block: Last processed block number
+    :param last_timestamp: Last processed block timestamp
+    :param total_events: Total events processed so far
+    :param markets_seen: Number of unique markets seen
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "symbol": "funding_all",
+        "last_block": last_block,
+        "last_timestamp": last_timestamp,
+        "total_events": total_events,
+        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+        "metadata": {"markets_seen": markets_seen},
+    }
+    with open(path, "w") as f:
+        json.dump(checkpoint, f, indent=2)
+    console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
+
+
+# =============================================================================
+# BACKGROUND / DAEMON
+# =============================================================================
+
+def run_in_background(log_file: str, pid_file: str) -> bool:
+    """Fork the process to run in the background using double-fork.
+
+    :param log_file: Path to log file for stdout/stderr
+    :param pid_file: Path to PID file
+    :return: True if this is the parent (should exit), False if child (continue)
+    """
+    global console
+
+    log_path = Path(log_file)
+    pid_path = Path(pid_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # First fork
+    pid = os.fork()
+    if pid > 0:
+        # Parent process — report and exit
+        print(f"Running in background (PID: {pid})")
+        print(f"Log file: {log_file}")
+        print(f"PID file: {pid_file}")
+        return True
+
+    # Child — detach from controlling terminal
+    os.setsid()
+
+    # Second fork to fully daemonize
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+
+    # Grandchild — redirect stdout/stderr to log file
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    log_fh = open(log_file, "a")
+    sys.stdout = log_fh
+    sys.stderr = log_fh
+
+    # Recreate Rich console to use redirected stdout
+    console = Console(file=sys.stdout, force_terminal=False)
+
+    # Write PID file
+    with open(pid_file, "w") as f:
+        f.write(str(os.getpid()))
+
+    return False
 
 
 # =============================================================================
@@ -707,8 +840,6 @@ def aggregate_funding_snapshots(
 
     Similar to CEX funding rate history endpoints.
     """
-    from collections import defaultdict
-
     # Group by market and time interval
     interval_ms = interval_hours * 3600 * 1000
     snapshots_data = defaultdict(lambda: defaultdict(list))
@@ -783,6 +914,89 @@ def aggregate_funding_snapshots(
 # OUTPUT
 # =============================================================================
 
+def append_parquet(new_df: "pl.DataFrame", filepath: Path) -> None:
+    """Append new data to an existing Parquet file, deduplicating.
+
+    Deduplicates by (blockNumber, logIndex, eventType) and sorts by blockNumber.
+
+    :param new_df: New data as a polars DataFrame
+    :param filepath: Path to the Parquet file
+    """
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    if filepath.exists():
+        existing = pl.read_parquet(filepath)
+        # Align schemas
+        for col in existing.columns:
+            if col in new_df.columns and existing[col].dtype != new_df[col].dtype:
+                new_df = new_df.with_columns(pl.col(col).cast(existing[col].dtype))
+        combined = pl.concat([existing, new_df], how="diagonal_relaxed")
+        combined = combined.unique(subset=["blockNumber", "logIndex", "eventType"], keep="last")
+        combined = combined.sort("blockNumber")
+        combined.write_parquet(filepath)
+    else:
+        new_df.sort("blockNumber").write_parquet(filepath)
+
+
+def save_raw_per_symbol(records: list[FundingRateRecord], output_dir: Path) -> None:
+    """Save raw funding events to per-symbol Parquet files (append mode).
+
+    :param records: List of FundingRateRecord objects
+    :param output_dir: Base output directory (e.g., data/funding/arbitrum)
+    """
+    if not HAS_POLARS:
+        console.print("[red]Error: polars required for Parquet. Install with: pip install polars[/red]")
+        return
+
+    by_symbol: dict[str, list[FundingRateRecord]] = defaultdict(list)
+    for r in records:
+        by_symbol[r.symbol].append(r)
+
+    for symbol, sym_records in sorted(by_symbol.items()):
+        safe_symbol = symbol.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
+        filepath = output_dir / "raw" / safe_symbol / "events.parquet"
+
+        df = pl.DataFrame([asdict(r) for r in sym_records])
+        append_parquet(df, filepath)
+        console.print(f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]")
+
+
+def save_snapshots_per_symbol(
+    snapshots: list[MarketFundingSnapshot], output_dir: Path
+) -> None:
+    """Save aggregated funding snapshots to per-symbol Parquet files (append mode).
+
+    :param snapshots: List of MarketFundingSnapshot objects
+    :param output_dir: Base output directory (e.g., data/funding/arbitrum)
+    """
+    if not HAS_POLARS:
+        console.print("[red]Error: polars required for Parquet. Install with: pip install polars[/red]")
+        return
+
+    by_symbol: dict[str, list[MarketFundingSnapshot]] = defaultdict(list)
+    for s in snapshots:
+        by_symbol[s.symbol].append(s)
+
+    for symbol, sym_snapshots in sorted(by_symbol.items()):
+        safe_symbol = symbol.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
+        filepath = output_dir / "snapshots" / safe_symbol / "snapshots.parquet"
+
+        df = pl.DataFrame([asdict(s) for s in sym_snapshots])
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        if filepath.exists():
+            existing = pl.read_parquet(filepath)
+            for col in existing.columns:
+                if col in df.columns and existing[col].dtype != df[col].dtype:
+                    df = df.with_columns(pl.col(col).cast(existing[col].dtype))
+            combined = pl.concat([existing, df], how="diagonal_relaxed")
+            combined = combined.unique(subset=["fundingTime", "symbol"], keep="last")
+            combined = combined.sort("fundingTime")
+            combined.write_parquet(filepath)
+        else:
+            df.sort("fundingTime").write_parquet(filepath)
+
+        console.print(f"  Snapshots: [cyan]{len(sym_snapshots):,}[/cyan] entries -> [green]{filepath}[/green]")
+
+
 def save_json(data: list, filename: str) -> None:
     """Save to JSON.
 
@@ -830,8 +1044,6 @@ def print_summary(records: list[FundingRateRecord], snapshots: list[MarketFundin
     :param records: List of funding rate records
     :param snapshots: List of aggregated market snapshots
     """
-    from collections import defaultdict
-
     by_market = defaultdict(list)
     for r in records:
         by_market[r.symbol].append(r)
@@ -892,14 +1104,42 @@ async def async_main(args: argparse.Namespace) -> None:
 
     :param args: Parsed command-line arguments
     """
+    output_dir = Path(args.output_dir) / args.network if args.output_dir else None
+    checkpoint_dir = (
+        Path(args.checkpoint_dir) if args.checkpoint_dir
+        else (output_dir / "checkpoints" if output_dir else Path("./data/funding") / args.network / "checkpoints")
+    )
+    checkpoint_path = checkpoint_dir / "funding_checkpoint.json"
+
+    # Determine starting block
+    from_block = args.from_block
+
+    if args.resume and from_block is None:
+        # Load checkpoint for incremental mode
+        checkpoint = load_checkpoint(checkpoint_path)
+        if checkpoint:
+            from_block = checkpoint["last_block"] + 1
+            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
+        else:
+            from_block = GMX_V2_GENESIS_BLOCK
+            console.print(f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]")
+    elif from_block is None:
+        from_block = 0
+
     # Header panel
     header_lines = [
         f"Network:     [cyan]{args.network}[/cyan]",
-        f"Block range: [cyan]{args.from_block:,}[/cyan] to [cyan]{args.to_block or 'latest'}[/cyan]",
+        f"Block range: [cyan]{from_block:,}[/cyan] to [cyan]{args.to_block or 'latest'}[/cyan]",
         f"Output:      [cyan]{args.output}[/cyan]",
     ]
+    if output_dir:
+        header_lines.append(f"Output dir:  [cyan]{output_dir}[/cyan]")
     if args.market:
         header_lines.append(f"Market:      [cyan]{args.market}[/cyan]")
+    if args.resume:
+        header_lines.append(f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})")
+    if args.background:
+        header_lines.append(f"Background:  [cyan]enabled[/cyan]")
     header_lines.append(f"Retries:     [cyan]{MAX_RETRIES}[/cyan] (backoff: {RETRY_BASE_DELAY}s base)")
 
     console.print(Panel(
@@ -920,62 +1160,142 @@ async def async_main(args: argparse.Namespace) -> None:
             to_block = await get_latest_block(client)
         console.print(f"  Latest block: [cyan]{to_block:,}[/cyan]")
 
+    if from_block >= to_block:
+        console.print(f"\n[yellow]Already up to date (from_block {from_block:,} >= to_block {to_block:,})[/yellow]")
+        return
+
     # Extract events
     console.print()
     records = await extract_funding_events(
         client=client,
         network=args.network,
-        from_block=args.from_block,
+        from_block=from_block,
         to_block=to_block,
         market_filter=args.market,
     )
 
     if not records:
         console.print("\n[yellow]No funding events found.[/yellow]")
+        if args.resume:
+            # Still save checkpoint so we don't re-scan empty range
+            save_checkpoint(
+                checkpoint_path,
+                last_block=to_block,
+                last_timestamp=int(time.time()),
+                total_events=0,
+                markets_seen=0,
+            )
         return
 
     # Aggregate to snapshots
     with console.status("Aggregating snapshots..."):
         snapshots = aggregate_funding_snapshots(records)
 
-    # Generate filenames
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = f"gmx_v2_funding_{args.network}_{args.from_block}_{to_block}_{ts}"
-
     # Save outputs
     console.print()
-    if args.output == "json":
-        save_json(records, f"{base}_events.json")
-        save_json(snapshots, f"{base}_snapshots.json")
-    elif args.output == "csv":
-        save_csv(records, f"{base}_events.csv")
-        save_csv(snapshots, f"{base}_snapshots.csv")
+    if args.output == "parquet" and output_dir:
+        # Organized per-symbol parquet storage (for --resume / --output-dir)
+        save_raw_per_symbol(records, output_dir)
+        save_snapshots_per_symbol(snapshots, output_dir)
     elif args.output == "parquet":
+        # Flat parquet files (legacy one-shot mode)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"gmx_v2_funding_{args.network}_{from_block}_{to_block}_{ts}"
         save_parquet(records, f"{base}_events.parquet")
         save_parquet(snapshots, f"{base}_snapshots.parquet")
+    else:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"gmx_v2_funding_{args.network}_{from_block}_{to_block}_{ts}"
+        if args.output == "json":
+            save_json(records, f"{base}_events.json")
+            save_json(snapshots, f"{base}_snapshots.json")
+        elif args.output == "csv":
+            save_csv(records, f"{base}_events.csv")
+            save_csv(snapshots, f"{base}_snapshots.csv")
+
+    # Save checkpoint
+    if args.resume:
+        last_block = max(r.blockNumber for r in records)
+        last_timestamp = max(r.fundingTime for r in records if r.fundingTime) // 1000
+        unique_markets = len(set(r.symbol for r in records))
+
+        # Accumulate total events from previous checkpoint
+        prev_checkpoint = load_checkpoint(checkpoint_path)
+        prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
+
+        save_checkpoint(
+            checkpoint_path,
+            last_block=last_block,
+            last_timestamp=last_timestamp,
+            total_events=prev_total + len(records),
+            markets_seen=unique_markets,
+        )
 
     # Print summary
     print_summary(records, snapshots)
 
 
 def main():
+    """CLI entry point."""
     parser = argparse.ArgumentParser(
         description="Extract GMX V2 funding rates in CEX-style format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # One-shot backfill
+  uv run scripts/extract_funding_rates.py --from-block 200000000
+
+  # Incremental cronjob (resumes from checkpoint)
+  uv run scripts/extract_funding_rates.py --resume
+
+  # Run in background with checkpoint
+  uv run scripts/extract_funding_rates.py --resume --background
+
+  # Background with custom log/pid files
+  uv run scripts/extract_funding_rates.py --resume --background --log-file logs/funding.log --pid-file logs/funding.pid
+        """,
     )
 
     parser.add_argument("--network", choices=["arbitrum", "avalanche"],
                         default="arbitrum", help="Network (default: arbitrum)")
-    parser.add_argument("--from-block", type=int, default=0,
-                        help="Start block (default: 0)")
+    parser.add_argument("--from-block", type=int, default=None,
+                        help="Start block (default: 0, or checkpoint if --resume)")
     parser.add_argument("--to-block", type=int, default=None,
                         help="End block (default: latest)")
+    parser.add_argument("--output-dir", type=str, default=None,
+                        help="Base output directory (default: ./data/funding). Enables organized per-symbol storage.")
     parser.add_argument("--output", choices=["json", "csv", "parquet"],
                         default="json", help="Output format (default: json)")
     parser.add_argument("--market", type=str, default=None,
                         help="Filter by market symbol (e.g., 'ETH/USD')")
+    parser.add_argument("--resume", action="store_true",
+                        help="Enable checkpoint-based incremental mode")
+    parser.add_argument("--checkpoint-dir", type=str, default=None,
+                        help="Override checkpoint directory")
+    parser.add_argument("--background", action="store_true",
+                        help="Run in background (daemonize)")
+    parser.add_argument("--log-file", type=str, default=None,
+                        help="Log file for background mode (default: logs/funding_extract_<timestamp>.log)")
+    parser.add_argument("--pid-file", type=str, default=None,
+                        help="PID file for background mode (default: logs/funding_extract.pid)")
 
     args = parser.parse_args()
+
+    # Auto-enable output-dir when using --resume with parquet
+    if args.resume and args.output_dir is None:
+        args.output_dir = "./data/funding"
+        args.output = "parquet"
+
+    # Handle background mode
+    if args.background:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = args.log_file or f"logs/funding_extract_{ts}.log"
+        pid_file = args.pid_file or "logs/funding_extract.pid"
+
+        is_parent = run_in_background(log_file, pid_file)
+        if is_parent:
+            sys.exit(0)
+        # Child continues below
 
     try:
         asyncio.run(async_main(args))
