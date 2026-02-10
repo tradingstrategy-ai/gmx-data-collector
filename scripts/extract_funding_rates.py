@@ -813,21 +813,26 @@ async def extract_funding_events(
             )
 
             # Milestone logging (readable in log files)
+            # Only print the highest milestone crossed per batch to avoid
+            # duplicate lines when HyperSync returns large batches.
             if total_blocks > 0:
                 pct = (highest_block - from_block) / total_blocks * 100
+                crossed = None
                 while (next_milestone_idx < len(PROGRESS_MILESTONES)
                        and pct >= PROGRESS_MILESTONES[next_milestone_idx]):
+                    crossed = PROGRESS_MILESTONES[next_milestone_idx]
+                    next_milestone_idx += 1
+                if crossed is not None:
                     milestone_elapsed = time.monotonic() - t_start
                     milestone_rate = total_logs / milestone_elapsed if milestone_elapsed > 0 else 0
                     console.print(
-                        f"  [{PROGRESS_MILESTONES[next_milestone_idx]:>3d}%] "
+                        f"  [{crossed:>3d}%] "
                         f"block {highest_block:,} | "
                         f"{total_logs:,} logs | "
                         f"{len(records):,} events | "
                         f"{milestone_rate:.0f} logs/s | "
                         f"{milestone_elapsed:.0f}s elapsed"
                     )
-                    next_milestone_idx += 1
 
     elapsed = time.monotonic() - t_start
     rate = total_logs / elapsed if elapsed > 0 else 0
