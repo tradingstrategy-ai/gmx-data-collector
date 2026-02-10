@@ -138,6 +138,9 @@ RETRY_BASE_DELAY = 2.0  # seconds
 # Progress milestones for log-friendly output (percentage thresholds)
 PROGRESS_MILESTONES = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
 
+# Flush records to disk every N events to bound memory usage
+FLUSH_EVERY = 10_000
+
 # GMX V2 genesis block on Arbitrum (approximate deployment)
 GMX_V2_GENESIS_BLOCK = 120_000_000
 
@@ -567,19 +570,24 @@ async def extract_funding_events(
     from_block: int,
     to_block: Optional[int],
     market_filter: Optional[str] = None,
-) -> list[FundingRateRecord]:
+    output_dir: Optional[Path] = None,
+) -> tuple[list[FundingRateRecord], int, int]:
     """Extract funding rate events from GMX V2 EventEmitter.
 
     Uses topic filtering to only download funding-related events
     and proper eth_abi decode for accurate field extraction.
     Retries automatically on transient errors with exponential backoff.
 
+    When ``output_dir`` is provided, records are flushed to per-symbol
+    Parquet files every :data:`FLUSH_EVERY` events to bound memory usage.
+
     :param client: HyperSync client instance
     :param network: Network name (arbitrum, avalanche)
     :param from_block: Starting block number
     :param to_block: Ending block number (None for latest)
     :param market_filter: Optional market symbol filter (e.g., "ETH/USD")
-    :return: List of decoded funding rate records
+    :param output_dir: Base output directory for incremental flushing (None to keep all in memory)
+    :return: Tuple of (remaining records, flushed_count, highest_block)
     """
     emitter = EVENT_EMITTER_ADDRESSES.get(network)
     if not emitter:
@@ -622,6 +630,7 @@ async def extract_funding_events(
     console.print(f"  Events:       [cyan]{', '.join(FUNDING_EVENT_NAMES)}[/cyan]")
 
     records = []
+    flushed_count = 0
     total_logs = 0
     decode_errors = 0
     funding_events = {name: 0 for name in FUNDING_EVENT_NAMES}
@@ -796,6 +805,12 @@ async def extract_funding_events(
                 )
                 records.append(record)
 
+            # Incremental flush to disk when threshold reached
+            if output_dir and len(records) >= FLUSH_EVERY:
+                save_raw_per_symbol(records, output_dir)
+                flushed_count += len(records)
+                records.clear()
+
             # Update progress bar
             if batch_highest > highest_block:
                 advance = batch_highest - highest_block
@@ -804,10 +819,11 @@ async def extract_funding_events(
 
             elapsed = time.monotonic() - t_start
             rate = total_logs / elapsed if elapsed > 0 else 0
+            total_events = flushed_count + len(records)
             progress.update(
                 task,
                 logs=total_logs,
-                events=len(records),
+                events=total_events,
                 rate=rate,
                 errors=decode_errors,
             )
@@ -829,13 +845,20 @@ async def extract_funding_events(
                         f"  [{crossed:>3d}%] "
                         f"block {highest_block:,} | "
                         f"{total_logs:,} logs | "
-                        f"{len(records):,} events | "
+                        f"{flushed_count + len(records):,} events | "
                         f"{milestone_rate:.0f} logs/s | "
                         f"{milestone_elapsed:.0f}s elapsed"
                     )
 
+    # Final flush of remaining records
+    if output_dir and records:
+        save_raw_per_symbol(records, output_dir)
+        flushed_count += len(records)
+        records.clear()
+
     elapsed = time.monotonic() - t_start
     rate = total_logs / elapsed if elapsed > 0 else 0
+    total_events = flushed_count + len(records)
 
     # Summary line
     console.print(
@@ -843,7 +866,7 @@ async def extract_funding_events(
         f"([cyan]{rate:.0f}[/cyan] logs/sec)"
     )
     console.print(
-        f"  Found [green]{len(records):,}[/green] funding events "
+        f"  Found [green]{total_events:,}[/green] funding events "
         f"([red]{decode_errors}[/red] decode errors)"
     )
 
@@ -855,7 +878,7 @@ async def extract_funding_events(
     if any(v > 0 for v in funding_events.values()):
         console.print(event_table)
 
-    return records
+    return records, flushed_count, highest_block
 
 
 def aggregate_funding_snapshots(
@@ -933,6 +956,104 @@ def aggregate_funding_snapshots(
             )
             snapshots.append(snapshot)
 
+    return snapshots
+
+
+def aggregate_snapshots_from_parquet(
+    output_dir: Path,
+    interval_hours: int = 8,
+) -> list[MarketFundingSnapshot]:
+    """Aggregate funding snapshots by reading raw Parquet files from disk.
+
+    This avoids holding all records in memory at once. Reads each per-symbol
+    ``raw/<SYMBOL>/events.parquet`` file and computes the same 8-hour interval
+    aggregations as :func:`aggregate_funding_snapshots`.
+
+    :param output_dir: Base output directory containing ``raw/`` subdirectories
+    :param interval_hours: Aggregation interval in hours (default: 8)
+    :return: List of aggregated MarketFundingSnapshot objects
+    """
+    raw_dir = output_dir / "raw"
+    if not raw_dir.exists():
+        return []
+
+    interval_ms = interval_hours * 3600 * 1000
+    snapshots = []
+
+    for parquet_file in sorted(raw_dir.glob("*/events.parquet")):
+        df = pl.read_parquet(parquet_file)
+        if df.is_empty():
+            continue
+
+        # Compute interval_start for grouping
+        df = df.with_columns(
+            (pl.col("fundingTime") // interval_ms * interval_ms).alias("interval_start")
+        )
+
+        for (interval_start,), group in df.group_by(["interval_start"]):
+            if not interval_start:
+                continue
+
+            symbol = group["symbol"][0]
+
+            # Collect long/short rates
+            long_col = group["longTokenFundingPerSize"].drop_nulls().to_list()
+            short_col = group["shortTokenFundingPerSize"].drop_nulls().to_list()
+
+            long_rates = []
+            for v in long_col:
+                try:
+                    long_rates.append(int(v) / FUNDING_RATE_PRECISION)
+                except (ValueError, TypeError):
+                    pass
+
+            short_rates = []
+            for v in short_col:
+                try:
+                    short_rates.append(int(v) / FUNDING_RATE_PRECISION)
+                except (ValueError, TypeError):
+                    pass
+
+            # Sum fees
+            total_funding = 0.0
+            for v in group["fundingFeeUsd"].drop_nulls().to_list():
+                try:
+                    total_funding += float(v)
+                except (ValueError, TypeError):
+                    pass
+
+            total_borrowing = 0.0
+            for v in group["borrowingFeeUsd"].drop_nulls().to_list():
+                try:
+                    total_borrowing += float(v)
+                except (ValueError, TypeError):
+                    pass
+
+            avg_long = sum(long_rates) / len(long_rates) if long_rates else 0
+            avg_short = sum(short_rates) / len(short_rates) if short_rates else 0
+
+            funding_8h = max(abs(avg_long), abs(avg_short))
+            funding_annual = funding_8h * 1095
+
+            snapshot = MarketFundingSnapshot(
+                symbol=symbol,
+                fundingTime=interval_start,
+                fundingTimeDatetime=datetime.fromtimestamp(
+                    interval_start / 1000, tz=timezone.utc
+                ).isoformat(),
+                fundingRate8h=f"{funding_8h:.10f}",
+                fundingRateAnnualized=f"{funding_annual:.6f}",
+                longFundingRate=f"{avg_long:.10f}",
+                shortFundingRate=f"{avg_short:.10f}",
+                positionCount=len(group),
+                totalFundingFeeUsd=f"{total_funding:.2f}",
+                totalBorrowingFeeUsd=f"{total_borrowing:.2f}",
+                blockNumber=group["blockNumber"].max(),
+            )
+            snapshots.append(snapshot)
+
+    # Sort by symbol then fundingTime for consistent output
+    snapshots.sort(key=lambda s: (s.symbol, s.fundingTime))
     return snapshots
 
 
@@ -1190,17 +1311,20 @@ async def async_main(args: argparse.Namespace) -> None:
         console.print(f"\n[yellow]Already up to date (from_block {from_block:,} >= to_block {to_block:,})[/yellow]")
         return
 
-    # Extract events
+    # Extract events (with incremental flushing when output_dir is set)
     console.print()
-    records = await extract_funding_events(
+    records, flushed_count, highest_block = await extract_funding_events(
         client=client,
         network=args.network,
         from_block=from_block,
         to_block=to_block,
         market_filter=args.market,
+        output_dir=output_dir if args.output == "parquet" else None,
     )
 
-    if not records:
+    total_events = flushed_count + len(records)
+
+    if total_events == 0:
         console.print("\n[yellow]No funding events found.[/yellow]")
         if args.resume:
             # Still save checkpoint so we don't re-scan empty range
@@ -1213,23 +1337,31 @@ async def async_main(args: argparse.Namespace) -> None:
             )
         return
 
-    # Aggregate to snapshots
-    with console.status("Aggregating snapshots..."):
-        snapshots = aggregate_funding_snapshots(records)
-
-    # Save outputs
+    # Aggregate to snapshots and save outputs
     console.print()
     if args.output == "parquet" and output_dir:
-        # Organized per-symbol parquet storage (for --resume / --output-dir)
-        save_raw_per_symbol(records, output_dir)
+        # Raw events already flushed incrementally by extract_funding_events().
+        # If there are unflushed leftovers (shouldn't happen since final flush
+        # is done inside extract_funding_events, but just in case):
+        if records:
+            save_raw_per_symbol(records, output_dir)
+
+        # Compute snapshots from disk (reads all raw parquet files)
+        with console.status("Aggregating snapshots from disk..."):
+            snapshots = aggregate_snapshots_from_parquet(output_dir)
         save_snapshots_per_symbol(snapshots, output_dir)
     elif args.output == "parquet":
-        # Flat parquet files (legacy one-shot mode)
+        # Flat parquet files (legacy one-shot mode, no output_dir)
+        with console.status("Aggregating snapshots..."):
+            snapshots = aggregate_funding_snapshots(records)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"gmx_v2_funding_{args.network}_{from_block}_{to_block}_{ts}"
         save_parquet(records, f"{base}_events.parquet")
         save_parquet(snapshots, f"{base}_snapshots.parquet")
     else:
+        # JSON/CSV modes (no incremental flushing, records in memory)
+        with console.status("Aggregating snapshots..."):
+            snapshots = aggregate_funding_snapshots(records)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"gmx_v2_funding_{args.network}_{from_block}_{to_block}_{ts}"
         if args.output == "json":
@@ -1241,9 +1373,8 @@ async def async_main(args: argparse.Namespace) -> None:
 
     # Save checkpoint
     if args.resume:
-        last_block = max(r.blockNumber for r in records)
-        last_timestamp = max(r.fundingTime for r in records if r.fundingTime) // 1000
-        unique_markets = len(set(r.symbol for r in records))
+        # Use highest_block from extraction (records may be empty after flushing)
+        last_timestamp = int(time.time())
 
         # Accumulate total events from previous checkpoint
         prev_checkpoint = load_checkpoint(checkpoint_path)
@@ -1251,14 +1382,22 @@ async def async_main(args: argparse.Namespace) -> None:
 
         save_checkpoint(
             checkpoint_path,
-            last_block=last_block,
+            last_block=highest_block,
             last_timestamp=last_timestamp,
-            total_events=prev_total + len(records),
-            markets_seen=unique_markets,
+            total_events=prev_total + total_events,
+            markets_seen=0,  # Not tracked per-flush; snapshot count suffices
         )
 
-    # Print summary
-    print_summary(records, snapshots)
+    # Print summary (use snapshots for summary when records were flushed)
+    if records:
+        print_summary(records, snapshots)
+    else:
+        # Records were flushed; print snapshot-only summary
+        console.print(f"\n  Total events extracted: [cyan]{total_events:,}[/cyan]")
+        console.print(f"  Aggregated snapshots:   [cyan]{len(snapshots):,}[/cyan]")
+        symbols = sorted(set(s.symbol for s in snapshots))
+        if symbols:
+            console.print(f"  Markets:               [cyan]{', '.join(symbols)}[/cyan]")
 
 
 def main():
