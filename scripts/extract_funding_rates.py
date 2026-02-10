@@ -1394,6 +1394,11 @@ async def async_main(args: argparse.Namespace) -> None:
         border_style="blue",
     ))
 
+    # Fail early if parquet output requested but polars unavailable
+    if args.output == "parquet" and not HAS_POLARS:
+        console.print("[red]Error: polars is required for parquet output. Install with: poetry add polars[/red]")
+        sys.exit(1)
+
     # Create client
     with console.status("Connecting to HyperSync..."):
         client = await create_client(args.network)

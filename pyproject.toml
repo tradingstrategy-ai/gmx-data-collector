@@ -19,6 +19,7 @@ typer = ">=0.15.1"
 rich = ">=13.9.4"
 schedule = ">=1.2.0"
 aiohttp = ">=3.9.0"
+polars = "^1.38.1"
 
 [tool.poetry.scripts]
 gmx_historical_data = "gmx_historical_data.cli:main"
