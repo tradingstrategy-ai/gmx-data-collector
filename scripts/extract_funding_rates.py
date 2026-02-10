@@ -631,6 +631,7 @@ async def extract_funding_events(
 
     records = []
     flushed_count = 0
+    flush_counter = 0
     total_logs = 0
     decode_errors = 0
     funding_events = {name: 0 for name in FUNDING_EVENT_NAMES}
@@ -807,11 +808,12 @@ async def extract_funding_events(
 
             # Incremental flush to disk when threshold reached
             if output_dir and len(records) >= FLUSH_EVERY:
+                flush_counter += 1
                 console.print(
                     f"  Flushing [cyan]{len(records):,}[/cyan] records to disk "
-                    f"(total so far: [cyan]{flushed_count + len(records):,}[/cyan])"
+                    f"(chunk {flush_counter}, total so far: [cyan]{flushed_count + len(records):,}[/cyan])"
                 )
-                save_raw_per_symbol(records, output_dir)
+                save_flush_chunks(records, output_dir, flush_counter)
                 flushed_count += len(records)
                 records.clear()
 
@@ -856,11 +858,12 @@ async def extract_funding_events(
 
     # Final flush of remaining records
     if output_dir and records:
+        flush_counter += 1
         console.print(
             f"  Final flush: [cyan]{len(records):,}[/cyan] records to disk "
-            f"(total: [cyan]{flushed_count + len(records):,}[/cyan])"
+            f"(chunk {flush_counter}, total: [cyan]{flushed_count + len(records):,}[/cyan])"
         )
-        save_raw_per_symbol(records, output_dir)
+        save_flush_chunks(records, output_dir, flush_counter)
         flushed_count += len(records)
         records.clear()
 
@@ -988,8 +991,17 @@ def aggregate_snapshots_from_parquet(
     interval_ms = interval_hours * 3600 * 1000
     snapshots = []
 
-    for parquet_file in sorted(raw_dir.glob("*/events.parquet")):
-        df = pl.read_parquet(parquet_file)
+    for symbol_dir in sorted(raw_dir.iterdir()):
+        if not symbol_dir.is_dir():
+            continue
+
+        # Read events.parquet and any unmerged chunk files
+        parquet_files = sorted(symbol_dir.glob("*.parquet"))
+        if not parquet_files:
+            continue
+
+        frames = [pl.read_parquet(f) for f in parquet_files]
+        df = pl.concat(frames, how="diagonal_relaxed") if len(frames) > 1 else frames[0]
         if df.is_empty():
             continue
 
@@ -1113,6 +1125,84 @@ def save_raw_per_symbol(records: list[FundingRateRecord], output_dir: Path) -> N
         df = pl.DataFrame([asdict(r) for r in sym_records])
         append_parquet(df, filepath)
         console.print(f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]")
+
+
+def save_flush_chunks(
+    records: list[FundingRateRecord], output_dir: Path, chunk_id: int
+) -> None:
+    """Write records as numbered per-symbol chunk files (no read-modify-write).
+
+    Each flush writes a separate ``chunk_NNNNNN.parquet`` file per symbol
+    under ``raw/<SYMBOL>/``.  This avoids the O(total) memory cost of
+    reading and rewriting a single growing ``events.parquet`` on every flush.
+
+    :param records: List of FundingRateRecord objects to write
+    :param output_dir: Base output directory (e.g., data/funding/arbitrum)
+    :param chunk_id: Monotonically increasing flush counter
+    """
+    if not HAS_POLARS:
+        console.print("[red]Error: polars required for Parquet. Install with: pip install polars[/red]")
+        return
+
+    by_symbol: dict[str, list[FundingRateRecord]] = defaultdict(list)
+    for r in records:
+        by_symbol[r.symbol].append(r)
+
+    for symbol, sym_records in sorted(by_symbol.items()):
+        safe_symbol = symbol.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
+        filepath = output_dir / "raw" / safe_symbol / f"chunk_{chunk_id:06d}.parquet"
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+
+        df = pl.DataFrame([asdict(r) for r in sym_records])
+        df.sort("blockNumber").write_parquet(filepath)
+
+
+def merge_raw_chunks(output_dir: Path) -> None:
+    """Merge per-symbol chunk files into a single ``events.parquet`` per symbol.
+
+    Reads all ``chunk_*.parquet`` files under each ``raw/<SYMBOL>/`` directory,
+    concatenates them with any existing ``events.parquet``, deduplicates on
+    ``(blockNumber, logIndex, eventType)``, and writes the merged result.
+    Chunk files are deleted after a successful merge.
+
+    :param output_dir: Base output directory containing ``raw/`` subdirectories
+    """
+    raw_dir = output_dir / "raw"
+    if not raw_dir.exists():
+        return
+
+    for symbol_dir in sorted(raw_dir.iterdir()):
+        if not symbol_dir.is_dir():
+            continue
+
+        chunk_files = sorted(symbol_dir.glob("chunk_*.parquet"))
+        if not chunk_files:
+            continue
+
+        events_file = symbol_dir / "events.parquet"
+
+        # Collect all DataFrames to merge
+        frames = []
+        if events_file.exists():
+            frames.append(pl.read_parquet(events_file))
+        for cf in chunk_files:
+            frames.append(pl.read_parquet(cf))
+
+        combined = pl.concat(frames, how="diagonal_relaxed")
+        combined = combined.unique(
+            subset=["blockNumber", "logIndex", "eventType"], keep="last"
+        )
+        combined = combined.sort("blockNumber")
+        combined.write_parquet(events_file)
+
+        console.print(
+            f"  Merged [cyan]{len(chunk_files)}[/cyan] chunks "
+            f"([cyan]{len(combined):,}[/cyan] rows) -> [green]{events_file}[/green]"
+        )
+
+        # Remove chunk files after successful merge
+        for cf in chunk_files:
+            cf.unlink()
 
 
 def save_snapshots_per_symbol(
@@ -1348,11 +1438,15 @@ async def async_main(args: argparse.Namespace) -> None:
     # Aggregate to snapshots and save outputs
     console.print()
     if args.output == "parquet" and output_dir:
-        # Raw events already flushed incrementally by extract_funding_events().
+        # Raw events already flushed as chunks by extract_funding_events().
         # If there are unflushed leftovers (shouldn't happen since final flush
         # is done inside extract_funding_events, but just in case):
         if records:
             save_raw_per_symbol(records, output_dir)
+
+        # Merge chunks into consolidated events.parquet per symbol
+        with console.status("Merging raw chunks..."):
+            merge_raw_chunks(output_dir)
 
         # Compute snapshots from disk (reads all raw parquet files)
         with console.status("Aggregating snapshots from disk..."):
