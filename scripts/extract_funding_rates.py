@@ -807,6 +807,10 @@ async def extract_funding_events(
 
             # Incremental flush to disk when threshold reached
             if output_dir and len(records) >= FLUSH_EVERY:
+                console.print(
+                    f"  Flushing [cyan]{len(records):,}[/cyan] records to disk "
+                    f"(total so far: [cyan]{flushed_count + len(records):,}[/cyan])"
+                )
                 save_raw_per_symbol(records, output_dir)
                 flushed_count += len(records)
                 records.clear()
@@ -852,6 +856,10 @@ async def extract_funding_events(
 
     # Final flush of remaining records
     if output_dir and records:
+        console.print(
+            f"  Final flush: [cyan]{len(records):,}[/cyan] records to disk "
+            f"(total: [cyan]{flushed_count + len(records):,}[/cyan])"
+        )
         save_raw_per_symbol(records, output_dir)
         flushed_count += len(records)
         records.clear()
