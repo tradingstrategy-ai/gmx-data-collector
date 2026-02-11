@@ -141,6 +141,162 @@ For detailed guide including troubleshooting, advanced configuration, and FAQs, 
 
 **[📘 Incremental Collection Guide](docs/incremental-collection.md)**
 
+## Funding Rate Extraction (GMX V2)
+
+Extract historical funding rate events from GMX V2 EventEmitter contracts.
+
+### ⚠️ CRITICAL: Output Mode Selection
+
+For **full historical extractions** (genesis to latest block), you **MUST** use:
+
+```bash
+--output parquet --output-dir ./data/funding
+```
+
+**Why?**
+
+| Output Mode | Memory Usage | Write Strategy | Use Case |
+|-------------|--------------|----------------|----------|
+| `--output json` | **Accumulates ALL records in memory** (10+ GB) | Writes once at end | ❌ Full history = OOM crash |
+| `--output parquet` | **Bounded to ~10K records** | Flushes every 10K events | ✅ Full history = safe |
+
+**Memory Comparison:**
+
+```
+Full Arbitrum History (~430M blocks):
+├─ JSON output:  9.3 GB in memory → 9.3 GB JSON file (OOM on small servers)
+└─ Parquet output: ~10K records in memory → chunk files → merged parquet (safe)
+```
+
+### Quick Start
+
+```bash
+# Install dependencies first
+poetry install
+
+# RECOMMENDED: Full historical extraction with parquet
+poetry run python scripts/extract_funding_rates.py \
+  --output parquet \
+  --output-dir ./data/funding \
+  --resume \
+  --checkpoint-dir ./checkpoints
+
+# Run in background (daemon mode)
+poetry run python scripts/extract_funding_rates.py \
+  --output parquet \
+  --output-dir ./data/funding \
+  --resume \
+  --background \
+  --log-file logs/funding.log \
+  --pid-file logs/funding.pid
+```
+
+### How Chunk-Based Flushing Works
+
+With `--output parquet --output-dir <path>`:
+
+1. **During extraction** (every 10,000 events):
+   ```
+   data/funding/arbitrum/raw/ETH_USD/
+   ├── chunk_000001.parquet  (10,000 events)
+   ├── chunk_000002.parquet  (10,000 events)
+   ├── chunk_000003.parquet  (10,000 events)
+   └── ...
+   ```
+
+2. **After extraction completes**:
+   - Chunks are merged into `events.parquet` per symbol
+   - Deduplication on `(blockNumber, logIndex, eventType)`
+   - Chunk files are deleted
+
+3. **Memory stays bounded**:
+   - In-memory buffer cleared after each flush
+   - Maximum ~10,000 records in memory at once
+   - Survives crashes (chunks already on disk)
+
+### Output Structure
+
+```
+data/funding/arbitrum/
+├── raw/
+│   ├── ETH_USD/
+│   │   └── events.parquet        # All raw events for ETH/USD
+│   └── BTC_USD/
+│       └── events.parquet        # All raw events for BTC/USD
+└── rates/
+    ├── ETH_USD/
+    │   └── snapshots.parquet     # Aggregated funding rate snapshots
+    └── BTC_USD/
+        └── snapshots.parquet
+```
+
+### Performance
+
+| Extraction Type | Duration | Memory Peak | Output Size |
+|----------------|----------|-------------|-------------|
+| Full history (430M blocks) | ~6-8 hours | ~10K events (~50 MB) | ~9 GB parquet |
+| Incremental (1 day) | ~5-10 minutes | ~10K events (~50 MB) | ~10 MB parquet |
+
+### Common Use Cases
+
+**Testing (small range):**
+```bash
+# JSON is fine for small ranges
+poetry run python scripts/extract_funding_rates.py \
+  --from-block 290000000 \
+  --to-block 290100000 \
+  --output json
+```
+
+**Production (full history):**
+```bash
+# MUST use parquet for full history
+poetry run python scripts/extract_funding_rates.py \
+  --output parquet \
+  --output-dir ./data/funding \
+  --resume
+```
+
+**Daily cronjob:**
+```bash
+# Resume from checkpoint (incremental)
+0 2 * * * cd /path/to/gmx_historical_data && \
+  poetry run python scripts/extract_funding_rates.py \
+  --output parquet \
+  --output-dir ./data/funding \
+  --resume >> logs/funding_cron.log 2>&1
+```
+
+### Troubleshooting
+
+**Problem: Script crashes at 60% with no output files**
+
+✅ **Solution:** You're using `--output json` (default). Switch to parquet:
+```bash
+poetry run python scripts/extract_funding_rates.py \
+  --output parquet \
+  --output-dir ./data/funding
+```
+
+**Problem: `Error: polars required for Parquet`**
+
+✅ **Solution:** Install polars dependency:
+```bash
+poetry install  # polars is now a project dependency
+```
+
+**Problem: Background process stuck/killed**
+
+✅ **Solution:** Check memory usage and ensure parquet output:
+```bash
+# Check if process is still running
+cat logs/funding.pid
+ps aux | grep extract_funding_rates
+
+# Check logs
+tail -f logs/funding.log
+```
+
 ## Docker Usage (Recommended)
 
 The easiest way to collect GMX data is using Docker Compose with 3 pre-configured options:

@@ -1513,18 +1513,37 @@ def main():
         description="Extract GMX V2 funding rates in CEX-style format",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+IMPORTANT - Output Mode Selection:
+  For LARGE historical extractions (full blockchain history), you MUST use:
+    --output parquet --output-dir <path>
+
+  This enables chunk-based incremental flushing to disk, bounding memory usage.
+
+  JSON/CSV output accumulates ALL records in memory and writes once at the end.
+  This will cause OOM crashes on servers with limited RAM.
+
 Examples:
-  # One-shot backfill
-  uv run scripts/extract_funding_rates.py --from-block 200000000
+  # RECOMMENDED: Full historical extraction with parquet (bounded memory)
+  poetry run python scripts/extract_funding_rates.py --output parquet --output-dir ./data/funding --resume
+
+  # Small range extraction (JSON is fine for testing)
+  poetry run python scripts/extract_funding_rates.py --from-block 290000000 --to-block 290100000 --output json
 
   # Incremental cronjob (resumes from checkpoint)
-  uv run scripts/extract_funding_rates.py --resume
+  poetry run python scripts/extract_funding_rates.py --output parquet --output-dir ./data/funding --resume
 
   # Run in background with checkpoint
-  uv run scripts/extract_funding_rates.py --resume --background
+  poetry run python scripts/extract_funding_rates.py --output parquet --output-dir ./data/funding --resume --background
 
   # Background with custom log/pid files
-  uv run scripts/extract_funding_rates.py --resume --background --log-file logs/funding.log --pid-file logs/funding.pid
+  poetry run python scripts/extract_funding_rates.py --output parquet --output-dir ./data/funding --resume --background --log-file logs/funding.log --pid-file logs/funding.pid
+
+Memory Usage:
+  --output json          → Accumulates ALL records in memory (can be 10+ GB)
+  --output parquet       → Flushes every 10,000 events (~bounded to 10K records)
+
+  With parquet, the script writes chunk_000001.parquet, chunk_000002.parquet, etc.
+  during extraction, then merges them into a final events.parquet per symbol.
         """,
     )
 
@@ -1537,7 +1556,11 @@ Examples:
     parser.add_argument("--output-dir", type=str, default=None,
                         help="Base output directory (default: ./data/funding). Enables organized per-symbol storage.")
     parser.add_argument("--output", choices=["json", "csv", "parquet"],
-                        default="json", help="Output format (default: json)")
+                        default="json",
+                        help="Output format (default: json). "
+                             "IMPORTANT: Use 'parquet' with --output-dir for full historical extractions "
+                             "to enable chunk-based flushing and avoid OOM crashes. "
+                             "JSON accumulates all records in memory.")
     parser.add_argument("--market", type=str, default=None,
                         help="Filter by market symbol (e.g., 'ETH/USD')")
     parser.add_argument("--resume", action="store_true",
