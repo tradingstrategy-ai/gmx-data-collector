@@ -170,6 +170,27 @@ Full Arbitrum History (~430M blocks):
 
 ### Quick Start
 
+**Using Makefile (Recommended):**
+
+```bash
+# Install dependencies
+make install
+
+# Full historical extraction (background mode)
+make funding-full
+
+# Check extraction status
+make funding-status
+
+# Watch logs in real-time
+make funding-logs
+
+# Stop extraction
+make funding-stop
+```
+
+**Or using Poetry directly:**
+
 ```bash
 # Install dependencies first
 poetry install
@@ -259,7 +280,10 @@ poetry run python scripts/extract_funding_rates.py \
 
 **Daily cronjob:**
 ```bash
-# Resume from checkpoint (incremental)
+# Using Makefile (recommended)
+0 2 * * * cd /path/to/gmx_historical_data && make funding-incremental >> logs/funding_cron.log 2>&1
+
+# Or using Poetry directly
 0 2 * * * cd /path/to/gmx_historical_data && \
   poetry run python scripts/extract_funding_rates.py \
   --output parquet \
