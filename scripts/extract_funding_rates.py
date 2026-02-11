@@ -1148,12 +1148,37 @@ def save_flush_chunks(
     for r in records:
         by_symbol[r.symbol].append(r)
 
+    # Define explicit schema to handle GMX 30-decimal precision values as strings
+    # Without this, polars tries to infer types and fails on huge numbers like "1064917743305710668066485"
+    schema = {
+        "symbol": pl.Utf8,
+        "fundingTime": pl.Int64,
+        "fundingTimeDatetime": pl.Utf8,
+        "fundingRate": pl.Utf8,  # GMX 30-decimal precision
+        "fundingRatePercent": pl.Utf8,
+        "side": pl.Utf8,
+        "positionSizeUsd": pl.Utf8,  # GMX 30-decimal precision
+        "fundingFeeUsd": pl.Utf8,
+        "borrowingFeeUsd": pl.Utf8,
+        "positionFeeUsd": pl.Utf8,
+        "totalFeeUsd": pl.Utf8,
+        "market": pl.Utf8,
+        "account": pl.Utf8,
+        "collateralToken": pl.Utf8,
+        "longTokenFundingPerSize": pl.Utf8,  # GMX 30-decimal precision
+        "shortTokenFundingPerSize": pl.Utf8,  # GMX 30-decimal precision
+        "blockNumber": pl.Int64,
+        "transactionHash": pl.Utf8,
+        "logIndex": pl.Int64,
+        "eventType": pl.Utf8,
+    }
+
     for symbol, sym_records in sorted(by_symbol.items()):
         safe_symbol = symbol.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
         filepath = output_dir / "raw" / safe_symbol / f"chunk_{chunk_id:06d}.parquet"
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        df = pl.DataFrame([asdict(r) for r in sym_records])
+        df = pl.DataFrame([asdict(r) for r in sym_records], schema=schema)
         df.sort("blockNumber").write_parquet(filepath)
 
 
@@ -1221,11 +1246,26 @@ def save_snapshots_per_symbol(
     for s in snapshots:
         by_symbol[s.symbol].append(s)
 
+    # Define explicit schema for MarketFundingSnapshot to handle GMX 30-decimal precision
+    snapshot_schema = {
+        "symbol": pl.Utf8,
+        "fundingTime": pl.Int64,
+        "fundingTimeDatetime": pl.Utf8,
+        "fundingRate8h": pl.Utf8,  # GMX 30-decimal precision
+        "fundingRateAnnualized": pl.Utf8,  # GMX 30-decimal precision
+        "longFundingRate": pl.Utf8,  # GMX 30-decimal precision
+        "shortFundingRate": pl.Utf8,  # GMX 30-decimal precision
+        "positionCount": pl.Int64,
+        "totalFundingFeeUsd": pl.Utf8,  # GMX 30-decimal precision
+        "totalBorrowingFeeUsd": pl.Utf8,  # GMX 30-decimal precision
+        "blockNumber": pl.Int64,
+    }
+
     for symbol, sym_snapshots in sorted(by_symbol.items()):
         safe_symbol = symbol.replace("/", "_").replace(" ", "_").replace("[", "").replace("]", "")
         filepath = output_dir / "snapshots" / safe_symbol / "snapshots.parquet"
 
-        df = pl.DataFrame([asdict(s) for s in sym_snapshots])
+        df = pl.DataFrame([asdict(s) for s in sym_snapshots], schema=snapshot_schema)
         filepath.parent.mkdir(parents=True, exist_ok=True)
         if filepath.exists():
             existing = pl.read_parquet(filepath)
