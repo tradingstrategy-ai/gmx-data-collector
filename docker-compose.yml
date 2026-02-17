@@ -40,7 +40,7 @@ services:
       --default
       --output-dir /app/data
       --log-file /app/logs/gmx-chainlink-$$(date +%Y-%m-%d-%H-%M-%S).log
-      --no-collect-non-chainlink
+      --chainlink-only
       --concurrency ${CONCURRENCY:-4}
     restart: "no"
     networks:

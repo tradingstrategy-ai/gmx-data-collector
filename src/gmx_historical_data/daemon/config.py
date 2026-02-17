@@ -181,7 +181,7 @@ class DaemonConfig:
     :param health_check_port: Port for health check HTTP endpoint
     :param log_level: Logging level (DEBUG, INFO, WARNING, ERROR)
     :param dry_run: If True, don't save data (testing only)
-    :param collect_non_chainlink: If True, collect non-Chainlink markets via oracle events
+    :param chainlink_only: If True, only collect markets with Chainlink feeds (skip oracle events)
     :param hypersync_api_token: Optional HyperSync API token for authentication
     :param hypersync_endpoint: HyperSync API endpoint URL
     :param enable_adaptive_gap_detection: If True, query API for actual data range to detect data loss
@@ -197,7 +197,7 @@ class DaemonConfig:
     health_check_port: int = 8080
     log_level: str = "INFO"
     dry_run: bool = False
-    collect_non_chainlink: bool = False
+    chainlink_only: bool = True
     hypersync_api_token: str | None = None
     hypersync_endpoint: str = "https://arbitrum.hypersync.xyz"
     enable_adaptive_gap_detection: bool = True
@@ -245,7 +245,7 @@ class DaemonConfig:
             HEALTH_CHECK_PORT: Health check port (default: 8080)
             LOG_LEVEL: Logging level (default: INFO)
             DRY_RUN: Dry run mode - don't save data (default: false)
-            COLLECT_NON_CHAINLINK: Enable hybrid collection for non-Chainlink markets (default: false)
+            CHAINLINK_ONLY: Only collect markets with Chainlink feeds (default: true)
             HYPERSYNC_API_TOKEN: Optional HyperSync API token
             HYPERSYNC_ENDPOINT: HyperSync API endpoint (default: https://arbitrum.hypersync.xyz)
             ENABLE_ADAPTIVE_GAP_DETECTION: Enable API-aware gap detection to detect data loss (default: true)
@@ -311,9 +311,9 @@ class DaemonConfig:
         dry_run_str = os.getenv("DRY_RUN", "false").lower()
         dry_run = dry_run_str in ("true", "1", "yes")
 
-        # Optional - collect non-Chainlink markets via oracle events
-        collect_non_chainlink_str = os.getenv("COLLECT_NON_CHAINLINK", "false").lower()
-        collect_non_chainlink = collect_non_chainlink_str in ("true", "1", "yes")
+        # Optional - collect only Chainlink markets (skip oracle events)
+        chainlink_only_str = os.getenv("CHAINLINK_ONLY", "true").lower()
+        chainlink_only = chainlink_only_str in ("true", "1", "yes")
 
         # Optional - HyperSync configuration
         hypersync_api_token = os.getenv("HYPERSYNC_API_TOKEN")
@@ -336,7 +336,7 @@ class DaemonConfig:
             health_check_port=health_check_port,
             log_level=log_level,
             dry_run=dry_run,
-            collect_non_chainlink=collect_non_chainlink,
+            chainlink_only=chainlink_only,
             hypersync_api_token=hypersync_api_token,
             hypersync_endpoint=hypersync_endpoint,
             enable_adaptive_gap_detection=enable_adaptive_gap_detection,

@@ -17,7 +17,7 @@ ENVIRONMENT VARIABLES (required):
 ENVIRONMENT VARIABLES (optional):
     COLLECTION_INTERVAL_MINUTES  Collection interval (default: 60)
     OUTPUT_DIR                   Output directory (default: ./data)
-    COLLECT_NON_CHAINLINK        Include 84 non-Chainlink markets (default: true)
+    CHAINLINK_ONLY               Only collect Chainlink markets (default: true)
     ENABLE_ADAPTIVE_GAP_DETECTION  Detect API sliding window data loss (default: true)
     TIMEFRAME_CONCURRENCY        Parallel timeframe fetches (default: 6)
     LOG_LEVEL                    Logging level (default: INFO)
@@ -38,7 +38,7 @@ EXAMPLE:
     # Optional: configure collection
     export COLLECTION_INTERVAL_MINUTES=60
     export OUTPUT_DIR=./data
-    export COLLECT_NON_CHAINLINK=true
+    export CHAINLINK_ONLY=false
 
     # Start daemon
     gmx-periodic-collector
@@ -129,7 +129,7 @@ class GMXPeriodicCollector:
         self.token_mapper = None
         self._last_oracle_block = GMX_V2_GENESIS_BLOCK
 
-        if config.collect_non_chainlink:
+        if not config.chainlink_only:
             from gmx_historical_data.oracle_price_collector import OraclePriceCollector
             from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
 
@@ -672,7 +672,7 @@ class GMXPeriodicCollector:
                     logger.warning(f"GMX API collection failed for {symbol}: {e}")
 
                     # Try oracle event fallback if hybrid mode is enabled
-                    if self.config.collect_non_chainlink and self.oracle_collector:
+                    if not self.config.chainlink_only and self.oracle_collector:
                         console.print(
                             f"  [yellow]{symbol}[/yellow]: API failed, trying oracle fallback..."
                         )
@@ -748,7 +748,7 @@ class GMXPeriodicCollector:
         )
 
         # Collect non-Chainlink markets if enabled
-        if self.config.collect_non_chainlink and not self.shutdown_requested:
+        if not self.config.chainlink_only and not self.shutdown_requested:
             try:
                 asyncio.run(self._collect_non_chainlink_markets())
             except Exception as e:
@@ -769,10 +769,10 @@ class GMXPeriodicCollector:
         config_table.add_row("Timeframes", ", ".join(TIMEFRAMES))
 
         mode_parts = []
-        if self.config.collect_non_chainlink:
-            mode_parts.append("[magenta]Hybrid (API + Oracle Events)[/magenta]")
-        else:
+        if self.config.chainlink_only:
             mode_parts.append("[green]API Only (Chainlink markets)[/green]")
+        else:
+            mode_parts.append("[magenta]Hybrid (API + Oracle Events)[/magenta]")
         if self.config.dry_run:
             mode_parts.append("[yellow]DRY RUN[/yellow]")
         config_table.add_row("Mode", " | ".join(mode_parts))

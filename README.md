@@ -26,6 +26,9 @@ export HYPERSYNC_API_TOKEN="your_token_here"  # Free from https://envio.dev
 # Initial collection (takes 4-5 hours for all tokens)
 gmx_historical_data collect --default --output-dir ./data --concurrency 5
 
+# Chainlink-only collection (34 markets, no HyperSync needed)
+gmx_historical_data collect --full --chainlink-only --output-dir ./data --concurrency 5
+
 # Daily updates (takes 10-30 minutes for all tokens - 10-30x faster!)
 gmx_historical_data collect --update --output-dir ./data --concurrency 10
 ```
@@ -605,6 +608,8 @@ data/
 |---------|-------------|
 | `collect --default` | Collect GMX + Chainlink data (recommended, uses `--full` mode) |
 | `collect --full` | Full historical collection (fetch all available data) |
+| `collect --full --chainlink-only` | Collect only 34 Chainlink-feed markets (no HyperSync needed) |
+| `collect --full --all-markets` | Collect all 118 markets (default, requires HyperSync) |
 | `collect --update` | Incremental update (smart: only fetches new data) |
 | `verify` | Verify data quality |
 | `export-freqtrade` | Export to Freqtrade format |
@@ -680,6 +685,8 @@ gmx_historical_data collect --update --output-dir ./data --concurrency 10
 |--------|-------------|---------|
 | `--output-dir PATH` | Output directory | `./data` |
 | `--symbol TEXT` | Token(s) - comma-separated for `collect`, repeatable for `export-freqtrade` | All tokens |
+| `--chainlink-only` | Only collect 34 markets with Chainlink feeds (no HyperSync needed) | Off (all markets) |
+| `--all-markets` | Collect all 118 markets including non-Chainlink (requires HyperSync) | On (default) |
 | `--concurrency INT` | Parallelism level (see below) | `4` |
 
 > **Note:** `collect` uses comma-separated: `--symbol ETH,BTC,SUI`
