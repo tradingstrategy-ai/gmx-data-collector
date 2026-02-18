@@ -1,0 +1,1316 @@
+#!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "hypersync>=0.8.0",
+#     "polars>=0.20.0",
+#     "eth-abi>=5.0.0",
+#     "eth-hash[pycryptodome]",
+#     "eth-utils>=4.0",
+#     "rich>=13.0",
+#     "pyarrow>=14.0",
+# ]
+# ///
+"""
+GMX V2 Funding Fee Per Size & Direction Extractor (HyperSync Edition)
+=====================================================================
+Extracts ``FundingFeeAmountPerSizeUpdated`` events from GMX V2 EventEmitter
+from genesis (Aug 2023) to present. This event carries the cumulative funding
+fee per unit of open interest, available from the VERY FIRST GMX V2 block.
+
+**Primary purpose:** Determine **funding direction** (longs pay shorts or
+shorts pay longs) for each market per hour. This is achieved by comparing
+long-side vs short-side delta sums — the side with the larger delta is paying.
+
+**Important:** The ``delta`` values are actual funding FEES per position, NOT
+the funding RATE. They include OI imbalance amplification and collateral token
+pricing. To get the pure funding rate (``savedFundingFactorPerSecond``), use:
+- ``extract_funding_datastore.py`` for pre-V2.2 (Nov 2023 - Aug 2025)
+- ``extract_funding_factor.py`` for V2.2+ (Aug 2025 - present)
+
+This script's direction data can fix the ``longs_pay_shorts`` field in
+``extract_funding_factor.py`` output (which hardcodes it as ``True``
+because the V2.2 ``Funding`` event only carries unsigned rates).
+
+Outputs:
+- Raw events: ``data/funding/{network}/raw/fee_per_size/{SYMBOL}/data.parquet``
+- Direction: ``data/funding/{network}/direction/{SYMBOL}/1h.parquet``
+- FreqTrade feather: ``{output-dir}/gmx/futures/{SYMBOL}_USDC_USDC-1h-funding_rate.feather``
+
+QUICK START
+-----------
+    poetry run python scripts/extract_funding_fee_per_size.py --from-block 120000000
+
+USAGE
+-----
+    poetry run python scripts/extract_funding_fee_per_size.py [OPTIONS]
+
+OPTIONS
+-------
+    --network        Network: "arbitrum" or "avalanche" (default: arbitrum)
+    --from-block     Starting block number (default: 120000000 / genesis)
+    --to-block       Ending block number (default: latest)
+    --output-dir     Base output directory (default: ./data/funding)
+    --output         Output format: "json", "parquet", or "feather" (default: parquet)
+    --market         Filter by market symbol (e.g., "ETH/USD")
+    --resume         Enable checkpoint-based incremental mode
+    --checkpoint-dir Override checkpoint directory
+    --background     Run in background (daemonize)
+    --log-file       Log file for background mode
+    --pid-file       PID file for background mode
+    --feather-dir    Output dir for FreqTrade feather files (CCXT compatible)
+
+EXAMPLES
+--------
+    # Full historical extraction from genesis
+    poetry run python scripts/extract_funding_fee_per_size.py --from-block 120000000
+
+    # Quick test
+    poetry run python scripts/extract_funding_fee_per_size.py \\
+        --from-block 170000000 --to-block 170100000 --output json
+
+    # Export to FreqTrade feather format
+    poetry run python scripts/extract_funding_fee_per_size.py \\
+        --from-block 120000000 --feather-dir ./user_data/data
+
+    # Incremental mode (resume from checkpoint)
+    poetry run python scripts/extract_funding_fee_per_size.py --resume
+================================================================================
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+from collections import defaultdict
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import hypersync
+from hypersync import (
+    HypersyncClient,
+    ClientConfig,
+    Query,
+    LogSelection,
+    FieldSelection,
+    LogField,
+    BlockField,
+)
+from eth_abi import decode as abi_decode
+from eth_utils import keccak
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    BarColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
+
+try:
+    import polars as pl
+
+    HAS_POLARS = True
+except ImportError:
+    HAS_POLARS = False
+
+try:
+    import pandas as pd
+    import pyarrow.feather as pq_feather
+
+    HAS_FEATHER = True
+except ImportError:
+    HAS_FEATHER = False
+
+console = Console()
+
+# Retry settings — HyperSync 500 errors can be persistent, use generous retries
+MAX_RETRIES = 15
+RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 120.0  # Cap backoff at 2 minutes
+
+# Progress milestones
+PROGRESS_MILESTONES = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
+
+# Flush records to disk every N events
+FLUSH_EVERY = 50_000
+
+# GMX V2 genesis block on Arbitrum
+GMX_V2_GENESIS_BLOCK = 120_000_000
+
+# GMX's FLOAT_PRECISION_SQRT used in fee-per-size scaling
+FLOAT_PRECISION_SQRT = 10**15
+
+# HyperSync endpoints
+HYPERSYNC_URLS = {
+    "arbitrum": "https://arbitrum.hypersync.xyz",
+    "avalanche": "https://avalanche.hypersync.xyz",
+}
+
+# EventEmitter contract addresses
+EVENT_EMITTER_ADDRESSES = {
+    "arbitrum": "0xC8ee91A54287DB53897056e12D9819156D3822Fb",
+    "avalanche": "0xDb17B211c34240B014ab6d61d4A31FA0C0e20c26",
+}
+
+# EventLog1 signature (topic0)
+EVENT_LOG1_TOPIC = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
+
+# FundingFeeAmountPerSizeUpdated event hash (topic1)
+FEE_PER_SIZE_EVENT_HASH = "0x" + keccak(text="FundingFeeAmountPerSizeUpdated").hex()
+
+# ABI types for EventLog1 decoding
+EVENT_LOG_DATA_ABI_TYPE = (
+    "(((string,address)[],(string,address[])[])"
+    ",((string,uint256)[],(string,uint256[])[])"
+    ",((string,int256)[],(string,int256[])[])"
+    ",((string,bool)[],(string,bool[])[])"
+    ",((string,bytes32)[],(string,bytes32[])[])"
+    ",((string,bytes)[],(string,bytes[])[])"
+    ",((string,string)[],(string,string[])[])"
+    ")"
+)
+EVENTLOG1_ABI_TYPES = ["address", "string", EVENT_LOG_DATA_ABI_TYPE]
+
+# Section indices
+IDX_ADDRESS = 0
+IDX_UINT = 1
+IDX_INT = 2
+IDX_BOOL = 3
+
+# GMX V2 Market Addresses on Arbitrum
+# Source: https://github.com/gmx-io/gmx-interface (sdk/src/configs/markets.ts)
+# Last updated: 2026-02-18
+MARKETS = {
+    # Major perpetual markets
+    "0x47c031236e19d024b42f8ae6780e44a573170703": {"symbol": "BTC/USD", "indexToken": "BTC"},
+    "0x70d95587d40a2caf56bd97485ab3eec10bee6336": {"symbol": "ETH/USD", "indexToken": "ETH"},
+    "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4": {"symbol": "DOGE/USD", "indexToken": "DOGE"},
+    "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9": {"symbol": "SOL/USD", "indexToken": "SOL"},
+    "0xd9535bb5f58a1a75032416f2dfe7880c30575a41": {"symbol": "LTC/USD", "indexToken": "LTC"},
+    "0xc7abb2c5f3bf3ceb389df0eecd6120d451170b50": {"symbol": "UNI/USD", "indexToken": "UNI"},
+    "0x7f1fa204bb700853d36994da19f830b6ad18455c": {"symbol": "LINK/USD", "indexToken": "LINK"},
+    "0xc25cef6061cf5de5eb761b50e4743c1f5d7e5407": {"symbol": "ARB/USD", "indexToken": "ARB"},
+    "0x0ccb4faa6f1f1b30911619f1184082ab4e25813c": {"symbol": "XRP/USD", "indexToken": "XRP"},
+    "0x2d340912aa47e33c90efb078e69e70efe2b34b9b": {"symbol": "BNB/USD", "indexToken": "BNB"},
+    "0x248c35760068ce009a13076d573ed3497a47bcd4": {"symbol": "ATOM/USD", "indexToken": "ATOM"},
+    "0x1cbba6346f110c8a5ea739ef2d1eb182990e4eb2": {"symbol": "AAVE/USD", "indexToken": "AAVE"},
+    "0x7bbbf946883a5701350007320f525c5379b8178a": {"symbol": "AVAX/USD", "indexToken": "AVAX"},
+    "0x4fdd333ff9ca409df583f306b6f5a7ffde790739": {"symbol": "OP/USD", "indexToken": "OP"},
+    "0xb56e5e2fb50d6fb510b4e4c086dcde66a866da24": {"symbol": "GMX/USD", "indexToken": "GMX"},
+    "0x2b477989a149b17073d9c9c82ec9cb03591325a6": {"symbol": "WIF/USD", "indexToken": "WIF"},
+    # Single-asset / alternative collateral markets
+    "0x7c11f78ce78768518d743e81fdfa2f860c6b9a77": {"symbol": "BTC/USD [WBTC.e-WBTC.e]", "indexToken": "BTC"},
+    "0x450bb6774dd8a756274e0ab4107953259d2ac541": {"symbol": "ETH/USD [WETH-WETH]", "indexToken": "ETH"},
+    "0xe68caaacdf6439628dfd2fe624847602991a31eb": {"symbol": "BTC/USD [WBTC-WBTC]", "indexToken": "BTC"},
+    "0xdab9ba9e3a301ccb353f18b4c8542ba2149e4010": {"symbol": "ETH/USD [WETH-WETH-2]", "indexToken": "ETH"},
+    "0x08a902113f7f41a8658ebb1175f9c847bf4fb9d8": {"symbol": "ETH/USD [WETH-USDT]", "indexToken": "ETH"},
+    "0x0cf1fb4d1ff67a3d8ca92c9d6643f8f9be8e03e5": {"symbol": "ETH/USD [wstETH-USDe]", "indexToken": "ETH"},
+    "0xd62068697bcc92af253225676d618b0c9f17c663": {"symbol": "BTC/USD [tBTC-tBTC]", "indexToken": "BTC"},
+    # Newer perpetual markets
+    "0xb62369752d8ad08392572db6d0cc872127888bed": {"symbol": "SHIB/USD", "indexToken": "SHIB"},
+    "0x6ecf2133e2c9751caadcb6958b9654bae198a797": {"symbol": "SUI/USD", "indexToken": "SUI"},
+    "0xb489711b1cb86afda48924730084e23310eb4883": {"symbol": "SEI/USD", "indexToken": "SEI"},
+    "0x66a69c8eb98a7efe22a22611d1967dfec786a708": {"symbol": "APT/USD", "indexToken": "APT"},
+    "0xbeb1f4ebc9af627ca1e5a75981ce1ae97efeda22": {"symbol": "TIA/USD", "indexToken": "TIA"},
+    "0x3680d7bfe9260d3c5de81aeb2194c119a59a99d1": {"symbol": "TRX/USD", "indexToken": "TRX"},
+    "0x872b5d567a2469ed92d252eacb0eb3bb0769e05b": {"symbol": "WLD/USD", "indexToken": "WLD"},
+    "0xe55e1a29985488a2c8846a91e925c2b7c6564db1": {"symbol": "TAO/USD", "indexToken": "TAO"},
+    "0xfd46a5702d4d97ce0164375744c65f0c31a3901b": {"symbol": "FLOKI/USD", "indexToken": "FLOKI"},
+    "0x6cb901cc64c024c3fe4404c940ff9a3acc229d2c": {"symbol": "MEME/USD", "indexToken": "MEME"},
+    "0x784292e87715d93afd7cb8c941bacafaaa9a5102": {"symbol": "PENDLE/USD", "indexToken": "PENDLE"},
+    "0xcacb964144f9056a8f99447a303e60b4873ca9b4": {"symbol": "ADA/USD", "indexToken": "ADA"},
+    "0x62feb8ec060a7de5b32bbbf4ac70050f8a043c17": {"symbol": "BCH/USD", "indexToken": "BCH"},
+    "0xdc4e96a251ff43eeac710462cd8a9d18dc802f18": {"symbol": "ICP/USD", "indexToken": "ICP"},
+    "0x467c4a46287f6c4918ddf780d4fd7b46419c2291": {"symbol": "DYDX/USD", "indexToken": "DYDX"},
+    "0x16466a03449cb9218eb6a980aa4a44aaced27c25": {"symbol": "INJ/USD", "indexToken": "INJ"},
+    "0xfec8f404fbca3b11afd3b3f0c57507c2a06de636": {"symbol": "TRUMP/USD", "indexToken": "TRUMP"},
+    "0x12fd1a4bdb96219e637180ff5293409502b2951d": {"symbol": "MELANIA/USD", "indexToken": "MELANIA"},
+    "0xd0a1afdde31eb51e8b53bdce989eb8c2404828a4": {"symbol": "POL/USD", "indexToken": "POL"},
+    "0xdab21c4d1f569486334c93685da2b3f9b0a078e8": {"symbol": "APE/USD", "indexToken": "APE"},
+    "0xe2730ffe2136aa549327ebce93d58160df7821cb": {"symbol": "FARTCOIN/USD", "indexToken": "FARTCOIN"},
+    "0x876ff160d63809674e03f82dc4d3c3ae8b0acf28": {"symbol": "BERA/USD", "indexToken": "BERA"},
+    "0x0c11ed89889fd03394e8d9d685cc5b85be569c99": {"symbol": "PENGU/USD", "indexToken": "PENGU"},
+    "0x970e578ff01589bb470ce38a2f1753152a009366": {"symbol": "ONDO/USD", "indexToken": "ONDO"},
+    "0x04decfb37e46075189324817df80a32d22b9ed8d": {"symbol": "AIXBT/USD", "indexToken": "AIXBT"},
+    "0x4d9ba415649c4b3c703562770c8ff3033478cea1": {"symbol": "S/USD", "indexToken": "S"},
+    "0xbcb8fe13d02b023e8f94f6881cc0192fd918a5c0": {"symbol": "HYPE/USD", "indexToken": "HYPE"},
+    "0x7de8e1a1fba845a330a6bd91118afda09610fb02": {"symbol": "JUP/USD", "indexToken": "JUP"},
+    "0x4d3eb91efd36c2b74181f34b111bc1e91a0d0cb4": {"symbol": "DOLO/USD", "indexToken": "DOLO"},
+    "0x9e79146b3a022af44e0708c6794f03ef798381a5": {"symbol": "ZRO/USD", "indexToken": "ZRO"},
+    "0x0e46941f9bff8d0784bffa3d0d7883cdb82d7ae7": {"symbol": "CRV/USD", "indexToken": "CRV"},
+    "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f": {"symbol": "XMR/USD", "indexToken": "XMR"},
+    "0x39ac3c494950a4363d739201ba5a0861265c9ae5": {"symbol": "PI/USD", "indexToken": "PI"},
+    "0x4c0bb704529fa49a26bd854802d70206982c6f1b": {"symbol": "PUMP/USD", "indexToken": "PUMP"},
+    "0x8263bc3766a09f6dd4bab04b4bf8d45f2b0973ff": {"symbol": "SPX6900/USD", "indexToken": "SPX6900"},
+    "0x40daeac02dcf6b3c51f9151f532c21dcef2f7e63": {"symbol": "MNT/USD", "indexToken": "MNT"},
+    "0x9f0849fb830679829d1fb759b11236d375d15c78": {"symbol": "HBAR/USD", "indexToken": "HBAR"},
+    "0x41e3bc5b72384c8b26b559b7d16c2b81fd36fba2": {"symbol": "CVX/USD", "indexToken": "CVX"},
+    "0x4024418592450e4d62fab15e2f833fc03a3447dc": {"symbol": "KAS/USD", "indexToken": "KAS"},
+    "0x970b730b5dd18de53a230ee8f4af088dbc3a6f8d": {"symbol": "KTA/USD", "indexToken": "KTA"},
+    "0xac484106d935f0f20f1485b631fa6f65aeeff550": {"symbol": "ZORA/USD", "indexToken": "ZORA"},
+    "0x4b67aa8f754b17b1029ad2db4fb6a276cce350c4": {"symbol": "XPL/USD", "indexToken": "XPL"},
+    "0x0164b6c847c65e07c9f6226149adbfa7c1de40cf": {"symbol": "ASTER/USD", "indexToken": "ASTER"},
+    "0xe024188850a822409f362209c1ef2cfdc7c4de4c": {"symbol": "0G/USD", "indexToken": "0G"},
+    "0xceff9d261a96cb78df35f9333ba9f2f4cfcb8a68": {"symbol": "AVNT/USD", "indexToken": "AVNT"},
+    "0x6d9430a116ed4d4fc6fe1996a5493662d555b07e": {"symbol": "LINEA/USD", "indexToken": "LINEA"},
+    "0x66ab9d61a0124b61c8892a4ac687ac48dba8ff2c": {"symbol": "MON/USD", "indexToken": "MON"},
+    "0x587759c237acca739bce3911647bacf56c876e60": {"symbol": "ZEC/USD", "indexToken": "ZEC"},
+    "0x5707673d95a8fd317e2745c4217acd64ca021b68": {"symbol": "ANIME/USD", "indexToken": "ANIME"},
+    "0x728ff0679c89267434d6ef1824c8c8eed4ac3dbc": {"symbol": "DASH/USD", "indexToken": "DASH"},
+    "0x3b4689d69516b9d4b1aaf7545c6fc4d3ed70b70b": {"symbol": "JTO/USD", "indexToken": "JTO"},
+    "0x8965e821c7c8c09c6eb3cb9ccf7eb6f386441ea2": {"symbol": "SYRUP/USD", "indexToken": "SYRUP"},
+    "0x3600592dded7e6e0b05029dfb637ffc5a85d6f6b": {"symbol": "CHZ/USD", "indexToken": "CHZ"},
+    "0xeb28ad1a2e497f4acc5d9b87e7b496623c93061e": {"symbol": "XAUT/USD", "indexToken": "XAUT"},
+    "0x5ff52be1968107d7886a8e9a64874a45c8f5d96a": {"symbol": "IP/USD", "indexToken": "IP"},
+    "0xb3588455858a49d3244237cee00880ccb84b91dd": {"symbol": "WLFI/USD", "indexToken": "WLFI"},
+    "0x947c521e44f727219542b0f91a85182193c1d2ad": {"symbol": "VVV/USD", "indexToken": "VVV"},
+    # Alternative collateral variants
+    "0x0bb2a83f995e1e1eae9d7fdce68ab1ac55b2cc85": {"symbol": "PEPE/USD [WETH-USDC]", "indexToken": "PEPE"},
+    "0xf913b4748031ef569898ed91e5ba0d602bb93298": {"symbol": "LINK/USD [WETH-USDC]", "indexToken": "LINK"},
+    "0xcf083d35ad306a042d4fb312fcdd8228b52b82f8": {"symbol": "SOL/USD [WBTC.e-USDC]", "indexToken": "SOL"},
+    "0x065577d05c3d4c11505ed7bc97bbf85d462a6a6f": {"symbol": "BNB/USD [WBTC.e-USDC]", "indexToken": "BNB"},
+    # Swap-only markets (may emit events but no perpetual trading)
+    "0xb686bcb112660343e6d15bdb65297e110c8311c4": {"symbol": "USDC-USDT [swap]", "indexToken": None},
+    "0xe2fecb78f76d937648c47e4e2cd5e47d27411545": {"symbol": "XRP/USD [legacy]", "indexToken": "XRP"},
+    "0x63dc80ee90f26363b3fcd609f370bb5549d6dbca": {"symbol": "NEAR/USD [legacy]", "indexToken": "NEAR"},
+}
+
+
+# =============================================================================
+# DATA CLASSES & HELPERS
+# =============================================================================
+
+def market_symbol(address: str) -> str:
+    """Look up human-readable symbol for a market address.
+
+    :param address: Lowercase hex market address.
+    :returns: Symbol string (e.g., ``'ETH'``). Falls back to truncated address.
+    """
+    info = MARKETS.get(address.lower())
+    if info:
+        sym = info["symbol"]
+        base = sym.split("/")[0]
+        bracket = sym.find("[")
+        if bracket != -1:
+            suffix = sym[bracket + 1 : -1].strip()
+            return f"{base}_{suffix}"
+        return base.replace("[", "").replace("]", "").replace(" ", "_")
+    return address[:10]
+
+
+@dataclass
+class FundingFeePerSizeRecord:
+    """Raw FundingFeeAmountPerSizeUpdated event.
+
+    :ivar symbol: Derived symbol (e.g., ``'ETH'``)
+    :ivar market: Market contract address
+    :ivar collateral_token: Collateral token address
+    :ivar is_long: True if this tracks long-position fees
+    :ivar delta: Fee change per OI unit (15-decimal scaled uint)
+    :ivar value: Cumulative fee per OI unit (15-decimal scaled uint)
+    :ivar block_number: Block number
+    :ivar block_timestamp: Unix timestamp (seconds)
+    :ivar block_datetime: ISO 8601 datetime string
+    :ivar transaction_hash: Transaction hash
+    :ivar log_index: Log index within the block
+    """
+
+    symbol: str
+    market: str
+    collateral_token: str
+    is_long: bool
+    delta: str
+    value: str
+    block_number: int
+    block_timestamp: int
+    block_datetime: str
+    transaction_hash: str
+    log_index: int
+
+
+# =============================================================================
+# ABI DECODING
+# =============================================================================
+
+def decode_fee_per_size_event(hex_data: str) -> Optional[dict]:
+    """Decode FundingFeeAmountPerSizeUpdated from EventLog1 data.
+
+    :param hex_data: Hex-encoded data field (with ``0x`` prefix).
+    :returns: Dict with ``market``, ``collateral_token``, ``is_long``,
+        ``delta``, ``value``, or ``None`` on decode error.
+    """
+    if not hex_data or hex_data == "0x":
+        return None
+
+    data = hex_data[2:] if hex_data.startswith("0x") else hex_data
+
+    try:
+        data_bytes = bytes.fromhex(data)
+        _, event_name, event_data = abi_decode(EVENTLOG1_ABI_TYPES, data_bytes)
+    except Exception:
+        return None
+
+    if event_name != "FundingFeeAmountPerSizeUpdated":
+        return None
+
+    addresses = {}
+    for key, val in event_data[IDX_ADDRESS][0]:
+        addr = val if isinstance(val, str) else ("0x" + val.hex() if isinstance(val, bytes) else str(val))
+        addresses[key] = addr.lower() if isinstance(addr, str) else addr
+
+    uints = {key: val for key, val in event_data[IDX_UINT][0]}
+    bools = {key: val for key, val in event_data[IDX_BOOL][0]}
+
+    return {
+        "market": addresses.get("market", ""),
+        "collateral_token": addresses.get("collateralToken", ""),
+        "is_long": bools.get("isLong", False),
+        "delta": uints.get("delta", 0),
+        "value": uints.get("value", 0),
+    }
+
+
+# =============================================================================
+# CHECKPOINT
+# =============================================================================
+
+def load_checkpoint(path: Path) -> Optional[dict]:
+    """Load checkpoint from JSON file.
+
+    :param path: Path to checkpoint JSON file.
+    :returns: Checkpoint dict or ``None`` if not found.
+    """
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        console.print(f"[yellow]Warning: could not load checkpoint {path}: {e}[/yellow]")
+        return None
+
+
+def save_checkpoint(
+    path: Path,
+    last_block: int,
+    last_timestamp: int,
+    total_events: int,
+    markets_seen: int,
+) -> None:
+    """Save checkpoint to JSON file.
+
+    :param path: Path to checkpoint JSON file.
+    :param last_block: Last processed block number.
+    :param last_timestamp: Last processed block timestamp.
+    :param total_events: Total events processed so far.
+    :param markets_seen: Number of unique markets seen.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "symbol": "fee_per_size_all",
+        "last_block": last_block,
+        "last_timestamp": last_timestamp,
+        "total_events": total_events,
+        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+        "metadata": {"markets_seen": markets_seen},
+    }
+    with open(path, "w") as f:
+        json.dump(checkpoint, f, indent=2)
+    console.print(
+        f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]"
+    )
+
+
+# =============================================================================
+# BACKGROUND / DAEMON
+# =============================================================================
+
+def run_in_background(log_file: str, pid_file: str) -> bool:
+    """Fork the process to run in the background.
+
+    :param log_file: Path to log file for stdout/stderr.
+    :param pid_file: Path to PID file.
+    :returns: ``True`` if parent (should exit), ``False`` if child (continue).
+    """
+    global console
+
+    log_path = Path(log_file)
+    pid_path = Path(pid_file)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+
+    pid = os.fork()
+    if pid > 0:
+        print(f"Running in background (PID: {pid})")
+        print(f"  Log file: {log_file}")
+        print(f"  PID file: {pid_file}")
+        return True
+
+    os.setsid()
+    pid2 = os.fork()
+    if pid2 > 0:
+        os._exit(0)
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    log_fd = open(log_path, "a")
+    os.dup2(log_fd.fileno(), sys.stdout.fileno())
+    os.dup2(log_fd.fileno(), sys.stderr.fileno())
+
+    with open(pid_path, "w") as f:
+        f.write(str(os.getpid()))
+
+    console = Console(file=log_fd, force_terminal=False)
+    return False
+
+
+# =============================================================================
+# HYPERSYNC CLIENT
+# =============================================================================
+
+async def create_client(network: str) -> HypersyncClient:
+    """Create HyperSync client.
+
+    :param network: Network name (``arbitrum``, ``avalanche``).
+    :returns: HyperSync client instance.
+    """
+    url = HYPERSYNC_URLS.get(network)
+    if not url:
+        raise ValueError(f"Unsupported network: {network}")
+    api_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    if api_token:
+        console.print(f"  Using HyperSync API token: [cyan]{api_token[:8]}...[/cyan]")
+    else:
+        console.print("  [yellow]No HYPERSYNC_API_TOKEN set — may get 403 errors[/yellow]")
+    return HypersyncClient(ClientConfig(url=url, bearer_token=api_token))
+
+
+async def get_latest_block(client: HypersyncClient) -> int:
+    """Get latest block number.
+
+    :param client: HyperSync client instance.
+    :returns: Latest block number.
+    """
+    return await client.get_height()
+
+
+async def _stream_with_retry(
+    client: HypersyncClient,
+    query: Query,
+    max_retries: int = MAX_RETRIES,
+):
+    """Stream HyperSync results with retry on transient errors.
+
+    :param client: HyperSync client instance.
+    :param query: HyperSync query.
+    :param max_retries: Maximum retry attempts per failure.
+    """
+    current_from_block = query.from_block
+    attempt = 0
+
+    while True:
+        try:
+            query.from_block = current_from_block
+            config = hypersync.StreamConfig()
+            stream = await client.stream(query, config)
+
+            while True:
+                response = await stream.recv()
+                if response is None:
+                    return
+
+                if response.data.blocks:
+                    max_block = max(b.number for b in response.data.blocks)
+                    current_from_block = max_block + 1
+
+                attempt = 0
+                yield response
+
+        except Exception as e:
+            attempt += 1
+            if attempt > max_retries:
+                console.print(f"[red]Failed after {max_retries} retries: {e}[/red]")
+                raise
+
+            delay = min(RETRY_BASE_DELAY * (2 ** (attempt - 1)), RETRY_MAX_DELAY)
+            console.print(
+                f"[yellow]Error (attempt {attempt}/{max_retries}): {e}\n"
+                f"Retrying from block {current_from_block:,} in {delay:.0f}s...[/yellow]"
+            )
+            await asyncio.sleep(delay)
+
+
+# =============================================================================
+# EXTRACTION
+# =============================================================================
+
+async def extract_fee_per_size_events(
+    client: HypersyncClient,
+    network: str,
+    from_block: int,
+    to_block: Optional[int],
+    market_filter: Optional[str] = None,
+) -> list[FundingFeePerSizeRecord]:
+    """Extract FundingFeeAmountPerSizeUpdated events from GMX V2 EventEmitter.
+
+    :param client: HyperSync client instance.
+    :param network: Network name.
+    :param from_block: Starting block number.
+    :param to_block: Ending block number (``None`` for latest).
+    :param market_filter: Optional market symbol filter (e.g., ``'ETH/USD'``).
+    :returns: List of :class:`FundingFeePerSizeRecord` objects.
+    """
+    emitter = EVENT_EMITTER_ADDRESSES.get(network)
+    if not emitter:
+        raise ValueError(f"No EventEmitter for network: {network}")
+
+    query = Query(
+        from_block=from_block,
+        to_block=to_block,
+        logs=[
+            LogSelection(
+                address=[emitter],
+                topics=[
+                    [EVENT_LOG1_TOPIC],
+                    [FEE_PER_SIZE_EVENT_HASH],
+                ],
+            )
+        ],
+        field_selection=FieldSelection(
+            block=[BlockField.NUMBER, BlockField.TIMESTAMP],
+            log=[
+                LogField.BLOCK_NUMBER,
+                LogField.LOG_INDEX,
+                LogField.TRANSACTION_HASH,
+                LogField.ADDRESS,
+                LogField.TOPIC0,
+                LogField.TOPIC1,
+                LogField.DATA,
+            ],
+        ),
+    )
+
+    total_blocks = (to_block or 0) - from_block
+    console.print(f"  EventEmitter: [cyan]{emitter}[/cyan]")
+    console.print(
+        f"  Block range:  [cyan]{from_block:,}[/cyan] to "
+        f"[cyan]{to_block or 'latest':,}[/cyan] ({total_blocks:,} blocks)"
+    )
+    console.print(f"  Event:        [cyan]FundingFeeAmountPerSizeUpdated[/cyan]")
+
+    records: list[FundingFeePerSizeRecord] = []
+    block_timestamps: dict[int, int] = {}
+    total_logs = 0
+    decode_errors = 0
+    unknown_markets: set[str] = set()
+    t_start = time.monotonic()
+    highest_block = from_block
+    next_milestone_idx = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(bar_width=40),
+        TextColumn("[progress.percentage]{task.percentage:>3.1f}%"),
+        TextColumn("[cyan]{task.fields[logs]:,}[/cyan] logs"),
+        TextColumn("[green]{task.fields[events]:,}[/green] events"),
+        TextColumn("[yellow]{task.fields[rate]:.0f}[/yellow] logs/s"),
+        TextColumn("[red]{task.fields[errors]}[/red] err"),
+        TimeElapsedColumn(),
+        console=console,
+        transient=False,
+    ) as progress:
+        task = progress.add_task(
+            "Extracting FundingFeeAmountPerSizeUpdated",
+            total=total_blocks,
+            logs=0,
+            events=0,
+            rate=0.0,
+            errors=0,
+        )
+
+        async for response in _stream_with_retry(client, query):
+            for block in response.data.blocks:
+                if block.number is not None and block.timestamp is not None:
+                    ts_val = block.timestamp
+                    if isinstance(ts_val, str) and ts_val.startswith("0x"):
+                        ts_val = int(ts_val, 16)
+                    elif isinstance(ts_val, str):
+                        ts_val = int(ts_val)
+                    block_timestamps[block.number] = ts_val
+
+            for log in response.data.logs:
+                total_logs += 1
+
+                if not log.data:
+                    decode_errors += 1
+                    continue
+
+                decoded = decode_fee_per_size_event(log.data)
+                if decoded is None:
+                    decode_errors += 1
+                    continue
+
+                market_addr = decoded["market"]
+
+                # Skip zero-address market
+                if market_addr == "0x0000000000000000000000000000000000000000":
+                    continue
+
+                # Skip swap-only markets
+                market_info = MARKETS.get(market_addr.lower())
+                if market_info and market_info.get("indexToken") is None:
+                    continue
+
+                # Skip zero deltas
+                if decoded["delta"] == 0:
+                    continue
+
+                symbol = market_symbol(market_addr)
+
+                # Track unknown markets
+                if market_addr.lower() not in MARKETS:
+                    unknown_markets.add(market_addr.lower())
+
+                # Apply market filter
+                if market_filter:
+                    info = MARKETS.get(market_addr.lower(), {})
+                    if info.get("symbol", "") != market_filter:
+                        continue
+
+                block_num = log.block_number or 0
+                ts = block_timestamps.get(block_num, 0)
+                dt_str = (
+                    datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+                    if ts
+                    else ""
+                )
+
+                record = FundingFeePerSizeRecord(
+                    symbol=symbol,
+                    market=market_addr.lower(),
+                    collateral_token=decoded["collateral_token"],
+                    is_long=decoded["is_long"],
+                    delta=str(decoded["delta"]),
+                    value=str(decoded["value"]),
+                    block_number=block_num,
+                    block_timestamp=ts,
+                    block_datetime=dt_str,
+                    transaction_hash=log.transaction_hash or "",
+                    log_index=log.log_index or 0,
+                )
+                records.append(record)
+
+                if block_num > highest_block:
+                    highest_block = block_num
+
+            # Update progress
+            elapsed = time.monotonic() - t_start
+            rate = total_logs / elapsed if elapsed > 0 else 0
+            blocks_done = highest_block - from_block
+            progress.update(
+                task,
+                completed=blocks_done,
+                logs=total_logs,
+                events=len(records),
+                rate=rate,
+                errors=decode_errors,
+            )
+
+            if total_blocks > 0:
+                pct = blocks_done / total_blocks * 100
+                while (
+                    next_milestone_idx < len(PROGRESS_MILESTONES)
+                    and pct >= PROGRESS_MILESTONES[next_milestone_idx]
+                ):
+                    console.print(
+                        f"  [{PROGRESS_MILESTONES[next_milestone_idx]}%] "
+                        f"block {highest_block:,} | "
+                        f"{len(records):,} events | "
+                        f"{rate:.0f} logs/s"
+                    )
+                    next_milestone_idx += 1
+
+    elapsed = time.monotonic() - t_start
+    console.print(
+        f"\n  Extraction complete in {elapsed:.1f}s: "
+        f"{len(records):,} events from {total_logs:,} logs"
+    )
+    if decode_errors:
+        console.print(f"  [yellow]Decode errors: {decode_errors:,}[/yellow]")
+    if unknown_markets:
+        console.print(
+            f"  [yellow]Unknown markets ({len(unknown_markets)}): "
+            f"{', '.join(sorted(unknown_markets)[:5])}"
+            f"{'...' if len(unknown_markets) > 5 else ''}[/yellow]"
+        )
+
+    return records
+
+
+# =============================================================================
+# AGGREGATION
+# =============================================================================
+
+def aggregate_hourly_direction(
+    records: list[FundingFeePerSizeRecord],
+) -> dict[str, "pl.DataFrame"]:
+    """Aggregate FundingFeeAmountPerSizeUpdated events into hourly direction data.
+
+    For each market per hour, sums deltas by side (long/short) across all
+    collateral tokens. The side with the larger total delta is the paying side.
+
+    **Important:** The delta values are actual funding FEES per position, NOT
+    the funding rate. They include OI amplification and collateral token pricing.
+    The ``longs_pay_shorts`` column is the primary useful output for determining
+    funding direction. Use ``extract_funding_datastore.py`` or
+    ``extract_funding_factor.py`` for actual rates.
+
+    :param records: List of :class:`FundingFeePerSizeRecord` objects.
+    :returns: Dict mapping symbol to hourly DataFrame with direction info.
+    """
+    if not HAS_POLARS:
+        raise RuntimeError("polars required for aggregation")
+
+    if not records:
+        return {}
+
+    df = pl.DataFrame([asdict(r) for r in records])
+
+    # Cast delta to Float64 (values can exceed Int64 range, e.g., 10^26)
+    df = df.with_columns(
+        pl.col("delta").cast(pl.Float64).alias("delta_float"),
+    )
+
+    # Convert block_timestamp to datetime
+    df = df.with_columns(
+        pl.from_epoch(pl.col("block_timestamp"), time_unit="s")
+        .alias("timestamp")
+        .cast(pl.Datetime("ms", "UTC")),
+    )
+
+    # Truncate to hour
+    df = df.with_columns(
+        pl.col("timestamp").dt.truncate("1h").alias("hour"),
+    )
+
+    # Aggregate per symbol per hour per side (sum deltas across collateral tokens)
+    by_side = (
+        df.group_by(["symbol", "market", "hour", "is_long"])
+        .agg(
+            pl.col("delta_float").sum().alias("delta_sum"),
+            pl.len().alias("event_count"),
+        )
+    )
+
+    # Pivot: get long and short delta sums side by side
+    long_df = (
+        by_side.filter(pl.col("is_long") == True)
+        .select(["symbol", "market", "hour", "delta_sum", "event_count"])
+        .rename({"delta_sum": "long_delta_sum", "event_count": "long_events"})
+    )
+    short_df = (
+        by_side.filter(pl.col("is_long") == False)
+        .select(["symbol", "market", "hour", "delta_sum", "event_count"])
+        .rename({"delta_sum": "short_delta_sum", "event_count": "short_events"})
+    )
+
+    hourly = long_df.join(short_df, on=["symbol", "market", "hour"], how="full", coalesce=True)
+
+    # Fill nulls (when only one side has events)
+    hourly = hourly.with_columns(
+        pl.col("long_delta_sum").fill_null(0),
+        pl.col("short_delta_sum").fill_null(0),
+        pl.col("long_events").fill_null(pl.lit(0).cast(pl.UInt32)),
+        pl.col("short_events").fill_null(pl.lit(0).cast(pl.UInt32)),
+    )
+
+    # Determine direction: side with larger delta sum is paying
+    hourly = hourly.with_columns(
+        (pl.col("long_delta_sum") > pl.col("short_delta_sum")).alias("longs_pay_shorts"),
+        (pl.col("long_events") + pl.col("short_events")).alias("update_count"),
+    )
+
+    # Compute delta ratio as a confidence measure for direction
+    # Higher ratio = more confident in direction (e.g., 10x = very confident)
+    hourly = hourly.with_columns(
+        pl.when(pl.col("short_delta_sum") > 0)
+        .then(pl.col("long_delta_sum") / pl.col("short_delta_sum"))
+        .otherwise(pl.lit(float("inf")))
+        .alias("long_short_ratio"),
+    )
+
+    hourly = hourly.rename({"hour": "timestamp"}).sort(["symbol", "timestamp"])
+
+    # Split by symbol
+    result = {}
+    for symbol in hourly["symbol"].unique().sort().to_list():
+        sym_df = hourly.filter(pl.col("symbol") == symbol)
+        sym_df = sym_df.select([
+            "timestamp",
+            "longs_pay_shorts",
+            "long_short_ratio",
+            "update_count",
+            "long_delta_sum",
+            "short_delta_sum",
+            "long_events",
+            "short_events",
+            "symbol",
+            "market",
+        ]).cast({"update_count": pl.UInt32})
+        result[symbol] = sym_df
+
+    return result
+
+
+# =============================================================================
+# STORAGE
+# =============================================================================
+
+def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
+    """Append DataFrame to existing Parquet file, deduplicating.
+
+    :param df: New data to append.
+    :param filepath: Parquet file path.
+    """
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    if filepath.exists():
+        existing = pl.read_parquet(filepath)
+        for col in existing.columns:
+            if col in df.columns and existing[col].dtype != df[col].dtype:
+                df = df.with_columns(pl.col(col).cast(existing[col].dtype))
+        combined = pl.concat([existing, df], how="diagonal_relaxed")
+    else:
+        combined = df
+
+    if "block_number" in combined.columns and "log_index" in combined.columns:
+        combined = combined.unique(subset=["block_number", "log_index"], keep="last")
+        combined = combined.sort(["block_number", "log_index"])
+    elif "timestamp" in combined.columns:
+        combined = combined.unique(subset=["timestamp"], keep="last")
+        combined = combined.sort("timestamp")
+
+    combined.write_parquet(filepath)
+
+
+def save_raw_per_symbol(records: list[FundingFeePerSizeRecord], output_dir: Path) -> None:
+    """Save raw events to per-symbol Parquet files.
+
+    :param records: List of :class:`FundingFeePerSizeRecord` objects.
+    :param output_dir: Base output directory (e.g., ``data/funding/arbitrum``).
+    """
+    if not HAS_POLARS:
+        console.print("[red]polars required for Parquet[/red]")
+        return
+
+    by_symbol: dict[str, list[FundingFeePerSizeRecord]] = defaultdict(list)
+    for r in records:
+        by_symbol[r.symbol].append(r)
+
+    for symbol, sym_records in sorted(by_symbol.items()):
+        filepath = output_dir / "raw" / "fee_per_size" / symbol / "data.parquet"
+        df = pl.DataFrame([asdict(r) for r in sym_records])
+        append_parquet(df, filepath)
+        console.print(
+            f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]"
+        )
+
+
+def save_direction_per_symbol(
+    hourly_by_symbol: dict[str, "pl.DataFrame"], output_dir: Path
+) -> None:
+    """Save hourly direction data to per-symbol Parquet files.
+
+    :param hourly_by_symbol: Dict from :func:`aggregate_hourly_direction`.
+    :param output_dir: Base output directory (e.g., ``data/funding/arbitrum``).
+    """
+    for symbol, df in sorted(hourly_by_symbol.items()):
+        filepath = output_dir / "direction" / symbol / "1h.parquet"
+        append_parquet(df, filepath)
+        console.print(
+            f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]"
+        )
+
+
+def save_feather_freqtrade(
+    hourly_by_symbol: dict[str, "pl.DataFrame"],
+    feather_dir: Path,
+    quote_currency: str = "USDC",
+) -> None:
+    """Export hourly rates as FreqTrade-compatible feather files.
+
+    FreqTrade expects OHLCV format with ``open`` = funding rate.
+    File naming follows CCXT convention:
+    ``{BASE}_{QUOTE}_{SETTLE}-1h-funding_rate.feather``
+
+    :param hourly_by_symbol: Dict from :func:`aggregate_hourly_direction`.
+    :param feather_dir: Output directory for feather files.
+    :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
+    """
+    if not HAS_FEATHER:
+        console.print("[red]pandas + pyarrow required for feather export[/red]")
+        return
+
+    gmx_dir = feather_dir / "gmx" / "futures"
+    gmx_dir.mkdir(parents=True, exist_ok=True)
+
+    for symbol, df in sorted(hourly_by_symbol.items()):
+        # Convert to pandas for feather writing
+        # Open = signed direction indicator: +1.0 = longs pay, -1.0 = shorts pay
+        pdf = df.select(["timestamp", "longs_pay_shorts"]).to_pandas()
+        pdf = pdf.rename(columns={"timestamp": "date"})
+        pdf["open"] = pdf["longs_pay_shorts"].apply(lambda x: 1.0 if x else -1.0)
+        pdf = pdf.drop(columns=["longs_pay_shorts"])
+        pdf["date"] = pdf["date"].dt.as_unit("ms")
+        pdf["high"] = 0.0
+        pdf["low"] = 0.0
+        pdf["close"] = 0.0
+        pdf["volume"] = 0.0
+        pdf = pdf.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
+        pdf = pdf.dropna(subset=["open"])
+
+        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
+        filepath = gmx_dir / filename
+        pq_feather.write_feather(pdf, filepath)
+        console.print(
+            f"  Feather: [cyan]{len(pdf):,}[/cyan] hours -> [green]{filepath}[/green]"
+        )
+
+
+def save_json(data: list, filename: str) -> None:
+    """Save to JSON.
+
+    :param data: List of dataclass instances.
+    :param filename: Output file path.
+    """
+    with open(filename, "w") as f:
+        json.dump([asdict(d) for d in data], f, indent=2, default=str)
+    console.print(f"  Saved [cyan]{len(data):,}[/cyan] records to [green]{filename}[/green]")
+
+
+# =============================================================================
+# SUMMARY
+# =============================================================================
+
+def print_summary(records: list[FundingFeePerSizeRecord]) -> None:
+    """Print summary statistics.
+
+    :param records: List of :class:`FundingFeePerSizeRecord` objects.
+    """
+    table = Table(title="Funding Fee Per Size Summary", show_lines=False)
+    table.add_column("Symbol", style="cyan")
+    table.add_column("Events", justify="right")
+    table.add_column("Long Evts", justify="right")
+    table.add_column("Short Evts", justify="right")
+    table.add_column("Avg Long Δ", justify="right")
+    table.add_column("Avg Short Δ", justify="right")
+    table.add_column("Direction", justify="center")
+
+    by_symbol: dict[str, list[FundingFeePerSizeRecord]] = defaultdict(list)
+    for r in records:
+        by_symbol[r.symbol].append(r)
+
+    for symbol in sorted(by_symbol.keys()):
+        sym_records = by_symbol[symbol]
+        long_recs = [r for r in sym_records if r.is_long]
+        short_recs = [r for r in sym_records if not r.is_long]
+
+        long_sum = sum(int(r.delta) for r in long_recs)
+        short_sum = sum(int(r.delta) for r in short_recs)
+
+        avg_long = long_sum / len(long_recs) if long_recs else 0
+        avg_short = short_sum / len(short_recs) if short_recs else 0
+
+        direction = "Longs pay" if long_sum > short_sum else "Shorts pay"
+
+        table.add_row(
+            symbol,
+            f"{len(sym_records):,}",
+            f"{len(long_recs):,}",
+            f"{len(short_recs):,}",
+            f"{avg_long / FLOAT_PRECISION_SQRT:.6f}",
+            f"{avg_short / FLOAT_PRECISION_SQRT:.6f}",
+            direction,
+        )
+
+    console.print()
+    console.print(table)
+
+    timestamps = [r.block_timestamp for r in records if r.block_timestamp]
+    if timestamps:
+        first = datetime.fromtimestamp(min(timestamps), tz=timezone.utc)
+        last = datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
+        console.print(
+            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to "
+            f"[cyan]{last.isoformat()}[/cyan]"
+        )
+
+    console.print(f"  Total events: [cyan]{len(records):,}[/cyan]")
+    console.print(f"  Markets:      [cyan]{len(by_symbol):,}[/cyan]")
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+
+async def async_main(args: argparse.Namespace) -> None:
+    """Async main entry point.
+
+    :param args: Parsed command-line arguments.
+    """
+    output_dir = Path(args.output_dir) / args.network
+    checkpoint_dir = (
+        Path(args.checkpoint_dir) if args.checkpoint_dir else output_dir / "checkpoints"
+    )
+    checkpoint_path = checkpoint_dir / "fee_per_size_checkpoint.json"
+
+    from_block = args.from_block
+
+    if args.resume and from_block is None:
+        checkpoint = load_checkpoint(checkpoint_path)
+        if checkpoint:
+            from_block = checkpoint["last_block"] + 1
+            console.print(
+                f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]"
+            )
+        else:
+            from_block = GMX_V2_GENESIS_BLOCK
+            console.print(
+                f"  No checkpoint found. Starting from genesis: "
+                f"[cyan]{from_block:,}[/cyan]"
+            )
+    elif from_block is None:
+        from_block = GMX_V2_GENESIS_BLOCK
+
+    header_lines = [
+        f"Network:     [cyan]{args.network}[/cyan]",
+        f"Block range: [cyan]{from_block:,}[/cyan] to [cyan]{args.to_block or 'latest'}[/cyan]",
+        f"Output:      [cyan]{args.output}[/cyan]",
+        f"Output dir:  [cyan]{output_dir}[/cyan]",
+    ]
+    if args.market:
+        header_lines.append(f"Market:      [cyan]{args.market}[/cyan]")
+    if args.resume:
+        header_lines.append(
+            f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})"
+        )
+    if args.feather_dir:
+        header_lines.append(f"Feather dir: [cyan]{args.feather_dir}[/cyan]")
+
+    console.print(
+        Panel(
+            "\n".join(header_lines),
+            title="GMX V2 Funding Fee Per Size Extractor",
+            subtitle="HyperSync + FundingFeeAmountPerSizeUpdated",
+            border_style="blue",
+        )
+    )
+
+    with console.status("Connecting to HyperSync..."):
+        client = await create_client(args.network)
+
+    to_block = args.to_block
+    if to_block is None:
+        with console.status("Fetching latest block..."):
+            to_block = await get_latest_block(client)
+        console.print(f"  Latest block: [cyan]{to_block:,}[/cyan]")
+
+    if from_block >= to_block:
+        console.print(
+            f"\n[yellow]Already up to date "
+            f"(from_block {from_block:,} >= to_block {to_block:,})[/yellow]"
+        )
+        return
+
+    console.print()
+    records = await extract_fee_per_size_events(
+        client=client,
+        network=args.network,
+        from_block=from_block,
+        to_block=to_block,
+        market_filter=args.market,
+    )
+
+    if not records:
+        console.print("\n[yellow]No FundingFeeAmountPerSizeUpdated events found.[/yellow]")
+        if args.resume:
+            save_checkpoint(
+                checkpoint_path,
+                last_block=to_block,
+                last_timestamp=int(time.time()),
+                total_events=0,
+                markets_seen=0,
+            )
+        return
+
+    # Save outputs
+    console.print()
+    if args.output == "parquet":
+        save_raw_per_symbol(records, output_dir)
+
+        with console.status("Aggregating hourly rates..."):
+            hourly = aggregate_hourly_direction(records)
+
+        save_direction_per_symbol(hourly, output_dir)
+
+        # Optional feather export
+        if args.feather_dir:
+            save_feather_freqtrade(hourly, Path(args.feather_dir))
+
+    elif args.output == "feather":
+        with console.status("Aggregating hourly rates..."):
+            hourly = aggregate_hourly_direction(records)
+
+        save_direction_per_symbol(hourly, output_dir)
+        feather_dir = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
+        save_feather_freqtrade(hourly, feather_dir)
+
+    elif args.output == "json":
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base = f"gmx_v2_fee_per_size_{args.network}_{from_block}_{to_block}_{ts}"
+        save_json(records, f"{base}.json")
+
+    # Save checkpoint
+    if args.resume:
+        last_block = max(r.block_number for r in records)
+        last_timestamp = max(r.block_timestamp for r in records if r.block_timestamp)
+        unique_markets = len(set(r.symbol for r in records))
+
+        prev_checkpoint = load_checkpoint(checkpoint_path)
+        prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
+
+        save_checkpoint(
+            checkpoint_path,
+            last_block=last_block,
+            last_timestamp=last_timestamp,
+            total_events=prev_total + len(records),
+            markets_seen=unique_markets,
+        )
+
+    print_summary(records)
+
+
+def main():
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        description="Extract GMX V2 FundingFeeAmountPerSizeUpdated events using HyperSync",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Full historical extraction from genesis
+  poetry run python scripts/extract_funding_fee_per_size.py --from-block 120000000
+
+  # Quick test
+  poetry run python scripts/extract_funding_fee_per_size.py \\
+      --from-block 170000000 --to-block 170100000 --output json
+
+  # Export to FreqTrade feather
+  poetry run python scripts/extract_funding_fee_per_size.py \\
+      --from-block 120000000 --feather-dir ./user_data/data
+
+  # Incremental
+  poetry run python scripts/extract_funding_fee_per_size.py --resume
+        """,
+    )
+
+    parser.add_argument(
+        "--network",
+        choices=["arbitrum", "avalanche"],
+        default="arbitrum",
+        help="Network (default: arbitrum)",
+    )
+    parser.add_argument(
+        "--from-block",
+        type=int,
+        default=None,
+        help="Start block for backfill (default: genesis or checkpoint)",
+    )
+    parser.add_argument(
+        "--to-block",
+        type=int,
+        default=None,
+        help="End block (default: latest)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./data/funding",
+        help="Base output directory (default: ./data/funding)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["json", "parquet", "feather"],
+        default="parquet",
+        help="Output format (default: parquet)",
+    )
+    parser.add_argument(
+        "--market",
+        type=str,
+        default=None,
+        help="Filter by market symbol (e.g., 'ETH/USD')",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Enable checkpoint-based incremental mode",
+    )
+    parser.add_argument(
+        "--checkpoint-dir",
+        type=str,
+        default=None,
+        help="Override checkpoint directory",
+    )
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="Run in background (daemonize)",
+    )
+    parser.add_argument(
+        "--log-file",
+        type=str,
+        default="./logs/fee_per_size.log",
+        help="Log file for background mode",
+    )
+    parser.add_argument(
+        "--pid-file",
+        type=str,
+        default="./logs/fee_per_size.pid",
+        help="PID file for background mode",
+    )
+    parser.add_argument(
+        "--feather-dir",
+        type=str,
+        default=None,
+        help="Output dir for FreqTrade feather files (CCXT compatible format)",
+    )
+
+    args = parser.parse_args()
+
+    # Background mode
+    if args.background:
+        is_parent = run_in_background(args.log_file, args.pid_file)
+        if is_parent:
+            return
+
+    try:
+        asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        print("\nInterrupted")
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

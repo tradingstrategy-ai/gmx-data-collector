@@ -17,6 +17,8 @@ LOG_DIR ?= ./logs
 # File paths
 LOG_FILE ?= $(LOG_DIR)/funding.log
 PID_FILE ?= $(LOG_DIR)/funding.pid
+FUNDING_FACTOR_LOG ?= $(LOG_DIR)/funding_factor.log
+FUNDING_FACTOR_PID ?= $(LOG_DIR)/funding_factor.pid
 
 # Extraction options
 OUTPUT_FORMAT ?= parquet
@@ -27,11 +29,15 @@ MARKET ?=
 # Background mode
 BACKGROUND ?= --background
 
+# Unified extraction
+INCLUDE_DATASTORE ?=
+UNIFIED_OUTPUT_DIR ?= ./data/funding
+
 # ==============================================================================
 # Targets
 # ==============================================================================
 
-.PHONY: help install funding-full funding-incremental funding-foreground funding-status funding-stop funding-logs funding-clean show-config
+.PHONY: help install funding-full funding-incremental funding-foreground funding-status funding-stop funding-logs funding-clean show-config funding-factor-full funding-factor-foreground funding-unified funding-unified-resume funding-unified-merge
 
 # Default target
 help:
@@ -53,6 +59,11 @@ help:
 	@echo "  funding-stop         - Stop background extraction"
 	@echo "  funding-logs         - Tail extraction logs in real-time"
 	@echo "  funding-clean        - Clean up temporary files"
+	@echo "  funding-factor-full  - Run funding factor extraction (background)"
+	@echo "  funding-factor-foreground - Run funding factor extraction (foreground)"
+	@echo "  funding-unified      - Run unified extraction (all phases + merge)"
+	@echo "  funding-unified-resume - Incremental unified extraction"
+	@echo "  funding-unified-merge - Merge existing data only (no extraction)"
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
 	@echo "Usage Examples:"
@@ -229,3 +240,94 @@ funding-clean:
 	@echo "  rm -rf $(OUTPUT_DIR)      # Delete all extracted data"
 	@echo "  rm -rf $(CHECKPOINT_DIR)  # Delete checkpoints (forces full re-extraction)"
 	@echo "  rm -rf $(LOG_DIR)         # Delete logs"
+
+# ==============================================================================
+# Funding Factor Extraction (fundingFactorPerSecond from Funding events)
+# ==============================================================================
+
+# Build the funding factor extraction command
+define FACTOR_CMD
+poetry run python scripts/extract_funding_factor.py \
+	--network $(NETWORK) \
+	--output $(OUTPUT_FORMAT) \
+	--output-dir $(OUTPUT_DIR) \
+	--resume \
+	--checkpoint-dir $(CHECKPOINT_DIR) \
+	$(if $(BACKGROUND),$(BACKGROUND),) \
+	$(if $(BACKGROUND),--log-file $(FUNDING_FACTOR_LOG),) \
+	$(if $(BACKGROUND),--pid-file $(FUNDING_FACTOR_PID),) \
+	$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
+	$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
+	$(if $(MARKET),--market $(MARKET),)
+endef
+
+funding-factor-full:
+	@echo "Starting funding factor extraction (fundingFactorPerSecond)..."
+	@echo "  Network:     $(NETWORK)"
+	@echo "  Output dir:  $(OUTPUT_DIR)"
+	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
+	@echo "  Log file:    $(FUNDING_FACTOR_LOG)"
+	@echo "  Mode:        background"
+	@echo ""
+	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
+	@$(FACTOR_CMD)
+
+funding-factor-foreground:
+	@echo "Starting funding factor extraction in foreground..."
+	@echo "  Network:     $(NETWORK)"
+	@echo "  Output dir:  $(OUTPUT_DIR)"
+	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
+	@echo "  Mode:        foreground (Ctrl+C to stop)"
+	@echo ""
+	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
+	@poetry run python scripts/extract_funding_factor.py \
+		--network $(NETWORK) \
+		--output $(OUTPUT_FORMAT) \
+		--output-dir $(OUTPUT_DIR) \
+		--resume \
+		--checkpoint-dir $(CHECKPOINT_DIR) \
+		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
+		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
+		$(if $(MARKET),--market $(MARKET),)
+
+# ==============================================================================
+# Unified Funding Rate Extraction (all sources + merge)
+# ==============================================================================
+
+define UNIFIED_CMD
+poetry run python scripts/extract_unified_funding.py \
+	--network $(NETWORK) \
+	--output-dir $(UNIFIED_OUTPUT_DIR) \
+	--output $(OUTPUT_FORMAT) \
+	$(if $(INCLUDE_DATASTORE),--include-datastore,) \
+	$(if $(MARKET),--market $(MARKET),)
+endef
+
+# Full unified extraction (HyperSync phases + merge by default)
+funding-unified:
+	@echo "Starting unified funding rate extraction..."
+	@echo "  Network:     $(NETWORK)"
+	@echo "  Output dir:  $(UNIFIED_OUTPUT_DIR)"
+	@echo "  Datastore:   $(if $(INCLUDE_DATASTORE),included (slow),skipped (use INCLUDE_DATASTORE=1 to enable))"
+	@echo ""
+	@mkdir -p $(UNIFIED_OUTPUT_DIR) $(LOG_DIR)
+	$(UNIFIED_CMD)
+
+# Incremental unified update (resume from checkpoints)
+funding-unified-resume:
+	@echo "Starting incremental unified funding rate extraction..."
+	@echo "  Network:     $(NETWORK)"
+	@echo "  Output dir:  $(UNIFIED_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p $(UNIFIED_OUTPUT_DIR) $(LOG_DIR)
+	$(UNIFIED_CMD) --resume
+
+# Merge only (all raw data already extracted)
+funding-unified-merge:
+	@echo "Merging existing funding rate data..."
+	@mkdir -p $(UNIFIED_OUTPUT_DIR)
+	poetry run python scripts/extract_unified_funding.py \
+		--network $(NETWORK) \
+		--output-dir $(UNIFIED_OUTPUT_DIR) \
+		--merge-only \
+		$(if $(MARKET),--market $(MARKET),)

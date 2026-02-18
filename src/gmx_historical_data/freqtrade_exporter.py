@@ -204,7 +204,7 @@ class FreqtradeExporter:
         """
         result = df.copy()
         result = result.rename(columns={"timestamp": "date"})
-        result["date"] = result["date"].dt.as_unit("ns")
+        result["date"] = result["date"].dt.as_unit("ms")
         result["volume"] = 0.0
         return result[["date", "open", "high", "low", "close", "volume"]]
 
@@ -219,7 +219,7 @@ class FreqtradeExporter:
         :returns: Freqtrade-compatible dataframe.
         """
         result = pd.DataFrame()
-        result["date"] = df["timestamp"].dt.as_unit("ns")
+        result["date"] = df["timestamp"].dt.as_unit("ms")
 
         # Prefer hourly rate; fall back to raw rate
         if "funding_rate_hourly" in df.columns:
@@ -247,7 +247,7 @@ class FreqtradeExporter:
         """
         result = df.copy()
         result = result.rename(columns={"timestamp": "date"})
-        result["date"] = result["date"].dt.as_unit("ns")
+        result["date"] = result["date"].dt.as_unit("ms")
         result["volume"] = 0.0
         result = result[["date", "open", "high", "low", "close", "volume"]]
         return result.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)

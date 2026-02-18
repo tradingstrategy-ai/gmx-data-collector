@@ -146,183 +146,325 @@ For detailed guide including troubleshooting, advanced configuration, and FAQs, 
 
 ## Funding Rate Extraction (GMX V2)
 
-Extract historical funding rate events from GMX V2 EventEmitter contracts.
+Extract historical funding rates for all GMX V2 perpetual markets. Funding rates
+use 30-decimal fixed-point precision (`fundingFactorPerSecond / 10^30`).
 
-### ⚠️ CRITICAL: Output Mode Selection
+### Data Sources
 
-For **full historical extractions** (genesis to latest block), you **MUST** use:
+| Script | Period | Data | Source |
+|--------|--------|------|--------|
+| `extract_funding_datastore.py` | Nov 2023 - Aug 2025 | Signed rate (correct direction) | Archive RPC |
+| `extract_funding_factor.py` | Aug 2025 - present | Rate magnitude (unsigned) | HyperSync events |
+| `extract_funding_fee_per_size.py` | Aug 2023 - present | Direction (who pays) | HyperSync events |
+| **`extract_unified_funding.py`** | **Combined** | **Direction-corrected rate** | **All sources** |
 
-```bash
---output parquet --output-dir ./data/funding
-```
+### Quick Start (Unified Script)
 
-**Why?**
-
-| Output Mode | Memory Usage | Write Strategy | Use Case |
-|-------------|--------------|----------------|----------|
-| `--output json` | **Accumulates ALL records in memory** (10+ GB) | Writes once at end | ❌ Full history = OOM crash |
-| `--output parquet` | **Bounded to ~10K records** | Flushes every 10K events | ✅ Full history = safe |
-
-**Memory Comparison:**
-
-```
-Full Arbitrum History (~430M blocks):
-├─ JSON output:  9.3 GB in memory → 9.3 GB JSON file (OOM on small servers)
-└─ Parquet output: ~10K records in memory → chunk files → merged parquet (safe)
-```
-
-### Quick Start
-
-**Using Makefile (Recommended):**
+The unified script orchestrates all sources and merges into a single
+direction-corrected `1h.parquet` per symbol.
 
 ```bash
 # Install dependencies
-make install
-
-# Full historical extraction (background mode)
-make funding-full
-
-# Check extraction status
-make funding-status
-
-# Watch logs in real-time
-make funding-logs
-
-# Stop extraction
-make funding-stop
-```
-
-**Or using Poetry directly:**
-
-```bash
-# Install dependencies first
 poetry install
 
-# RECOMMENDED: Full historical extraction with parquet
-poetry run python scripts/extract_funding_rates.py \
-  --output parquet \
-  --output-dir ./data/funding \
-  --resume \
-  --checkpoint-dir ./checkpoints
+# Default: HyperSync phases + merge (fast, no archive RPC needed)
+poetry run python scripts/extract_unified_funding.py
 
-# Run in background (daemon mode)
-poetry run python scripts/extract_funding_rates.py \
-  --output parquet \
-  --output-dir ./data/funding \
-  --resume \
-  --background \
-  --log-file logs/funding.log \
-  --pid-file logs/funding.pid
+# Include pre-V2.2 DataStore phase (slow, ~34K RPC calls)
+export JSON_RPC_ARBITRUM=<archive-node-url>
+poetry run python scripts/extract_unified_funding.py --include-datastore
+
+# Single market
+poetry run python scripts/extract_unified_funding.py --market ETH/USD
+
+# Incremental update (resumes from per-phase checkpoints)
+poetry run python scripts/extract_unified_funding.py --resume
+
+# Output as feather instead of parquet
+poetry run python scripts/extract_unified_funding.py --output feather
+
+# Export to FreqTrade feather format (OHLCV with rate in 'open')
+poetry run python scripts/extract_unified_funding.py --feather-dir ./user_data/data
+
+# Both: feather merge + FreqTrade export
+poetry run python scripts/extract_unified_funding.py --output feather --feather-dir ./user_data/data
+
+# Merge only (skip extraction, combine existing data)
+poetry run python scripts/extract_unified_funding.py --merge-only
 ```
 
-### How Chunk-Based Flushing Works
+### Using the Makefile
 
-With `--output parquet --output-dir <path>`:
+```bash
+# Full extraction (HyperSync + merge)
+make funding-unified
 
-1. **During extraction** (every 10,000 events):
-   ```
-   data/funding/arbitrum/raw/ETH_USD/
-   ├── chunk_000001.parquet  (10,000 events)
-   ├── chunk_000002.parquet  (10,000 events)
-   ├── chunk_000003.parquet  (10,000 events)
-   └── ...
-   ```
+# With DataStore phase (slow)
+make funding-unified INCLUDE_DATASTORE=1
 
-2. **After extraction completes**:
-   - Chunks are merged into `events.parquet` per symbol
-   - Deduplication on `(blockNumber, logIndex, eventType)`
-   - Chunk files are deleted
+# Incremental update
+make funding-unified-resume
 
-3. **Memory stays bounded**:
-   - In-memory buffer cleared after each flush
-   - Maximum ~10,000 records in memory at once
-   - Survives crashes (chunks already on disk)
+# Single market
+make funding-unified MARKET="ETH/USD"
+
+# Merge only
+make funding-unified-merge
+```
+
+### How It Works
+
+1. **Phase 2 — Funding Factor** (HyperSync): Streams `Funding` events for
+   `fundingFactorPerSecond` magnitude (V2.2+, Aug 2025 onwards)
+2. **Phase 3 — Direction** (HyperSync): Streams `FundingFeeAmountPerSizeUpdated`
+   events, compares long vs short delta sums to determine who pays
+3. **Phase 1 — DataStore** (opt-in): Reads signed `savedFundingFactorPerSecond`
+   from the DataStore contract via Multicall3 at hourly intervals (pre-V2.2)
+4. **Merge**: Combines all sources, applies direction correction to V2.2+ data,
+   deduplicates, and writes unified `1h.parquet` (or `1h.feather` with `--output feather`)
 
 ### Output Structure
 
 ```
 data/funding/arbitrum/
 ├── raw/
-│   ├── ETH_USD/
-│   │   └── events.parquet        # All raw events for ETH/USD
-│   └── BTC_USD/
-│       └── events.parquet        # All raw events for BTC/USD
-└── rates/
-    ├── ETH_USD/
-    │   └── snapshots.parquet     # Aggregated funding rate snapshots
-    └── BTC_USD/
-        └── snapshots.parquet
+│   ├── funding/{SYMBOL}/partition=0/data.parquet   # Raw Funding events
+│   └── fee_per_size/{SYMBOL}/data.parquet          # Raw fee-per-size events
+├── rates/
+│   ├── {SYMBOL}/1h.parquet                         # Unified hourly rates (merged)
+│   ├── {SYMBOL}/1h_factor.parquet                  # HyperSync-only rates
+│   └── {SYMBOL}/1h_datastore.parquet               # DataStore-only rates
+├── direction/
+│   └── {SYMBOL}/1h.parquet                         # Hourly direction (who pays)
+└── checkpoints/
+    ├── funding_factor_checkpoint.json
+    ├── fee_per_size_checkpoint.json
+    └── funding_datastore_checkpoint.json
 ```
 
-### Performance
+### Unified Hourly Rates Schema (`rates/{SYMBOL}/1h.parquet`)
 
-| Extraction Type | Duration | Memory Peak | Output Size |
-|----------------|----------|-------------|-------------|
-| Full history (430M blocks) | ~6-8 hours | ~10K events (~50 MB) | ~9 GB parquet |
-| Incremental (1 day) | ~5-10 minutes | ~10K events (~50 MB) | ~10 MB parquet |
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | datetime[ms, UTC] | Hour start |
+| `funding_rate` | float64 | Mean per-second rate |
+| `funding_rate_hourly` | float64 | `rate * 3600` (used by FreqTrade) |
+| `funding_rate_annualized` | float64 | `rate * 3600 * 8760` |
+| `longs_pay_shorts` | bool | True = longs pay (direction-corrected) |
+| `funding_fee_long` | float64 | Signed hourly rate for longs |
+| `funding_fee_short` | float64 | Signed hourly rate for shorts |
+| `update_count` | uint32 | Events in hour |
+| `source` | string | `"datastore"` or `"hypersync"` |
 
-### Common Use Cases
+### Expected Rates
 
-**Testing (small range):**
+| Metric | Value |
+|--------|-------|
+| Per-second rate | ~1e-10 to ~1e-9 |
+| Hourly rate | ~3.6e-7 to ~3.6e-6 |
+| Annualized | ~0.5% to ~10% |
+
+### Daily Cronjob
+
 ```bash
-# JSON is fine for small ranges
-poetry run python scripts/extract_funding_rates.py \
-  --from-block 290000000 \
-  --to-block 290100000 \
-  --output json
-```
-
-**Production (full history):**
-```bash
-# MUST use parquet for full history
-poetry run python scripts/extract_funding_rates.py \
-  --output parquet \
-  --output-dir ./data/funding \
-  --resume
-```
-
-**Daily cronjob:**
-```bash
-# Using Makefile (recommended)
-0 2 * * * cd /path/to/gmx_historical_data && make funding-incremental >> logs/funding_cron.log 2>&1
-
-# Or using Poetry directly
 0 2 * * * cd /path/to/gmx_historical_data && \
-  poetry run python scripts/extract_funding_rates.py \
-  --output parquet \
-  --output-dir ./data/funding \
-  --resume >> logs/funding_cron.log 2>&1
+  poetry run python scripts/extract_unified_funding.py --resume >> logs/unified_funding.log 2>&1
+```
+
+### Running Individual Scripts
+
+The three source scripts can still be run independently:
+
+```bash
+# Funding Factor only (V2.2+)
+poetry run python scripts/extract_funding_factor.py --resume
+
+# Direction only
+poetry run python scripts/extract_funding_fee_per_size.py --resume
+
+# DataStore only (pre-V2.2, requires archive RPC)
+poetry run python scripts/extract_funding_datastore.py --resume
 ```
 
 ### Troubleshooting
 
-**Problem: Script crashes at 60% with no output files**
+**HyperSync 500 errors**: Both HyperSync scripts retry up to 15 times with
+exponential backoff (capped at 2 minutes). The unified script additionally
+retries each phase up to 3 times if it fails entirely.
 
-✅ **Solution:** You're using `--output json` (default). Switch to parquet:
+**Unknown markets**: New GMX markets appear with truncated addresses as
+symbols. The script logs unknown addresses so they can be added to the
+`MARKETS` dict.
+
+**Rates look wrong**: Verify the raw `funding_factor_per_second` value.
+Divide by `10^30` for the per-second decimal rate. Multiply by `3600 * 8760`
+for annualized. Typical ETH/USD annual rate is ~2-5%.
+
+## Borrowing Rate Extraction (GMX V2)
+
+Extract the market-level `borrowingFactorPerSecond` from GMX V2 `Borrowing` events
+using HyperSync. This is the **pre-computed on-chain borrowing rate** — the rate
+charged to the dominant side (larger OI) and paid to LPs.
+
+> **Why this matters:** The Dune Analytics query for GMX borrowing rates uses complex
+> Method 1/Method 2 calculations from pool parameters. The on-chain `Borrowing` event
+> gives the **actual rate** the protocol uses, which is simpler and more accurate.
+
+### Quick Start
+
 ```bash
-poetry run python scripts/extract_funding_rates.py \
-  --output parquet \
-  --output-dir ./data/funding
+# Full historical extraction
+poetry run python scripts/extract_borrowing_factor.py --from-block 120000000
+
+# Quick smoke test (recent blocks, JSON output)
+poetry run python scripts/extract_borrowing_factor.py \
+  --from-block 433300000 --to-block 433400000 --output json
+
+# Incremental mode (resumes from checkpoint)
+poetry run python scripts/extract_borrowing_factor.py --resume
+
+# Background daemon
+poetry run python scripts/extract_borrowing_factor.py --resume --background
+
+# Filter by market
+poetry run python scripts/extract_borrowing_factor.py --resume --market "ETH/USD"
 ```
 
-**Problem: `Error: polars required for Parquet`**
+### How It Works
 
-✅ **Solution:** Install polars dependency:
-```bash
-poetry install  # polars is now a project dependency
+1. Queries HyperSync for `Borrowing` events (topic1 = `keccak("Borrowing")`) from
+   the GMX V2 EventEmitter contract
+2. Decodes `borrowingFactorPerSecond` as a 30-decimal fixed-point integer
+   (divide by `10^30` for the per-second decimal rate)
+3. Writes raw events to per-symbol Parquet files
+4. Aggregates to hourly rates with derived columns (hourly, annualized)
+
+### Output Structure
+
+```
+data/borrowing/arbitrum/
+├── raw/borrowing/                        # Raw Borrowing events
+│   ├── ETH/partition=0/data.parquet
+│   ├── BTC/partition=0/data.parquet
+│   └── .../
+├── rates/                                # Hourly aggregated rates
+│   ├── ETH/1h.parquet
+│   ├── BTC/1h.parquet
+│   └── .../
+└── checkpoints/
+    └── borrowing_factor_checkpoint.json  # Resume state
 ```
 
-**Problem: Background process stuck/killed**
+**Hourly rates schema** (`rates/{SYMBOL}/1h.parquet`):
 
-✅ **Solution:** Check memory usage and ensure parquet output:
-```bash
-# Check if process is still running
-cat logs/funding.pid
-ps aux | grep extract_funding_rates
+| Column | Type | Description |
+|--------|------|-------------|
+| `timestamp` | datetime[ms, UTC] | Hour start |
+| `borrowing_rate` | float64 | Mean per-second rate |
+| `borrowing_rate_hourly` | float64 | `rate * 3600` |
+| `borrowing_rate_annualized` | float64 | `rate * 3600 * 8760` |
+| `update_count` | uint32 | Events in hour |
+| `symbol` | string | Human-readable symbol |
+| `market` | string | Market contract address |
 
-# Check logs
-tail -f logs/funding.log
+### Expected Rates
+
+Typical `borrowingFactorPerSecond` values (annualized):
+
+| Market | Typical Annual Rate |
+|--------|--------------------|
+| BTC/USD | ~1-2% |
+| ETH/USD | ~4-7% |
+| SOL/USD | ~1-3% |
+| Illiquid tokens | ~10-60%+ |
+
+### Combining with Funding Rates
+
+To compute the **net cost** of holding a position:
+
 ```
+net_rate = funding_rate + borrowing_rate
+```
+
+Both scripts output hourly rates in the same format, so they can be joined on
+`(timestamp, symbol)` in pandas/polars.
+
+## Funding Rate Extraction via GraphQL (No HyperSync Required)
+
+A simpler alternative that uses the **Subsquid GraphQL API** — no ABI decoding, no HyperSync token, no Rust dependencies. Just a single Python script with zero external dependencies.
+
+### Data Availability
+
+| Data Source | Available From | Fields |
+|-------------|---------------|--------|
+| `borrowingRateSnapshots` | **2023-07-05** (GMX V2 launch) | `borrowingFactorPerSecondLong/Short` per market, hourly |
+| `fundingRateSnapshots` | **2025-08-19** | `fundingFactorPerSecondLong/Short` per market, hourly |
+
+> **Note:** For full historical coverage back to GMX V2 launch (July 2023), use `--data-type borrowing`. Funding rate snapshots are only available from August 2025 onwards.
+
+### Quick Start
+
+```bash
+# No extra install needed — uses only Python stdlib
+python scripts/extract_funding_rates_graphql.py --market ETH/USD --from-date 2024-01-01 --to-date 2024-07-01
+
+# List all available markets
+python scripts/extract_funding_rates_graphql.py --list-markets
+```
+
+### Usage Examples
+
+```bash
+# Full historical borrowing rates (from GMX V2 launch)
+python scripts/extract_funding_rates_graphql.py \
+  --market ETH/USD --from-date 2023-08-01 --data-type borrowing --output csv
+
+# Recent funding + borrowing rates combined
+python scripts/extract_funding_rates_graphql.py \
+  --market BTC/USD --from-date 2025-09-01 --data-type both --interval 8h
+
+# All markets, 1-hour aggregation, CSV output
+python scripts/extract_funding_rates_graphql.py \
+  --from-date 2025-10-01 --to-date 2025-11-01 --interval 1h --output csv
+```
+
+### CLI Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--from-date` | Start date (YYYY-MM-DD) | 7 days ago |
+| `--to-date` | End date (YYYY-MM-DD) | Today |
+| `--market` | Filter by symbol (e.g., `ETH/USD`) | All markets |
+| `--data-type` | `funding`, `borrowing`, or `both` | `both` |
+| `--interval` | `raw`, `1h`, or `8h` | `raw` |
+| `--output` | `json` or `csv` | `json` |
+| `--output-dir` | Output directory | Current directory |
+| `--list-markets` | List available markets and exit | — |
+
+### Output Schema
+
+| Column | Description |
+|--------|-------------|
+| `symbol` | Market symbol (e.g., `ETH/USD`) |
+| `marketAddress` | GMX market contract address |
+| `timestamp` | Unix timestamp |
+| `datetime` | ISO 8601 datetime |
+| `rateType` | `funding` or `borrowing` |
+| `factorPerSecondLong/Short` | Raw per-second rate (decimal) |
+| `rateHourlyLong/Short` | `factorPerSecond × 3600` |
+| `rate8hLong/Short` | `factorPerSecond × 3600 × 8` |
+| `rateAnnualizedLong/Short` | `factorPerSecond × 3600 × 24 × 365` |
+
+### HyperSync vs GraphQL Comparison
+
+| | HyperSync (`extract_funding_factor.py`) | GraphQL (`extract_funding_rates_graphql.py`) |
+|---|---|---|
+| **Dependencies** | Rust + `hypersync`, Poetry | None (Python stdlib only) |
+| **Setup** | API token required | No auth needed |
+| **Data source** | Raw on-chain `Funding` events | Pre-indexed Subsquid snapshots |
+| **Funding rates from** | Block 120M (~Aug 2023) | Aug 2025 (snapshots entity) |
+| **Borrowing rates** | Not included | From Jul 2023 (full history) |
+| **Speed** | 10-30 min full extraction | ~1-2 min per month of data |
 
 ## Docker Usage (Recommended)
 
@@ -407,7 +549,7 @@ The `--default` flag uses `--full` mode to fetch recent data from GMX API (~6 mo
 ### Export for Freqtrade
 
 Exports OHLCV candles, funding rates, and mark prices in FreqTrade's feather format.
-The output format is CCXT-compatible (`datetime64[ns, UTC]` timestamps, same column
+The output format is CCXT-compatible (`datetime64[ms, UTC]` timestamps, same column
 layout as Binance/Hyperliquid).
 
 ```bash
@@ -615,15 +757,28 @@ Charts are saved to `user_data/plot/`:
 
 ```
 data/
-├── candles/arbitrum/{SYMBOL}/              # OHLCV data
+├── candles/arbitrum/{SYMBOL}/                              # OHLCV candle data
 │   ├── 1m.parquet
 │   ├── 1h.parquet
 │   └── 1d.parquet
-├── funding/arbitrum/rates/{SYMBOL}/        # Funding rate data
-│   ├── 1h.parquet
-│   ├── 4h.parquet
-│   └── 1d.parquet
-└── raw/arbitrum/{SYMBOL}/                  # Raw events
+├── funding/arbitrum/
+│   ├── raw/
+│   │   ├── funding/{SYMBOL}/partition=0/data.parquet       # Raw Funding events
+│   │   └── fee_per_size/{SYMBOL}/data.parquet              # Raw fee-per-size events
+│   ├── rates/{SYMBOL}/
+│   │   ├── 1h.parquet                                     # Unified hourly rates (merged)
+│   │   ├── 1h_factor.parquet                              # HyperSync-only rates
+│   │   └── 1h_datastore.parquet                           # DataStore-only rates
+│   ├── direction/{SYMBOL}/1h.parquet                       # Hourly direction (who pays)
+│   └── checkpoints/
+│       ├── funding_factor_checkpoint.json
+│       ├── fee_per_size_checkpoint.json
+│       └── funding_datastore_checkpoint.json
+├── borrowing/arbitrum/
+│   ├── raw/borrowing/{SYMBOL}/partition=0/data.parquet     # Raw Borrowing events
+│   ├── rates/{SYMBOL}/1h.parquet                           # Hourly aggregated borrowing rates
+│   └── checkpoints/borrowing_factor_checkpoint.json        # Borrowing resume checkpoint
+└── raw/arbitrum/{SYMBOL}/                                  # Raw oracle events
 ```
 
 ## CLI Reference
