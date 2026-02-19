@@ -39,14 +39,13 @@ OPTIONS
     --network            Network: "arbitrum" or "avalanche" (default: arbitrum)
     --output-dir         Base output directory (default: ./data/funding)
     --market             Filter by market symbol (e.g., "ETH/USD")
-    --include-datastore  Include Phase 1 DataStore extraction (slow, ~34K RPC calls)
+    --include-datastore  Include Phase 1 DataStore extraction (~200 batched HTTP requests, requires archive node)
     --skip-direction     Skip Phase 3 direction detection
     --merge-only         Only run merge step, skip all extraction
     --resume             Resume each phase from its checkpoint
     --checkpoint-dir     Override checkpoint directory
     --output             Merged output format: "parquet" or "feather" (default: parquet)
     --feather-dir        Export unified rates as FreqTrade feather files
-    --datastore-workers  Parallel RPC workers for DataStore phase (default: 1)
     --list-markets       List available markets and exit
 """
 
@@ -319,12 +318,13 @@ def build_datastore_cmd(args: argparse.Namespace) -> list[str]:
         str(SCRIPT_DIR / "extract_funding_datastore.py"),
         "--output-dir", args.output_dir,
         "--output", "parquet",
-        "--workers", str(args.datastore_workers),
     ]
     if args.market:
         cmd.extend(["--market", args.market])
     if args.resume:
         cmd.append("--resume")
+    if args.refresh_markets:
+        cmd.append("--refresh-markets")
     return cmd
 
 
@@ -347,6 +347,8 @@ def build_factor_cmd(args: argparse.Namespace) -> list[str]:
         cmd.append("--resume")
     if args.checkpoint_dir:
         cmd.extend(["--checkpoint-dir", args.checkpoint_dir])
+    if args.refresh_markets:
+        cmd.append("--refresh-markets")
     return cmd
 
 
@@ -369,6 +371,8 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
         cmd.append("--resume")
     if args.checkpoint_dir:
         cmd.extend(["--checkpoint-dir", args.checkpoint_dir])
+    if args.refresh_markets:
+        cmd.append("--refresh-markets")
     return cmd
 
 
@@ -641,13 +645,16 @@ def export_feather(
             continue
 
         result = pd.DataFrame()
-        result["date"] = df["timestamp"].dt.as_unit("ms")
+        # Produce datetime64[ns, UTC] to match Binance/FreqTrade feather schema exactly
+        ts = pd.to_datetime(df["timestamp"], utc=True)
+        result["date"] = ts
 
-        # Use funding_rate_hourly if available, otherwise funding_rate
+        # open = per-settlement funding rate (per 1h for GMX continuous accrual)
+        # = funding_rate_per_second × 3600, same unit as Hyperliquid 1h settlement
         if "funding_rate_hourly" in df.columns:
             result["open"] = df["funding_rate_hourly"].astype(float)
         else:
-            result["open"] = df["funding_rate"].astype(float)
+            result["open"] = (df["funding_rate"] * 3600).astype(float)
 
         result["high"] = 0.0
         result["low"] = 0.0
@@ -736,21 +743,13 @@ Examples:
         help="Filter by market symbol (e.g., 'ETH/USD')",
     )
 
-    # DataStore RPC config
-    parser.add_argument(
-        "--datastore-workers",
-        type=int,
-        default=1,
-        help="Parallel RPC workers for DataStore phase (default: 1)",
-    )
-
     # Phase control
     parser.add_argument(
         "--include-datastore",
         action="store_true",
         help=(
             "Include DataStore phase (pre-V2.2, Nov 2023 - Aug 2025). "
-            "Slow (~34K RPC calls), requires JSON_RPC_ARBITRUM. "
+            "~200 batched HTTP requests, requires JSON_RPC_ARBITRUM archive node. "
             "Skipped by default."
         ),
     )
@@ -794,6 +793,11 @@ Examples:
         "--list-markets",
         action="store_true",
         help="List available markets and exit",
+    )
+    parser.add_argument(
+        "--refresh-markets",
+        action="store_true",
+        help="Force re-fetch of GMX market registry (bypass 24h cache)",
     )
 
     return parser

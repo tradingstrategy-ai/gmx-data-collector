@@ -149,11 +149,31 @@ For detailed guide including troubleshooting, advanced configuration, and FAQs, 
 Extract historical funding rates for all GMX V2 perpetual markets. Funding rates
 use 30-decimal fixed-point precision (`fundingFactorPerSecond / 10^30`).
 
+### Why Three Scripts? (Data Architecture)
+
+GMX V2 changed how it exposes funding rates in the **V2.2 upgrade (August 2025)**:
+
+- **Pre-V2.2 (Nov 2023 – Aug 2025)**: GMX stored `savedFundingFactorPerSecond` as
+  a signed integer in the **DataStore contract** (state, not events). No on-chain
+  event ever emitted the rate for this period. The only way to read historical values
+  is via `eth_call` to the DataStore at specific past blocks — which requires an
+  **archive node**. HyperSync cannot help here because it only indexes event logs.
+
+- **V2.2+ (Aug 2025 – present)**: GMX introduced the `Funding` event on the
+  `EventEmitter` contract, which emits `fundingFactorPerSecond` on every update.
+  HyperSync can stream these events all the way back to V2.2 genesis, with no RPC
+  needed.
+
+- **`FundingFeeAmountPerSizeUpdated`** events exist across the full V2 history, but
+  they carry **cumulative fee accumulators** — not the rate itself. They include
+  open-interest amplification (~13×) and token pricing, making direct rate extraction
+  impractical. We use them solely to detect **direction** (which side pays).
+
 ### Data Sources
 
 | Script | Period | Data | Source |
 |--------|--------|------|--------|
-| `extract_funding_datastore.py` | Nov 2023 - Aug 2025 | Signed rate (correct direction) | Archive RPC |
+| `extract_funding_datastore.py` | Nov 2023 - Aug 2025 | Signed rate (correct direction) | Archive RPC + batched bytecode eth_call |
 | `extract_funding_factor.py` | Aug 2025 - present | Rate magnitude (unsigned) | HyperSync events |
 | `extract_funding_fee_per_size.py` | Aug 2023 - present | Direction (who pays) | HyperSync events |
 | **`extract_unified_funding.py`** | **Combined** | **Direction-corrected rate** | **All sources** |
@@ -170,7 +190,7 @@ poetry install
 # Default: HyperSync phases + merge (fast, no archive RPC needed)
 poetry run python scripts/extract_unified_funding.py
 
-# Include pre-V2.2 DataStore phase (slow, ~34K RPC calls)
+# Include pre-V2.2 DataStore phase (~200 batched HTTP requests, requires archive node)
 export JSON_RPC_ARBITRUM=<archive-node-url>
 poetry run python scripts/extract_unified_funding.py --include-datastore
 
@@ -219,9 +239,50 @@ make funding-unified-merge
 2. **Phase 3 — Direction** (HyperSync): Streams `FundingFeeAmountPerSizeUpdated`
    events, compares long vs short delta sums to determine who pays
 3. **Phase 1 — DataStore** (opt-in): Reads signed `savedFundingFactorPerSecond`
-   from the DataStore contract via Multicall3 at hourly intervals (pre-V2.2)
+   from the DataStore contract via batched `eth_call` at hourly intervals (pre-V2.2)
 4. **Merge**: Combines all sources, applies direction correction to V2.2+ data,
    deduplicates, and writes unified `1h.parquet` (or `1h.feather` with `--output feather`)
+
+### DataStore Performance
+
+The DataStore phase uses **fully-batched JSON-RPC requests** across two prefetch phases —
+all network I/O finishes before any record is written:
+
+| Phase | Method | Batch size | Requests for full run |
+|-------|--------|------------|----------------------|
+| Timestamps | `eth_getBlockByNumber` batch | 200/request | ~87 HTTP requests |
+| DataStore reads | `eth_call` batch | 150/request | ~116 HTTP requests |
+| **Total** | | | **~203 HTTP requests** (vs. ~17,000 sequential) |
+
+**How the `eth_call` batching works:**
+
+Each HTTP request contains up to 150 JSON-RPC `eth_call` items. Each `eth_call` executes
+`GMXFundingRateBatchRequest` — a **never-deployed Solidity contract** whose constructor
+reads all ~124 market rates from the DataStore in a single EVM execution (computes
+keccak keys on-chain, calls `getInt` for every market, returns `int256[]`). The contract
+bytecode is embedded directly in the Python script; no deployment or Multicall3 dependency.
+
+```
+1 HTTP POST  →  150 × eth_call  →  each call reads all ~124 markets in one EVM run
+              └─ JSON-RPC batch    └─ GMXFundingRateBatchRequest bytecode
+```
+
+Requests are distributed round-robin across all providers in `JSON_RPC_ARBITRUM`.
+
+```bash
+# Full run — ~203 HTTP requests, typically 2-5 minutes on an archive node
+export JSON_RPC_ARBITRUM="https://rpc1.example.com https://rpc2.example.com"
+poetry run python scripts/extract_funding_datastore.py
+
+# Expected output:
+#   HTTP batches:  87 timestamp + 116 DataStore = 203 total
+#   Timestamps ready in ~65s
+#   DataStore reads ready in ~90s
+```
+
+> **Archive node required.** Public RPC endpoints (Alchemy free tier, Infura) usually
+> rate-limit `eth_call` at historical blocks. A dedicated Arbitrum archive node
+> (e.g. Alchemy Growth, QuickNode) handles sustained parallel load without 429s.
 
 ### Output Structure
 
@@ -292,9 +353,9 @@ poetry run python scripts/extract_funding_datastore.py --resume
 exponential backoff (capped at 2 minutes). The unified script additionally
 retries each phase up to 3 times if it fails entirely.
 
-**Unknown markets**: New GMX markets appear with truncated addresses as
-symbols. The script logs unknown addresses so they can be added to the
-`MARKETS` dict.
+**Unknown markets**: Market info is fetched dynamically from the GMX REST API and
+cached for 24 hours in `~/.cache/gmx_historical_data/markets_arbitrum.json`. If a
+newly listed market is missing, run with `--refresh-markets` to force a cache refresh.
 
 **Rates look wrong**: Verify the raw `funding_factor_per_second` value.
 Divide by `10^30` for the per-second decimal rate. Multiply by `3600 * 8760`

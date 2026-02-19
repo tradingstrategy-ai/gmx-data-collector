@@ -78,6 +78,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from gmx_historical_data.market_registry import fetch_markets, market_symbol
+
 import hypersync
 from hypersync import (
     HypersyncClient,
@@ -167,128 +169,9 @@ IDX_BYTES32 = 4
 IDX_BYTES = 5
 IDX_STRING = 6
 
-# GMX V2 Market Addresses on Arbitrum
-# Source: https://github.com/gmx-io/gmx-interface (sdk/src/configs/markets.ts)
-# Last updated: 2026-02-18
-MARKETS = {
-    # Major perpetual markets
-    "0x47c031236e19d024b42f8ae6780e44a573170703": {"symbol": "BTC/USD", "indexToken": "BTC"},
-    "0x70d95587d40a2caf56bd97485ab3eec10bee6336": {"symbol": "ETH/USD", "indexToken": "ETH"},
-    "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4": {"symbol": "DOGE/USD", "indexToken": "DOGE"},
-    "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9": {"symbol": "SOL/USD", "indexToken": "SOL"},
-    "0xd9535bb5f58a1a75032416f2dfe7880c30575a41": {"symbol": "LTC/USD", "indexToken": "LTC"},
-    "0xc7abb2c5f3bf3ceb389df0eecd6120d451170b50": {"symbol": "UNI/USD", "indexToken": "UNI"},
-    "0x7f1fa204bb700853d36994da19f830b6ad18455c": {"symbol": "LINK/USD", "indexToken": "LINK"},
-    "0xc25cef6061cf5de5eb761b50e4743c1f5d7e5407": {"symbol": "ARB/USD", "indexToken": "ARB"},
-    "0x0ccb4faa6f1f1b30911619f1184082ab4e25813c": {"symbol": "XRP/USD", "indexToken": "XRP"},
-    "0x2d340912aa47e33c90efb078e69e70efe2b34b9b": {"symbol": "BNB/USD", "indexToken": "BNB"},
-    "0x248c35760068ce009a13076d573ed3497a47bcd4": {"symbol": "ATOM/USD", "indexToken": "ATOM"},
-    "0x1cbba6346f110c8a5ea739ef2d1eb182990e4eb2": {"symbol": "AAVE/USD", "indexToken": "AAVE"},
-    "0x7bbbf946883a5701350007320f525c5379b8178a": {"symbol": "AVAX/USD", "indexToken": "AVAX"},
-    "0x4fdd333ff9ca409df583f306b6f5a7ffde790739": {"symbol": "OP/USD", "indexToken": "OP"},
-    "0xb56e5e2fb50d6fb510b4e4c086dcde66a866da24": {"symbol": "GMX/USD", "indexToken": "GMX"},
-    "0x2b477989a149b17073d9c9c82ec9cb03591325a6": {"symbol": "WIF/USD", "indexToken": "WIF"},
-    # Single-asset / alternative collateral markets
-    "0x7c11f78ce78768518d743e81fdfa2f860c6b9a77": {"symbol": "BTC/USD [WBTC.e-WBTC.e]", "indexToken": "BTC"},
-    "0x450bb6774dd8a756274e0ab4107953259d2ac541": {"symbol": "ETH/USD [WETH-WETH]", "indexToken": "ETH"},
-    "0xe68caaacdf6439628dfd2fe624847602991a31eb": {"symbol": "BTC/USD [WBTC-WBTC]", "indexToken": "BTC"},
-    "0xdab9ba9e3a301ccb353f18b4c8542ba2149e4010": {"symbol": "ETH/USD [WETH-WETH-2]", "indexToken": "ETH"},
-    "0x08a902113f7f41a8658ebb1175f9c847bf4fb9d8": {"symbol": "ETH/USD [WETH-USDT]", "indexToken": "ETH"},
-    "0x0cf1fb4d1ff67a3d8ca92c9d6643f8f9be8e03e5": {"symbol": "ETH/USD [wstETH-USDe]", "indexToken": "ETH"},
-    "0xd62068697bcc92af253225676d618b0c9f17c663": {"symbol": "BTC/USD [tBTC-tBTC]", "indexToken": "BTC"},
-    # Newer perpetual markets
-    "0xb62369752d8ad08392572db6d0cc872127888bed": {"symbol": "SHIB/USD", "indexToken": "SHIB"},
-    "0x6ecf2133e2c9751caadcb6958b9654bae198a797": {"symbol": "SUI/USD", "indexToken": "SUI"},
-    "0xb489711b1cb86afda48924730084e23310eb4883": {"symbol": "SEI/USD", "indexToken": "SEI"},
-    "0x66a69c8eb98a7efe22a22611d1967dfec786a708": {"symbol": "APT/USD", "indexToken": "APT"},
-    "0xbeb1f4ebc9af627ca1e5a75981ce1ae97efeda22": {"symbol": "TIA/USD", "indexToken": "TIA"},
-    "0x3680d7bfe9260d3c5de81aeb2194c119a59a99d1": {"symbol": "TRX/USD", "indexToken": "TRX"},
-    "0x872b5d567a2469ed92d252eacb0eb3bb0769e05b": {"symbol": "WLD/USD", "indexToken": "WLD"},
-    "0xe55e1a29985488a2c8846a91e925c2b7c6564db1": {"symbol": "TAO/USD", "indexToken": "TAO"},
-    "0xfd46a5702d4d97ce0164375744c65f0c31a3901b": {"symbol": "FLOKI/USD", "indexToken": "FLOKI"},
-    "0x6cb901cc64c024c3fe4404c940ff9a3acc229d2c": {"symbol": "MEME/USD", "indexToken": "MEME"},
-    "0x784292e87715d93afd7cb8c941bacafaaa9a5102": {"symbol": "PENDLE/USD", "indexToken": "PENDLE"},
-    "0xcacb964144f9056a8f99447a303e60b4873ca9b4": {"symbol": "ADA/USD", "indexToken": "ADA"},
-    "0x62feb8ec060a7de5b32bbbf4ac70050f8a043c17": {"symbol": "BCH/USD", "indexToken": "BCH"},
-    "0xdc4e96a251ff43eeac710462cd8a9d18dc802f18": {"symbol": "ICP/USD", "indexToken": "ICP"},
-    "0x467c4a46287f6c4918ddf780d4fd7b46419c2291": {"symbol": "DYDX/USD", "indexToken": "DYDX"},
-    "0x16466a03449cb9218eb6a980aa4a44aaced27c25": {"symbol": "INJ/USD", "indexToken": "INJ"},
-    "0xfec8f404fbca3b11afd3b3f0c57507c2a06de636": {"symbol": "TRUMP/USD", "indexToken": "TRUMP"},
-    "0x12fd1a4bdb96219e637180ff5293409502b2951d": {"symbol": "MELANIA/USD", "indexToken": "MELANIA"},
-    "0xd0a1afdde31eb51e8b53bdce989eb8c2404828a4": {"symbol": "POL/USD", "indexToken": "POL"},
-    "0xdab21c4d1f569486334c93685da2b3f9b0a078e8": {"symbol": "APE/USD", "indexToken": "APE"},
-    "0xe2730ffe2136aa549327ebce93d58160df7821cb": {"symbol": "FARTCOIN/USD", "indexToken": "FARTCOIN"},
-    "0x876ff160d63809674e03f82dc4d3c3ae8b0acf28": {"symbol": "BERA/USD", "indexToken": "BERA"},
-    "0x0c11ed89889fd03394e8d9d685cc5b85be569c99": {"symbol": "PENGU/USD", "indexToken": "PENGU"},
-    "0x970e578ff01589bb470ce38a2f1753152a009366": {"symbol": "ONDO/USD", "indexToken": "ONDO"},
-    "0x04decfb37e46075189324817df80a32d22b9ed8d": {"symbol": "AIXBT/USD", "indexToken": "AIXBT"},
-    "0x4d9ba415649c4b3c703562770c8ff3033478cea1": {"symbol": "S/USD", "indexToken": "S"},
-    "0xbcb8fe13d02b023e8f94f6881cc0192fd918a5c0": {"symbol": "HYPE/USD", "indexToken": "HYPE"},
-    "0x7de8e1a1fba845a330a6bd91118afda09610fb02": {"symbol": "JUP/USD", "indexToken": "JUP"},
-    "0x4d3eb91efd36c2b74181f34b111bc1e91a0d0cb4": {"symbol": "DOLO/USD", "indexToken": "DOLO"},
-    "0x9e79146b3a022af44e0708c6794f03ef798381a5": {"symbol": "ZRO/USD", "indexToken": "ZRO"},
-    "0x0e46941f9bff8d0784bffa3d0d7883cdb82d7ae7": {"symbol": "CRV/USD", "indexToken": "CRV"},
-    "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f": {"symbol": "XMR/USD", "indexToken": "XMR"},
-    "0x39ac3c494950a4363d739201ba5a0861265c9ae5": {"symbol": "PI/USD", "indexToken": "PI"},
-    "0x4c0bb704529fa49a26bd854802d70206982c6f1b": {"symbol": "PUMP/USD", "indexToken": "PUMP"},
-    "0x8263bc3766a09f6dd4bab04b4bf8d45f2b0973ff": {"symbol": "SPX6900/USD", "indexToken": "SPX6900"},
-    "0x40daeac02dcf6b3c51f9151f532c21dcef2f7e63": {"symbol": "MNT/USD", "indexToken": "MNT"},
-    "0x9f0849fb830679829d1fb759b11236d375d15c78": {"symbol": "HBAR/USD", "indexToken": "HBAR"},
-    "0x41e3bc5b72384c8b26b559b7d16c2b81fd36fba2": {"symbol": "CVX/USD", "indexToken": "CVX"},
-    "0x4024418592450e4d62fab15e2f833fc03a3447dc": {"symbol": "KAS/USD", "indexToken": "KAS"},
-    "0x970b730b5dd18de53a230ee8f4af088dbc3a6f8d": {"symbol": "KTA/USD", "indexToken": "KTA"},
-    "0xac484106d935f0f20f1485b631fa6f65aeeff550": {"symbol": "ZORA/USD", "indexToken": "ZORA"},
-    "0x4b67aa8f754b17b1029ad2db4fb6a276cce350c4": {"symbol": "XPL/USD", "indexToken": "XPL"},
-    "0x0164b6c847c65e07c9f6226149adbfa7c1de40cf": {"symbol": "ASTER/USD", "indexToken": "ASTER"},
-    "0xe024188850a822409f362209c1ef2cfdc7c4de4c": {"symbol": "0G/USD", "indexToken": "0G"},
-    "0xceff9d261a96cb78df35f9333ba9f2f4cfcb8a68": {"symbol": "AVNT/USD", "indexToken": "AVNT"},
-    "0x6d9430a116ed4d4fc6fe1996a5493662d555b07e": {"symbol": "LINEA/USD", "indexToken": "LINEA"},
-    "0x66ab9d61a0124b61c8892a4ac687ac48dba8ff2c": {"symbol": "MON/USD", "indexToken": "MON"},
-    "0x587759c237acca739bce3911647bacf56c876e60": {"symbol": "ZEC/USD", "indexToken": "ZEC"},
-    "0x5707673d95a8fd317e2745c4217acd64ca021b68": {"symbol": "ANIME/USD", "indexToken": "ANIME"},
-    "0x728ff0679c89267434d6ef1824c8c8eed4ac3dbc": {"symbol": "DASH/USD", "indexToken": "DASH"},
-    "0x3b4689d69516b9d4b1aaf7545c6fc4d3ed70b70b": {"symbol": "JTO/USD", "indexToken": "JTO"},
-    "0x8965e821c7c8c09c6eb3cb9ccf7eb6f386441ea2": {"symbol": "SYRUP/USD", "indexToken": "SYRUP"},
-    "0x3600592dded7e6e0b05029dfb637ffc5a85d6f6b": {"symbol": "CHZ/USD", "indexToken": "CHZ"},
-    "0xeb28ad1a2e497f4acc5d9b87e7b496623c93061e": {"symbol": "XAUT/USD", "indexToken": "XAUT"},
-    "0x5ff52be1968107d7886a8e9a64874a45c8f5d96a": {"symbol": "IP/USD", "indexToken": "IP"},
-    "0xb3588455858a49d3244237cee00880ccb84b91dd": {"symbol": "WLFI/USD", "indexToken": "WLFI"},
-    "0x947c521e44f727219542b0f91a85182193c1d2ad": {"symbol": "VVV/USD", "indexToken": "VVV"},
-    # Alternative collateral variants
-    "0x0bb2a83f995e1e1eae9d7fdce68ab1ac55b2cc85": {"symbol": "PEPE/USD [WETH-USDC]", "indexToken": "PEPE"},
-    "0xf913b4748031ef569898ed91e5ba0d602bb93298": {"symbol": "LINK/USD [WETH-USDC]", "indexToken": "LINK"},
-    "0xcf083d35ad306a042d4fb312fcdd8228b52b82f8": {"symbol": "SOL/USD [WBTC.e-USDC]", "indexToken": "SOL"},
-    "0x065577d05c3d4c11505ed7bc97bbf85d462a6a6f": {"symbol": "BNB/USD [WBTC.e-USDC]", "indexToken": "BNB"},
-    # Swap-only markets (may emit Funding events with 0 rate)
-    "0xb686bcb112660343e6d15bdb65297e110c8311c4": {"symbol": "USDC-USDT [swap]", "indexToken": None},
-    "0xe2fecb78f76d937648c47e4e2cd5e47d27411545": {"symbol": "XRP/USD [legacy]", "indexToken": "XRP"},
-    "0x63dc80ee90f26363b3fcd609f370bb5549d6dbca": {"symbol": "NEAR/USD [legacy]", "indexToken": "NEAR"},
-}
-
-
 # =============================================================================
 # DATA CLASSES & HELPERS
 # =============================================================================
-
-def market_symbol(address: str) -> str:
-    """Look up human-readable symbol for a market address.
-
-    :param address: Lowercase hex market address.
-    :returns: Symbol string (e.g., ``'ETH'``). Falls back to truncated address.
-    """
-    info = MARKETS.get(address.lower())
-    if info:
-        sym = info["symbol"]
-        # "ETH/USD" -> "ETH", "BTC/USD [WBTC-WBTC]" -> "BTC_WBTC-WBTC"
-        # "USDC-USDT [swap]" -> "USDC-USDT_swap"
-        base = sym.split("/")[0]
-        bracket = sym.find("[")
-        if bracket != -1:
-            suffix = sym[bracket + 1 : -1].strip()
-            return f"{base}_{suffix}"
-        # Sanitize: remove characters that break filesystem/polars glob
-        return base.replace("[", "").replace("]", "").replace(" ", "_")
-    return address[:10]
 
 
 @dataclass
@@ -573,6 +456,7 @@ async def extract_funding_events(
     from_block: int,
     to_block: Optional[int],
     market_filter: Optional[str] = None,
+    markets: Optional[dict] = None,
 ) -> list[FundingFactorRecord]:
     """Extract Funding events from GMX V2 EventEmitter.
 
@@ -581,8 +465,12 @@ async def extract_funding_events(
     :param from_block: Starting block number.
     :param to_block: Ending block number (``None`` for latest).
     :param market_filter: Optional market symbol filter (e.g., ``'ETH/USD'``).
+    :param markets: Market registry from :func:`fetch_markets`. Defaults to
+        an empty dict (all unknown markets get truncated-address names).
     :returns: List of :class:`FundingFactorRecord` objects.
     """
+    if markets is None:
+        markets = {}
     emitter = EVENT_EMITTER_ADDRESSES.get(network)
     if not emitter:
         raise ValueError(f"No EventEmitter for network: {network}")
@@ -687,7 +575,7 @@ async def extract_funding_events(
                     continue
 
                 # Skip swap-only markets (no perpetual trading, 0% funding)
-                market_info = MARKETS.get(market_addr.lower())
+                market_info = markets.get(market_addr.lower())
                 if market_info and market_info.get("indexToken") is None:
                     continue
 
@@ -698,15 +586,15 @@ async def extract_funding_events(
                 longs_pay = True  # not determinable from event
                 factor_raw = decoded["uints"].get("fundingFactorPerSecond", 0)
 
-                symbol = market_symbol(market_addr)
+                symbol = market_symbol(market_addr, markets)
 
                 # Track unknown markets
-                if market_addr.lower() not in MARKETS:
+                if market_addr.lower() not in markets:
                     unknown_markets.add(market_addr.lower())
 
                 # Apply market filter
                 if market_filter:
-                    market_info = MARKETS.get(market_addr.lower(), {})
+                    market_info = markets.get(market_addr.lower(), {})
                     if market_info.get("symbol", "") != market_filter:
                         continue
 
@@ -1080,6 +968,10 @@ async def async_main(args: argparse.Namespace) -> None:
         )
     )
 
+    with console.status("Fetching GMX market registry..."):
+        markets = fetch_markets(args.network, force_refresh=args.refresh_markets)
+    console.print(f"  Markets loaded: [cyan]{len(markets):,}[/cyan]")
+
     with console.status("Connecting to HyperSync..."):
         client = await create_client(args.network)
 
@@ -1103,6 +995,7 @@ async def async_main(args: argparse.Namespace) -> None:
         from_block=from_block,
         to_block=to_block,
         market_filter=args.market,
+        markets=markets,
     )
 
     if not records:
@@ -1239,6 +1132,11 @@ Examples:
         type=str,
         default="./logs/funding_factor.pid",
         help="PID file for background mode",
+    )
+    parser.add_argument(
+        "--refresh-markets",
+        action="store_true",
+        help="Force re-fetch of GMX market registry (ignores 24h disk cache)",
     )
 
     args = parser.parse_args()

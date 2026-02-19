@@ -37,7 +37,6 @@ OPTIONS
 """
 
 import argparse
-import asyncio
 import json
 import os
 import sys
@@ -47,9 +46,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import requests
 from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
+from eth_defi.provider.multi_provider import create_multi_provider_web3
+from gmx_historical_data.market_registry import fetch_markets, market_symbol
 from web3 import Web3
 
 try:
@@ -98,235 +99,183 @@ BLOCKS_PER_HOUR = 14_400
 GMX_V2_GENESIS_BLOCK = 120_000_000  # ~Aug 2023
 GMX_V22_FUNDING_EVENT_START = 370_000_000  # ~Aug 2025
 
-# DataStore key: keccak256(abi.encode("SAVED_FUNDING_FACTOR_PER_SECOND"))
-SAVED_FUNDING_FACTOR_KEY_BASE = Web3.keccak(
-    abi_encode(["string"], ["SAVED_FUNDING_FACTOR_PER_SECOND"])
-)
 
-# DataStore ABI (just the getInt function we need)
-DATASTORE_ABI = [
-    {
-        "inputs": [{"name": "key", "type": "bytes32"}],
-        "name": "getInt",
-        "outputs": [{"name": "", "type": "int256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "inputs": [{"name": "key", "type": "bytes32"}],
-        "name": "getUint",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-]
-
-# Multicall3 contract (deployed on all major EVM chains, including Arbitrum)
-MULTICALL3_ADDRESS = "0xcA11bde05977b3631167028862bE2a173976CA11"
-MULTICALL3_ABI = [
-    {
-        "inputs": [
-            {
-                "components": [
-                    {"name": "target", "type": "address"},
-                    {"name": "allowFailure", "type": "bool"},
-                    {"name": "callData", "type": "bytes"},
-                ],
-                "name": "calls",
-                "type": "tuple[]",
-            }
-        ],
-        "name": "aggregate3",
-        "outputs": [
-            {
-                "components": [
-                    {"name": "success", "type": "bool"},
-                    {"name": "returnData", "type": "bytes"},
-                ],
-                "name": "returnData",
-                "type": "tuple[]",
-            }
-        ],
-        "stateMutability": "payable",
-        "type": "function",
-    }
-]
-
-# Markets that existed at GMX V2 launch (Aug 2023). Newer markets are added
-# later and will return 0 until their creation block.
-# Source: https://github.com/gmx-io/gmx-interface (sdk/src/configs/markets.ts)
-MARKETS = {
-    # Major perpetual markets (from launch or shortly after)
-    "0x47c031236e19d024b42f8ae6780e44a573170703": {"symbol": "BTC/USD", "indexToken": "BTC"},
-    "0x70d95587d40a2caf56bd97485ab3eec10bee6336": {"symbol": "ETH/USD", "indexToken": "ETH"},
-    "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4": {"symbol": "DOGE/USD", "indexToken": "DOGE"},
-    "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9": {"symbol": "SOL/USD", "indexToken": "SOL"},
-    "0xd9535bb5f58a1a75032416f2dfe7880c30575a41": {"symbol": "LTC/USD", "indexToken": "LTC"},
-    "0xc7abb2c5f3bf3ceb389df0eecd6120d451170b50": {"symbol": "UNI/USD", "indexToken": "UNI"},
-    "0x7f1fa204bb700853d36994da19f830b6ad18455c": {"symbol": "LINK/USD", "indexToken": "LINK"},
-    "0xc25cef6061cf5de5eb761b50e4743c1f5d7e5407": {"symbol": "ARB/USD", "indexToken": "ARB"},
-    "0x0ccb4faa6f1f1b30911619f1184082ab4e25813c": {"symbol": "XRP/USD", "indexToken": "XRP"},
-    "0x2d340912aa47e33c90efb078e69e70efe2b34b9b": {"symbol": "BNB/USD", "indexToken": "BNB"},
-    "0x248c35760068ce009a13076d573ed3497a47bcd4": {"symbol": "ATOM/USD", "indexToken": "ATOM"},
-    "0x1cbba6346f110c8a5ea739ef2d1eb182990e4eb2": {"symbol": "AAVE/USD", "indexToken": "AAVE"},
-    "0x7bbbf946883a5701350007320f525c5379b8178a": {"symbol": "AVAX/USD", "indexToken": "AVAX"},
-    "0x4fdd333ff9ca409df583f306b6f5a7ffde790739": {"symbol": "OP/USD", "indexToken": "OP"},
-    "0xb56e5e2fb50d6fb510b4e4c086dcde66a866da24": {"symbol": "GMX/USD", "indexToken": "GMX"},
-    # Single-asset / alternative collateral markets
-    "0x7c11f78ce78768518d743e81fdfa2f860c6b9a77": {"symbol": "BTC/USD [WBTC.e-WBTC.e]", "indexToken": "BTC"},
-    "0x450bb6774dd8a756274e0ab4107953259d2ac541": {"symbol": "ETH/USD [WETH-WETH]", "indexToken": "ETH"},
-    "0xe68caaacdf6439628dfd2fe624847602991a31eb": {"symbol": "BTC/USD [WBTC-WBTC]", "indexToken": "BTC"},
-    # Newer perpetual markets (added later, will show 0 before creation)
-    "0x2b477989a149b17073d9c9c82ec9cb03591325a6": {"symbol": "WIF/USD", "indexToken": "WIF"},
-    "0xb62369752d8ad08392572db6d0cc872127888bed": {"symbol": "SHIB/USD", "indexToken": "SHIB"},
-    "0x6ecf2133e2c9751caadcb6958b9654bae198a797": {"symbol": "SUI/USD", "indexToken": "SUI"},
-    "0xb489711b1cb86afda48924730084e23310eb4883": {"symbol": "SEI/USD", "indexToken": "SEI"},
-    "0x66a69c8eb98a7efe22a22611d1967dfec786a708": {"symbol": "APT/USD", "indexToken": "APT"},
-    "0xbeb1f4ebc9af627ca1e5a75981ce1ae97efeda22": {"symbol": "TIA/USD", "indexToken": "TIA"},
-    "0x3680d7bfe9260d3c5de81aeb2194c119a59a99d1": {"symbol": "TRX/USD", "indexToken": "TRX"},
-    "0x872b5d567a2469ed92d252eacb0eb3bb0769e05b": {"symbol": "WLD/USD", "indexToken": "WLD"},
-    "0xe55e1a29985488a2c8846a91e925c2b7c6564db1": {"symbol": "TAO/USD", "indexToken": "TAO"},
-    "0xfd46a5702d4d97ce0164375744c65f0c31a3901b": {"symbol": "FLOKI/USD", "indexToken": "FLOKI"},
-    "0x6cb901cc64c024c3fe4404c940ff9a3acc229d2c": {"symbol": "MEME/USD", "indexToken": "MEME"},
-    "0x784292e87715d93afd7cb8c941bacafaaa9a5102": {"symbol": "PENDLE/USD", "indexToken": "PENDLE"},
-    "0xcacb964144f9056a8f99447a303e60b4873ca9b4": {"symbol": "ADA/USD", "indexToken": "ADA"},
-    "0x62feb8ec060a7de5b32bbbf4ac70050f8a043c17": {"symbol": "BCH/USD", "indexToken": "BCH"},
-    "0xdc4e96a251ff43eeac710462cd8a9d18dc802f18": {"symbol": "ICP/USD", "indexToken": "ICP"},
-    "0x467c4a46287f6c4918ddf780d4fd7b46419c2291": {"symbol": "DYDX/USD", "indexToken": "DYDX"},
-    "0x16466a03449cb9218eb6a980aa4a44aaced27c25": {"symbol": "INJ/USD", "indexToken": "INJ"},
-    "0xfec8f404fbca3b11afd3b3f0c57507c2a06de636": {"symbol": "TRUMP/USD", "indexToken": "TRUMP"},
-    "0x12fd1a4bdb96219e637180ff5293409502b2951d": {"symbol": "MELANIA/USD", "indexToken": "MELANIA"},
-    "0xd0a1afdde31eb51e8b53bdce989eb8c2404828a4": {"symbol": "POL/USD", "indexToken": "POL"},
-    "0xdab21c4d1f569486334c93685da2b3f9b0a078e8": {"symbol": "APE/USD", "indexToken": "APE"},
-    "0xe2730ffe2136aa549327ebce93d58160df7821cb": {"symbol": "FARTCOIN/USD", "indexToken": "FARTCOIN"},
-    "0x876ff160d63809674e03f82dc4d3c3ae8b0acf28": {"symbol": "BERA/USD", "indexToken": "BERA"},
-    "0x0c11ed89889fd03394e8d9d685cc5b85be569c99": {"symbol": "PENGU/USD", "indexToken": "PENGU"},
-    "0x970e578ff01589bb470ce38a2f1753152a009366": {"symbol": "ONDO/USD", "indexToken": "ONDO"},
-    "0x04decfb37e46075189324817df80a32d22b9ed8d": {"symbol": "AIXBT/USD", "indexToken": "AIXBT"},
-    "0x4d9ba415649c4b3c703562770c8ff3033478cea1": {"symbol": "S/USD", "indexToken": "S"},
-    "0xbcb8fe13d02b023e8f94f6881cc0192fd918a5c0": {"symbol": "HYPE/USD", "indexToken": "HYPE"},
-    "0x7de8e1a1fba845a330a6bd91118afda09610fb02": {"symbol": "JUP/USD", "indexToken": "JUP"},
-    "0x4d3eb91efd36c2b74181f34b111bc1e91a0d0cb4": {"symbol": "DOLO/USD", "indexToken": "DOLO"},
-    "0x9e79146b3a022af44e0708c6794f03ef798381a5": {"symbol": "ZRO/USD", "indexToken": "ZRO"},
-    "0x0e46941f9bff8d0784bffa3d0d7883cdb82d7ae7": {"symbol": "CRV/USD", "indexToken": "CRV"},
-    "0x7c54d547fad72f8afbf6e5b04403a0168b654c6f": {"symbol": "XMR/USD", "indexToken": "XMR"},
-    "0x39ac3c494950a4363d739201ba5a0861265c9ae5": {"symbol": "PI/USD", "indexToken": "PI"},
-    "0x4c0bb704529fa49a26bd854802d70206982c6f1b": {"symbol": "PUMP/USD", "indexToken": "PUMP"},
-    "0x8263bc3766a09f6dd4bab04b4bf8d45f2b0973ff": {"symbol": "SPX6900/USD", "indexToken": "SPX6900"},
-    "0x40daeac02dcf6b3c51f9151f532c21dcef2f7e63": {"symbol": "MNT/USD", "indexToken": "MNT"},
-    "0x9f0849fb830679829d1fb759b11236d375d15c78": {"symbol": "HBAR/USD", "indexToken": "HBAR"},
-    "0x41e3bc5b72384c8b26b559b7d16c2b81fd36fba2": {"symbol": "CVX/USD", "indexToken": "CVX"},
-    "0x4024418592450e4d62fab15e2f833fc03a3447dc": {"symbol": "KAS/USD", "indexToken": "KAS"},
-    "0x970b730b5dd18de53a230ee8f4af088dbc3a6f8d": {"symbol": "KTA/USD", "indexToken": "KTA"},
-    "0xac484106d935f0f20f1485b631fa6f65aeeff550": {"symbol": "ZORA/USD", "indexToken": "ZORA"},
-    "0x4b67aa8f754b17b1029ad2db4fb6a276cce350c4": {"symbol": "XPL/USD", "indexToken": "XPL"},
-    "0x0164b6c847c65e07c9f6226149adbfa7c1de40cf": {"symbol": "ASTER/USD", "indexToken": "ASTER"},
-    "0xe024188850a822409f362209c1ef2cfdc7c4de4c": {"symbol": "0G/USD", "indexToken": "0G"},
-    "0xceff9d261a96cb78df35f9333ba9f2f4cfcb8a68": {"symbol": "AVNT/USD", "indexToken": "AVNT"},
-    "0x6d9430a116ed4d4fc6fe1996a5493662d555b07e": {"symbol": "LINEA/USD", "indexToken": "LINEA"},
-    "0x66ab9d61a0124b61c8892a4ac687ac48dba8ff2c": {"symbol": "MON/USD", "indexToken": "MON"},
-    "0x587759c237acca739bce3911647bacf56c876e60": {"symbol": "ZEC/USD", "indexToken": "ZEC"},
-    "0x5707673d95a8fd317e2745c4217acd64ca021b68": {"symbol": "ANIME/USD", "indexToken": "ANIME"},
-    "0x728ff0679c89267434d6ef1824c8c8eed4ac3dbc": {"symbol": "DASH/USD", "indexToken": "DASH"},
-    "0x3b4689d69516b9d4b1aaf7545c6fc4d3ed70b70b": {"symbol": "JTO/USD", "indexToken": "JTO"},
-    "0x8965e821c7c8c09c6eb3cb9ccf7eb6f386441ea2": {"symbol": "SYRUP/USD", "indexToken": "SYRUP"},
-    "0x3600592dded7e6e0b05029dfb637ffc5a85d6f6b": {"symbol": "CHZ/USD", "indexToken": "CHZ"},
-    "0xeb28ad1a2e497f4acc5d9b87e7b496623c93061e": {"symbol": "XAUT/USD", "indexToken": "XAUT"},
-    "0x5ff52be1968107d7886a8e9a64874a45c8f5d96a": {"symbol": "IP/USD", "indexToken": "IP"},
-    "0xb3588455858a49d3244237cee00880ccb84b91dd": {"symbol": "WLFI/USD", "indexToken": "WLFI"},
-    "0x947c521e44f727219542b0f91a85182193c1d2ad": {"symbol": "VVV/USD", "indexToken": "VVV"},
-    # Alternative collateral variants
-    "0x0bb2a83f995e1e1eae9d7fdce68ab1ac55b2cc85": {"symbol": "PEPE/USD [WETH-USDC]", "indexToken": "PEPE"},
-    "0xf913b4748031ef569898ed91e5ba0d602bb93298": {"symbol": "LINK/USD [WETH-USDC]", "indexToken": "LINK"},
-    "0xcf083d35ad306a042d4fb312fcdd8228b52b82f8": {"symbol": "SOL/USD [WBTC.e-USDC]", "indexToken": "SOL"},
-    "0x065577d05c3d4c11505ed7bc97bbf85d462a6a6f": {"symbol": "BNB/USD [WBTC.e-USDC]", "indexToken": "BNB"},
-    "0xdab9ba9e3a301ccb353f18b4c8542ba2149e4010": {"symbol": "ETH/USD [WETH-WETH-2]", "indexToken": "ETH"},
-    "0x08a902113f7f41a8658ebb1175f9c847bf4fb9d8": {"symbol": "ETH/USD [WETH-USDT]", "indexToken": "ETH"},
-    "0x0cf1fb4d1ff67a3d8ca92c9d6643f8f9be8e03e5": {"symbol": "ETH/USD [wstETH-USDe]", "indexToken": "ETH"},
-    "0xd62068697bcc92af253225676d618b0c9f17c663": {"symbol": "BTC/USD [tBTC-tBTC]", "indexToken": "BTC"},
-}
-
+# Deployment bytecode for GMXFundingRateBatchRequest.
+# Source: contracts/GMXFundingRateBatch.sol; compiled with Foundry, evm_version=paris
+# (Paris = pre-Shanghai; no PUSH0 — required for Arbitrum blocks before ArbOS 20 ~block 174M)
+# NOT deployed — used exclusively via eth_call with to=null:
+#   data = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(["address[]"], [markets])
+# Returns: abi_decode(["int256[]"], result)[0]
+FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b50604051610683380380610683833981810160405281019061003291906103de565b600073fd70de6b91282d8017aa4e741e9ae325cab992d89050600060405160200161005c90610484565b60405160208183030381529060405280519060200120905060008351905060008167ffffffffffffffff8111156100965761009561023d565b5b6040519080825280602002602001820160405280156100c45781602001602082028036833780820191505090505b50905060005b828110156101e6576000848783815181106100e8576100e76104a4565b5b60200260200101516040516020016101019291906104fb565b6040516020818303038152906040528051906020012090508573ffffffffffffffffffffffffffffffffffffffff1663dc97d962826040518263ffffffff1660e01b81526004016101529190610524565b602060405180830381865afa92505050801561018c57506040513d601f19601f820116820180604052508101906101899190610575565b60015b6101b65760008383815181106101a5576101a46104a4565b5b6020026020010181815250506101d8565b808484815181106101ca576101c96104a4565b5b602002602001018181525050505b5080806001019150506100ca565b506000816040516020016101fa9190610660565b6040516020818303038152906040529050805160208201f35b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b6102758261022c565b810181811067ffffffffffffffff821117156102945761029361023d565b5b80604052505050565b60006102a7610213565b90506102b3828261026c565b919050565b600067ffffffffffffffff8211156102d3576102d261023d565b5b602082029050602081019050919050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b6000610314826102e9565b9050919050565b61032481610309565b811461032f57600080fd5b50565b6000815190506103418161031b565b92915050565b600061035a610355846102b8565b61029d565b9050808382526020820190506020840283018581111561037d5761037c6102e4565b5b835b818110156103a657806103928882610332565b84526020840193505060208101905061037f565b5050509392505050565b600082601f8301126103c5576103c4610227565b5b81516103d5848260208601610347565b91505092915050565b6000602082840312156103f4576103f361021d565b5b600082015167ffffffffffffffff81111561041257610411610222565b5b61041e848285016103b0565b91505092915050565b600082825260208201905092915050565b7f53415645445f46554e44494e475f464143544f525f5045525f5345434f4e4400600082015250565b600061046e601f83610427565b915061047982610438565b602082019050919050565b6000602082019050818103600083015261049d81610461565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b6000819050919050565b6104e6816104d3565b82525050565b6104f581610309565b82525050565b600060408201905061051060008301856104dd565b61051d60208301846104ec565b9392505050565b600060208201905061053960008301846104dd565b92915050565b6000819050919050565b6105528161053f565b811461055d57600080fd5b50565b60008151905061056f81610549565b92915050565b60006020828403121561058b5761058a61021d565b5b600061059984828501610560565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6105d78161053f565b82525050565b60006105e983836105ce565b60208301905092915050565b6000602082019050919050565b600061060d826105a2565b61061781856105ad565b9350610622836105be565b8060005b8381101561065357815161063a88826105dd565b9750610645836105f5565b925050600181019050610626565b5085935050505092915050565b6000602082019050818103600083015261067a8184610602565b90509291505056fe"
 
 # =============================================================================
 # DATA CLASSES & HELPERS
 # =============================================================================
 
 
-def market_symbol(address: str) -> str:
-    """Look up human-readable symbol for a market address.
 
-    :param address: Lowercase hex market address.
-    :returns: Symbol string (e.g., ``'ETH/USD'``). Falls back to truncated address.
+
+def prefetch_block_timestamps(
+    rpc_config: str,
+    block_numbers: list[int],
+    batch_size: int = 200,
+    timeout: int = 60,
+) -> dict[int, int]:
+    """Pre-fetch timestamps for many blocks via JSON-RPC batch requests.
+
+    Sends groups of ``eth_getBlockByNumber`` calls in a single HTTP request,
+    reducing N sequential round-trips to ceil(N / batch_size) round-trips.
+    This is the primary speedup for the DataStore phase: timestamps for all
+    ~17,000 sample blocks can be fetched in ~85 HTTP requests instead of 17,000.
+    Batches are distributed across all configured providers in round-robin order.
+
+    :param rpc_config: Space-separated archive node URL(s). ``mev+`` prefixed
+        URLs are stripped of that prefix before use.
+    :param block_numbers: Ordered list of block numbers to fetch.
+    :param batch_size: Max requests per HTTP batch (default: 200).
+    :param timeout: Per-request timeout in seconds (default: 60).
+    :returns: Dict mapping block number → Unix timestamp.
     """
-    info = MARKETS.get(address.lower())
-    if info:
-        sym = info["symbol"]
-        base = sym.split("/")[0]
-        bracket = sym.find("[")
-        if bracket != -1:
-            suffix = sym[bracket + 1 : -1].strip()
-            return f"{base}_{suffix}"
-        return base.replace("[", "").replace("]", "").replace(" ", "_")
-    return address[:10]
+    # Parse: strip mev+ prefix (those are transaction endpoints, not suitable for eth_call)
+    raw_urls = rpc_config.strip().split()
+    call_urls = [u[4:] if u.startswith("mev+") else u for u in raw_urls]
+
+    timestamps: dict[int, int] = {}
+    total = len(block_numbers)
+    fetched = 0
+
+    for i, chunk_start in enumerate(range(0, total, batch_size)):
+        chunk = block_numbers[chunk_start : chunk_start + batch_size]
+        payload = [
+            {
+                "id": j,
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": [hex(bn), False],
+            }
+            for j, bn in enumerate(chunk)
+        ]
+        url = call_urls[i % len(call_urls)]
+        resp = requests.post(url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        for item in resp.json():
+            result = item.get("result")
+            if result:
+                bn = int(result["number"], 16)
+                ts = int(result["timestamp"], 16)
+                timestamps[bn] = ts
+        fetched += len(chunk)
+        if fetched % 2000 == 0 or fetched == total:
+            console.print(
+                f"  Timestamps: {fetched:,}/{total:,} "
+                f"({fetched/total*100:.0f}%)"
+            )
+
+    return timestamps
 
 
-def build_market_key(market_address: str) -> bytes:
-    """Build the DataStore key for savedFundingFactorPerSecond for a market.
+def batch_fetch_funding_rates(
+    rpc_config: str,
+    market_addresses: list[str],
+    block_numbers: list[int],
+    batch_size: int = 150,
+    timeout: int = 120,
+) -> dict[int, dict[str, int]]:
+    """Batch-fetch ``savedFundingFactorPerSecond`` for all markets across many blocks.
 
-    :param market_address: Checksummed or lowercase market address.
-    :returns: 32-byte key hash.
+    Sends groups of ``eth_call`` requests (using ``GMXFundingRateBatchRequest``
+    bytecode) in a single HTTP request, reducing N sequential RPC round-trips
+    to ``ceil(N / batch_size)`` round-trips.  Requests are distributed
+    round-robin across all configured providers.
+
+    :param rpc_config: Space-separated RPC URL(s). ``mev+`` prefixed URLs
+        are stripped of that prefix.
+    :param market_addresses: Market contract addresses to query.
+    :param block_numbers: Ordered list of block numbers to query.
+    :param batch_size: ``eth_call`` requests per HTTP batch (default: 150).
+    :param timeout: Per-request timeout in seconds (default: 120).
+    :returns: Dict mapping block number → {market address → int256 value}.
     """
-    return Web3.keccak(
-        abi_encode(
-            ["bytes32", "address"],
-            [SAVED_FUNDING_FACTOR_KEY_BASE, Web3.to_checksum_address(market_address)],
-        )
+    raw_urls = rpc_config.strip().split()
+    call_urls = [u[4:] if u.startswith("mev+") else u for u in raw_urls]
+
+    # Pre-encode calldata once — same bytecode + market list for every block
+    encoded_args = abi_encode(
+        ["address[]"],
+        [[Web3.to_checksum_address(a) for a in market_addresses]],
     )
+    calldata_hex = "0x" + FUNDING_BATCH_BYTECODE[2:] + encoded_args.hex()
+
+    results: dict[int, dict[str, int]] = {}
+    total = len(block_numbers)
+    fetched = 0
+    errors = 0
+
+    for i, chunk_start in enumerate(range(0, total, batch_size)):
+        chunk = block_numbers[chunk_start : chunk_start + batch_size]
+        payload = [
+            {
+                "id": j,
+                "jsonrpc": "2.0",
+                "method": "eth_call",
+                "params": [{"data": calldata_hex}, hex(bn)],
+            }
+            for j, bn in enumerate(chunk)
+        ]
+        url = call_urls[i % len(call_urls)]
+        resp = requests.post(url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+
+        for item in resp.json():
+            bn = chunk[item["id"]]
+            raw = item.get("result", "")
+            if raw and raw != "0x":
+                try:
+                    values = abi_decode(["int256[]"], bytes.fromhex(raw[2:]))[0]
+                    results[bn] = dict(zip(market_addresses, values))
+                except Exception:
+                    results[bn] = {addr: 0 for addr in market_addresses}
+                    errors += 1
+            else:
+                # Block before GMX V2 or RPC error — all zeros
+                results[bn] = {addr: 0 for addr in market_addresses}
+
+        fetched += len(chunk)
+        if fetched % 2000 == 0 or fetched == total:
+            console.print(
+                f"  DataStore reads: {fetched:,}/{total:,} "
+                f"({fetched/total*100:.0f}%)"
+                + (f" [{errors} decode errors]" if errors else "")
+            )
+
+    return results
 
 
-def read_all_markets_multicall(
-    multicall_contract,
-    datastore_contract,
-    market_keys: dict[str, bytes],
+def read_all_markets_bytecode(
+    w3: Web3,
+    market_addresses: list[str],
     block_number: int,
 ) -> dict[str, int]:
-    """Read savedFundingFactorPerSecond for all markets in one Multicall3 call.
+    """Read savedFundingFactorPerSecond for all markets in one eth_call.
 
-    Batches all ``getInt`` calls into a single ``aggregate3`` RPC call,
-    reducing N market reads to 1 RPC round-trip.
+    Uses the ``GMXFundingRateBatchRequest`` constructor bytecode (see
+    ``contracts/GMXFundingRateBatch.sol``).  The constructor is executed by
+    the EVM inside an ``eth_call`` with ``to=None`` (contract-creation call,
+    never lands on-chain).  It computes the DataStore keys on-chain, reads
+    ``getInt`` for each market, and returns all values as ``int256[]``.
 
-    :param multicall_contract: Web3 contract instance for Multicall3.
-    :param datastore_contract: Web3 contract instance for DataStore.
-    :param market_keys: Dict of market address → pre-computed 32-byte key.
+    :param w3: Web3 instance (any provider).
+    :param market_addresses: Market contract addresses to query.
     :param block_number: Block to query at.
-    :returns: Dict of market address → signed int256 value.
+    :returns: Dict of market address → signed int256 value (0 on failure).
     """
-    ds_checksum = Web3.to_checksum_address(DATASTORE_ADDRESS)
-    market_addrs = list(market_keys.keys())
-
-    # Build multicall3 calls: each is (target, allowFailure, callData)
-    calls = []
-    for addr in market_addrs:
-        calldata = datastore_contract.encode_abi("getInt", [market_keys[addr]])
-        calls.append((ds_checksum, True, bytes.fromhex(calldata[2:])))
-
-    # Single RPC call for all markets at this block
-    results = multicall_contract.functions.aggregate3(calls).call(
-        block_identifier=block_number
+    calldata = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(
+        ["address[]"],
+        [[Web3.to_checksum_address(a) for a in market_addresses]],
     )
-
-    # Decode results
-    market_values = {}
-    for i, result in enumerate(results):
-        success = result[0]
-        return_data = result[1]
-        if success and len(return_data) >= 32:
-            value = abi_decode(["int256"], return_data)[0]
-            market_values[market_addrs[i]] = value
-        else:
-            market_values[market_addrs[i]] = 0
-
-    return market_values
+    result = w3.eth.call({"data": calldata}, block_identifier=block_number)
+    values: tuple[int, ...] = abi_decode(["int256[]"], result)[0]
+    return dict(zip(market_addresses, values))
 
 
 @dataclass
@@ -358,32 +307,23 @@ class FundingDatastoreRecord:
 # =============================================================================
 
 
-def get_rpc_url() -> str:
-    """Get the first valid RPC URL from the environment.
+def get_rpc_config() -> str:
+    """Return the full RPC configuration string from the environment.
 
-    :returns: RPC URL string.
-    :raises ValueError: If no RPC URL is found.
+    Supports one or more space-separated archive node URLs — e.g.:
+    ``JSON_RPC_ARBITRUM="https://rpc1.example.com https://rpc2.example.com"``
+
+    :returns: Raw configuration string for :func:`create_multi_provider_web3`.
+    :raises ValueError: If no RPC URL is configured.
     """
     rpc_raw = os.environ.get("JSON_RPC_ARBITRUM") or os.environ.get(
         "ARBITRUM_CHAIN_JSON_RPC", ""
     )
     if not rpc_raw.strip():
         raise ValueError(
-            "Set JSON_RPC_ARBITRUM or ARBITRUM_CHAIN_JSON_RPC to an archive node URL"
+            "Set JSON_RPC_ARBITRUM to one or more archive node URLs (space-separated)"
         )
-    # Handle space-separated URLs (take the first one)
-    return rpc_raw.strip().split()[0]
-
-
-def get_block_timestamp(w3: Web3, block_number: int) -> int:
-    """Get the timestamp for a block.
-
-    :param w3: Web3 instance.
-    :param block_number: Block number.
-    :returns: Unix timestamp.
-    """
-    block = w3.eth.get_block(block_number)
-    return block["timestamp"]
+    return rpc_raw.strip()
 
 
 # =============================================================================
@@ -393,52 +333,54 @@ def get_block_timestamp(w3: Web3, block_number: int) -> int:
 
 def extract_funding_rates(
     w3: Web3,
+    rpc_config: str,
     from_block: int,
     to_block: int,
     markets: dict[str, dict],
     interval_blocks: int = BLOCKS_PER_HOUR,
     market_filter: Optional[str] = None,
-    workers: int = 1,
     checkpoint_dir: Optional[Path] = None,
     checkpoint_interval: int = 500,
 ) -> list[FundingDatastoreRecord]:
-    """Extract historical funding rates using Multicall3-batched DataStore reads.
+    """Extract historical funding rates via fully-batched JSON-RPC requests.
 
-    Uses Multicall3 to read all markets in a single RPC call per block,
-    reducing N individual ``getInt`` calls to 1 ``aggregate3`` call.
-    Optionally uses ThreadPoolExecutor for parallel block processing.
+    Three-phase approach — all I/O is batched upfront, record construction
+    is pure CPU:
 
-    :param w3: Web3 instance connected to archive node.
+    1. **Timestamp batch**: ``eth_getBlockByNumber`` for all sample blocks
+       in groups of 200, reducing N round-trips to ``ceil(N/200)``.
+    2. **DataStore batch**: ``eth_call`` with ``GMXFundingRateBatchRequest``
+       bytecode for all sample blocks in groups of 100, reducing N round-trips
+       to ``ceil(N/100)``.  All market keys computed on-chain; no pre-computation
+       needed.
+    3. **Record construction**: pure CPU loop over pre-fetched data — no RPC.
+
+    Total HTTP requests: ``ceil(N/200) + ceil(N/100)`` ≈ 255 for a full run
+    (vs. ~17,000 sequential calls in the old approach).
+
+    :param w3: Web3 instance (used only for ``is_connected()`` check).
+    :param rpc_config: Space-separated RPC URL(s); round-robin across providers.
     :param from_block: Starting block number.
     :param to_block: Ending block number.
     :param markets: Market address → info dict.
     :param interval_blocks: Block interval between samples (default: ~1 hour).
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
-    :param workers: Number of concurrent workers (default: 1).
     :param checkpoint_dir: Optional directory for periodic checkpoint saves.
     :param checkpoint_interval: Save checkpoint every N sample blocks.
     :returns: List of :class:`FundingDatastoreRecord` objects.
     """
-    ds = w3.eth.contract(
-        address=Web3.to_checksum_address(DATASTORE_ADDRESS),
-        abi=DATASTORE_ABI,
-    )
-    mc = w3.eth.contract(
-        address=Web3.to_checksum_address(MULTICALL3_ADDRESS),
-        abi=MULTICALL3_ABI,
-    )
-
-    # Filter markets
+    # Filter markets: exclude swap-only (no index token) and deprecated (isListed=False)
     target_markets = {}
     for addr, info in markets.items():
         if info.get("indexToken") is None:
+            continue
+        if not info.get("isListed", True):
             continue
         if market_filter and info.get("symbol") != market_filter:
             continue
         target_markets[addr] = info
 
-    # Pre-compute DataStore keys
-    market_keys = {addr: build_market_key(addr) for addr in target_markets}
+    market_addrs = list(target_markets.keys())
 
     # Generate sample blocks
     sample_blocks = list(range(from_block, to_block + 1, interval_blocks))
@@ -448,29 +390,36 @@ def extract_funding_rates(
     console.print(f"  Block range:   {from_block:,} → {to_block:,}")
     console.print(f"  Interval:      {interval_blocks} blocks (~{interval_blocks / BLOCKS_PER_HOUR:.1f}h)")
     console.print(f"  Sample points: {total_samples:,}")
-    console.print(f"  RPC calls:     ~{total_samples * 2:,} (Multicall3 batched, {len(target_markets)} markets/call)")
-    if workers > 1:
-        console.print(f"  Workers:       {workers}")
+    ts_batches = (total_samples + 199) // 200
+    ds_batches = (total_samples + 149) // 150
+    console.print(f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total")
 
+    # --- Phase 1: batch-fetch all block timestamps upfront ---
+    console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 200...")
+    t_ts = time.monotonic()
+    block_timestamps = prefetch_block_timestamps(rpc_config, sample_blocks)
+    console.print(f"  Timestamps ready in {time.monotonic() - t_ts:.1f}s")
+
+    # --- Phase 2: batch-fetch all DataStore values upfront ---
+    console.print(f"\n  Batch-fetching DataStore values for {total_samples:,} blocks in batches of 100...")
+    t_ds = time.monotonic()
+    block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, sample_blocks)
+    console.print(f"  DataStore reads ready in {time.monotonic() - t_ds:.1f}s")
+
+    # --- Phase 3: build records (pure CPU — no more RPC calls) ---
     records: list[FundingDatastoreRecord] = []
-    errors = 0
     t_start = time.monotonic()
 
-    def process_block(block_num: int) -> list[FundingDatastoreRecord]:
-        """Process a single block: fetch timestamp + multicall all markets."""
-        ts = w3.eth.get_block(block_num)["timestamp"]
+    for i, block_num in enumerate(sample_blocks):
+        ts = block_timestamps.get(block_num, 0)
         dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-
-        # Multicall: read ALL markets in ONE RPC call
-        market_values = read_all_markets_multicall(mc, ds, market_keys, block_num)
-
-        block_records = []
+        market_values = block_funding.get(block_num, {})
         for addr, value in market_values.items():
             if value == 0:
                 continue
             rate = value / FUNDING_FACTOR_PRECISION
-            sym = market_symbol(addr)
-            block_records.append(FundingDatastoreRecord(
+            sym = market_symbol(addr, markets)
+            records.append(FundingDatastoreRecord(
                 symbol=sym,
                 market=addr.lower(),
                 funding_factor_per_second=str(value),
@@ -480,101 +429,16 @@ def extract_funding_rates(
                 block_timestamp=ts,
                 block_datetime=dt_str,
             ))
-        return block_records
+        if checkpoint_dir and (i + 1) % checkpoint_interval == 0:
+            save_checkpoint(checkpoint_dir, block_num, len(records))
 
-    # Setup progress bar
-    try:
-        progress_ctx = Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(bar_width=40),
-            TextColumn("[progress.percentage]{task.percentage:>3.1f}%"),
-            TextColumn("[cyan]{task.fields[blocks]:,}[/cyan] blocks"),
-            TextColumn("[green]{task.fields[records]:,}[/green] records"),
-            TextColumn("[yellow]{task.fields[rate]:.1f}[/yellow] blk/s"),
-            TextColumn("[red]{task.fields[errors]}[/red] err"),
-            TimeElapsedColumn(),
-            console=console,
-            transient=False,
-        )
-    except Exception:
-        progress_ctx = None
-
-    def update_progress(progress, task_id, completed):
-        """Update progress bar if available."""
-        elapsed = time.monotonic() - t_start
-        rate = completed / max(1, elapsed)
-        if progress:
-            progress.update(
-                task_id, completed=completed,
-                blocks=completed, records=len(records),
-                rate=rate, errors=errors,
-            )
-        elif completed % 100 == 0:
-            console.print(
-                f"  [{completed/total_samples*100:.1f}%] "
-                f"{len(records):,} records | {rate:.1f} blk/s"
-            )
-
-    def run_extraction(progress=None, task_id=None):
-        """Core extraction loop, works with or without progress bar."""
-        nonlocal errors
-
-        if workers <= 1:
-            # Sequential processing
-            for i, block_num in enumerate(sample_blocks):
-                try:
-                    block_records = process_block(block_num)
-                    records.extend(block_records)
-                except Exception as e:
-                    errors += 1
-                    if errors <= 10:
-                        console.print(f"  [yellow]Block {block_num}: {e}[/yellow]")
-                update_progress(progress, task_id, i + 1)
-                if checkpoint_dir and (i + 1) % checkpoint_interval == 0:
-                    save_checkpoint(checkpoint_dir, block_num, len(records))
-        else:
-            # Parallel processing
-            completed = 0
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                futures = {
-                    executor.submit(process_block, bn): bn
-                    for bn in sample_blocks
-                }
-                for future in as_completed(futures):
-                    block_num = futures[future]
-                    completed += 1
-                    try:
-                        block_records = future.result()
-                        records.extend(block_records)
-                    except Exception as e:
-                        errors += 1
-                        if errors <= 10:
-                            console.print(f"  [yellow]Block {block_num}: {e}[/yellow]")
-                    update_progress(progress, task_id, completed)
-                    if checkpoint_dir and completed % checkpoint_interval == 0:
-                        save_checkpoint(checkpoint_dir, block_num, len(records))
-
-    if progress_ctx is not None:
-        with progress_ctx as progress:
-            task_id = progress.add_task(
-                "Reading DataStore", total=total_samples,
-                blocks=0, records=0, rate=0.0, errors=0,
-            )
-            run_extraction(progress, task_id)
-    else:
-        run_extraction()
-
-    # Sort records by block number (important for parallel execution)
     records.sort(key=lambda r: (r.block_number, r.symbol))
 
     elapsed = time.monotonic() - t_start
     console.print(
-        f"\n  Extraction complete in {elapsed:.1f}s: "
+        f"\n  Extraction complete in {time.monotonic() - t_ts:.1f}s total: "
         f"{len(records):,} non-zero readings from {total_samples:,} sampled blocks"
     )
-    if errors:
-        console.print(f"  [yellow]Errors: {errors:,}[/yellow]")
 
     return records
 
@@ -795,12 +659,6 @@ def main():
         help=f"Sampling interval in blocks (default: {BLOCKS_PER_HOUR})",
     )
     parser.add_argument(
-        "--workers",
-        type=int,
-        default=1,
-        help="Number of concurrent workers for parallel block processing (default: 1)",
-    )
-    parser.add_argument(
         "--resume",
         action="store_true",
         help="Resume from last checkpoint",
@@ -810,16 +668,23 @@ def main():
         action="store_true",
         help="List available markets and exit",
     )
+    parser.add_argument(
+        "--refresh-markets",
+        action="store_true",
+        help="Force re-fetch of GMX market registry (ignores 24h disk cache)",
+    )
 
     args = parser.parse_args()
+
+    markets = fetch_markets("arbitrum", force_refresh=args.refresh_markets)
 
     if args.list_markets:
         console.print(f"\n{'Symbol':<30} {'Market Address':<44}")
         console.print("-" * 74)
-        for addr, info in sorted(MARKETS.items(), key=lambda x: x[1]["symbol"]):
+        for addr, info in sorted(markets.items(), key=lambda x: x[1]["symbol"]):
             if info.get("indexToken"):
                 console.print(f"{info['symbol']:<30} {addr}")
-        console.print(f"\nTotal: {sum(1 for v in MARKETS.values() if v.get('indexToken'))} perpetual markets")
+        console.print(f"\nTotal: {sum(1 for v in markets.values() if v.get('indexToken'))} perpetual markets")
         sys.exit(0)
 
     output_dir = Path(args.output_dir)
@@ -837,24 +702,31 @@ def main():
     console.print("GMX V2 FUNDING RATE BACKFILL (DataStore Archive Reads)")
     console.print("=" * 70)
 
-    # Connect to archive node
-    rpc_url = get_rpc_url()
-    console.print(f"  RPC: {rpc_url[:50]}...")
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 60}))
+    # Connect to archive node(s)
+    rpc_config = get_rpc_config()
+    provider_urls = [u for u in rpc_config.split() if not u.startswith("mev+")]
+    console.print(f"  RPC providers: {len(provider_urls)}")
+    for url in provider_urls:
+        console.print(f"    {url[:60]}...")
+    w3 = create_multi_provider_web3(
+        rpc_config,
+        default_http_timeout=(3.0, 60.0),
+        retries=6,
+    )
     if not w3.is_connected():
-        console.print("[red]ERROR: Cannot connect to RPC[/red]")
+        console.print("[red]ERROR: Cannot connect to any RPC provider[/red]")
         sys.exit(1)
     console.print(f"  Connected. Latest block: {w3.eth.block_number:,}")
 
     # Extract
     records = extract_funding_rates(
         w3=w3,
+        rpc_config=rpc_config,
         from_block=from_block,
         to_block=args.to_block,
-        markets=MARKETS,
+        markets=markets,
         interval_blocks=args.interval,
         market_filter=args.market,
-        workers=args.workers,
         checkpoint_dir=checkpoint_dir,
     )
 

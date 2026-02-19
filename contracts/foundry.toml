@@ -1,0 +1,5 @@
+[profile.default]
+src = "."
+out = "out"
+libs = []
+evm_version = "paris"  # No PUSH0 — Arbitrum blocks pre-ArbOS20 (~block 174M) don't support Shanghai opcodes
