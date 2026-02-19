@@ -10,15 +10,14 @@ Reference: https://docs.chain.link/data-feeds/api-reference
 """
 
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Callable
 from dataclasses import dataclass
 
-import requests
-from web3 import Web3
-from web3.exceptions import ContractLogicError, BadFunctionCallOutput
-from rich.console import Console
 from eth_defi.provider.multi_provider import create_multi_provider_web3
+from rich.console import Console
+from web3 import Web3
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 
 console = Console()
 
@@ -152,7 +151,7 @@ class ChainlinkRPCCollector:
         },
     ]
 
-    def __init__(self, web3: Optional[Web3] = None, rpc_config: Optional[str] = None):
+    def __init__(self, web3: Web3 | None = None, rpc_config: str | None = None):
         """Initialize RPC collector with optional multi-provider support.
 
         :param web3: Web3 instance (backward compatibility)
@@ -162,14 +161,22 @@ class ChainlinkRPCCollector:
         if rpc_config:
             # Use multi-provider with space-separated URLs
             self.web3 = create_multi_provider_web3(rpc_config)
-            provider_count = len(self.web3.get_fallback_provider().providers) if hasattr(self.web3.get_fallback_provider(), 'providers') else 1
-            console.print(f"  [green]Chainlink collector: {provider_count} RPC provider(s) with automatic failover[/green]")
+            provider_count = (
+                len(self.web3.get_fallback_provider().providers)
+                if hasattr(self.web3.get_fallback_provider(), "providers")
+                else 1
+            )
+            console.print(
+                f"  [green]Chainlink collector: {provider_count} RPC provider(s) with automatic failover[/green]"
+            )
             self.rpc_url = rpc_config.split()[0]  # First URL as primary
         elif web3:
             # Use provided Web3 instance (backward compatibility)
             self.web3 = web3
             self.rpc_url = web3.provider.endpoint_uri
-            console.print("  [yellow]Chainlink collector: Single RPC provider (no automatic failover)[/yellow]")
+            console.print(
+                "  [yellow]Chainlink collector: Single RPC provider (no automatic failover)[/yellow]"
+            )
         else:
             raise ValueError("Either web3 or rpc_config must be provided")
 
@@ -178,9 +185,7 @@ class ChainlinkRPCCollector:
         self._batch_size_reduced = False  # Track if we've had to reduce batch size
         self._consecutive_failures = 0  # Track consecutive batch failures
 
-    def _call_with_retry(
-        self, contract_function, max_retries: int = 3, backoff: float = 1.0
-    ):
+    def _call_with_retry(self, contract_function, max_retries: int = 3, backoff: float = 1.0):
         """Call contract function with retry logic.
 
         :param contract_function: Web3 contract function to call
@@ -207,7 +212,7 @@ class ChainlinkRPCCollector:
 
         raise last_error
 
-    def get_latest_round(self, aggregator_address: str) -> Optional[ChainlinkRound]:
+    def get_latest_round(self, aggregator_address: str) -> ChainlinkRound | None:
         """Get latest round data from aggregator.
 
         :param aggregator_address: Aggregator contract address
@@ -219,8 +224,8 @@ class ChainlinkRPCCollector:
                 address=aggregator_address, abi=self.AGGREGATOR_V3_ABI
             )
 
-            round_id, answer, started_at, updated_at, answered_in_round = (
-                self._call_with_retry(contract.functions.latestRoundData())
+            round_id, answer, started_at, updated_at, answered_in_round = self._call_with_retry(
+                contract.functions.latestRoundData()
             )
 
             return ChainlinkRound(
@@ -234,9 +239,7 @@ class ChainlinkRPCCollector:
             console.print(f"  [red]✗ Failed to get latest round: {e}[/red]")
             return None
 
-    def get_round_data(
-        self, aggregator_address: str, round_id: int
-    ) -> Optional[ChainlinkRound]:
+    def get_round_data(self, aggregator_address: str, round_id: int) -> ChainlinkRound | None:
         """Get specific round data from aggregator.
 
         :param aggregator_address: Aggregator contract address
@@ -269,7 +272,7 @@ class ChainlinkRPCCollector:
 
     def get_rounds_batch(
         self, feed_address: str, round_ids: list[int]
-    ) -> list[Optional[ChainlinkRound]]:
+    ) -> list[ChainlinkRound | None]:
         """Get multiple rounds using Multicall3 aggregation.
 
         Uses Multicall3 contract to aggregate getRoundData() calls (V3 interface)
@@ -302,9 +305,7 @@ class ChainlinkRPCCollector:
         feed_address = Web3.to_checksum_address(feed_address)
 
         # Create contract instances - use V3 ABI with getRoundData
-        feed_contract = self.web3.eth.contract(
-            address=feed_address, abi=self.AGGREGATOR_V3_ABI
-        )
+        feed_contract = self.web3.eth.contract(address=feed_address, abi=self.AGGREGATOR_V3_ABI)
         multicall3_contract = self.web3.eth.contract(
             address=self.MULTICALL3_ADDRESS, abi=self.MULTICALL3_ABI
         )
@@ -314,11 +315,13 @@ class ChainlinkRPCCollector:
         for round_id in round_ids:
             # getRoundData returns (roundId, answer, startedAt, updatedAt, answeredInRound)
             round_data = feed_contract.encode_abi("getRoundData", [round_id])
-            multicall_calls.append({
-                "target": feed_address,
-                "allowFailure": True,  # Don't revert entire batch if one call fails
-                "callData": round_data,
-            })
+            multicall_calls.append(
+                {
+                    "target": feed_address,
+                    "allowFailure": True,  # Don't revert entire batch if one call fails
+                    "callData": round_data,
+                }
+            )
 
         # Execute Multicall3.aggregate3 with retry logic and 413 handling
         max_retries = 3
@@ -336,7 +339,11 @@ class ChainlinkRPCCollector:
                 error_str = str(e)
 
                 # Check for 413 Payload Too Large error
-                if "413" in error_str or "Payload Too Large" in error_str or "request entity too large" in error_str.lower():
+                if (
+                    "413" in error_str
+                    or "Payload Too Large" in error_str
+                    or "request entity too large" in error_str.lower()
+                ):
                     # Reduce optimal batch size
                     new_batch_size = max(500, len(round_ids) // 2)
 
@@ -367,7 +374,7 @@ class ChainlinkRPCCollector:
                 self._consecutive_failures += 1
 
                 if attempt < max_retries - 1:
-                    wait_time = backoff * (2 ** attempt)
+                    wait_time = backoff * (2**attempt)
                     console.print(
                         f"  [yellow]⚠ Multicall3 attempt {attempt + 1}/{max_retries} failed: {e}[/yellow]"
                     )
@@ -398,15 +405,23 @@ class ChainlinkRPCCollector:
                     # Total: 5 * 32 = 160 bytes
                     if len(return_data) >= 160:
                         # roundId: uint80 (first 32 bytes, last 10 bytes significant)
-                        result_round_id = int.from_bytes(return_data[0:32], byteorder="big", signed=False)
+                        result_round_id = int.from_bytes(
+                            return_data[0:32], byteorder="big", signed=False
+                        )
                         # answer: int256 (bytes 32-64)
                         answer = int.from_bytes(return_data[32:64], byteorder="big", signed=True)
                         # startedAt: uint256 (bytes 64-96)
-                        started_at = int.from_bytes(return_data[64:96], byteorder="big", signed=False)
+                        started_at = int.from_bytes(
+                            return_data[64:96], byteorder="big", signed=False
+                        )
                         # updatedAt: uint256 (bytes 96-128)
-                        updated_at = int.from_bytes(return_data[96:128], byteorder="big", signed=False)
+                        updated_at = int.from_bytes(
+                            return_data[96:128], byteorder="big", signed=False
+                        )
                         # answeredInRound: uint80 (bytes 128-160)
-                        answered_in_round = int.from_bytes(return_data[128:160], byteorder="big", signed=False)
+                        answered_in_round = int.from_bytes(
+                            return_data[128:160], byteorder="big", signed=False
+                        )
 
                         rounds.append(
                             ChainlinkRound(
@@ -431,10 +446,14 @@ class ChainlinkRPCCollector:
                         try:
                             # Decode error message (skip selector + offset)
                             msg_len = int.from_bytes(return_data[36:68], byteorder="big")
-                            error_msg = return_data[68:68+msg_len].decode("utf-8", errors="ignore")
+                            error_msg = return_data[68 : 68 + msg_len].decode(
+                                "utf-8", errors="ignore"
+                            )
                             # Only log first failure to avoid spam
                             if i == 0:
-                                console.print(f"  [dim]Debug: Round {round_id} failed: {error_msg}[/dim]")
+                                console.print(
+                                    f"  [dim]Debug: Round {round_id} failed: {error_msg}[/dim]"
+                                )
                         except Exception:
                             pass
                 rounds.append(None)
@@ -444,12 +463,12 @@ class ChainlinkRPCCollector:
     def collect_historical_rounds(
         self,
         feed_address: str,
-        start_timestamp: Optional[int] = None,
-        end_timestamp: Optional[int] = None,
+        start_timestamp: int | None = None,
+        end_timestamp: int | None = None,
         max_rounds: int = 1000000,
         batch_size: int = 1500,
         concurrency: int = 4,
-        progress_callback: Optional[Callable[[str], None]] = None,
+        progress_callback: Callable[[str], None] | None = None,
     ) -> list[ChainlinkRound]:
         """Collect historical rounds via RPC using Multicall3 aggregation.
 
@@ -521,7 +540,9 @@ class ChainlinkRPCCollector:
             total_rounds = max_rounds
 
         # Create round IDs to fetch
-        round_ids = list(range(start_round_id, min(start_round_id + total_rounds, end_round_id + 1)))
+        round_ids = list(
+            range(start_round_id, min(start_round_id + total_rounds, end_round_id + 1))
+        )
 
         num_batches = (len(round_ids) + batch_size - 1) // batch_size
         console.print(
@@ -609,7 +630,9 @@ class ChainlinkRPCCollector:
         # First round in current phase
         first_in_phase = (phase_id << 64) + 1
 
-        console.print(f"  [dim]Phase ID: {phase_id}, first round in phase: {first_in_phase:,}[/dim]")
+        console.print(
+            f"  [dim]Phase ID: {phase_id}, first round in phase: {first_in_phase:,}[/dim]"
+        )
 
         # Binary search within current phase
         low, high = first_in_phase, latest_round_id

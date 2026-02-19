@@ -30,6 +30,24 @@ gmx-periodic-collector = "gmx_historical_data.daemon.periodic_collector:main"
 requires = ["poetry-core>=2.0.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP"]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "UP007",  # use X | Y instead of Optional — too noisy for existing code
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gmx_historical_data"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
 [dependency-groups]
 dev = [
     "ruff (>=0.14.14,<0.15.0)",

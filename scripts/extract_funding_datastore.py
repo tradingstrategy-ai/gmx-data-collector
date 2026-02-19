@@ -42,16 +42,16 @@ import os
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import requests
 from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
 from eth_defi.provider.multi_provider import create_multi_provider_web3
-from gmx_historical_data.market_registry import fetch_markets, market_symbol
 from web3 import Web3
+
+from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 try:
     import polars as pl
@@ -62,13 +62,6 @@ except ImportError:
 
 try:
     from rich.console import Console
-    from rich.progress import (
-        BarColumn,
-        Progress,
-        SpinnerColumn,
-        TextColumn,
-        TimeElapsedColumn,
-    )
 
     console = Console()
 except ImportError:
@@ -111,8 +104,6 @@ FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b506040516106833803
 # =============================================================================
 # DATA CLASSES & HELPERS
 # =============================================================================
-
-
 
 
 def prefetch_block_timestamps(
@@ -166,10 +157,7 @@ def prefetch_block_timestamps(
                 timestamps[bn] = ts
         fetched += len(chunk)
         if fetched % 2000 == 0 or fetched == total:
-            console.print(
-                f"  Timestamps: {fetched:,}/{total:,} "
-                f"({fetched/total*100:.0f}%)"
-            )
+            console.print(f"  Timestamps: {fetched:,}/{total:,} ({fetched / total * 100:.0f}%)")
 
     return timestamps
 
@@ -178,7 +166,7 @@ def batch_fetch_funding_rates(
     rpc_config: str,
     market_addresses: list[str],
     block_numbers: list[int],
-    batch_size: int = 150,
+    batch_size: int = 130,
     timeout: int = 120,
 ) -> dict[int, dict[str, int]]:
     """Batch-fetch ``savedFundingFactorPerSecond`` for all markets across many blocks.
@@ -192,7 +180,7 @@ def batch_fetch_funding_rates(
         are stripped of that prefix.
     :param market_addresses: Market contract addresses to query.
     :param block_numbers: Ordered list of block numbers to query.
-    :param batch_size: ``eth_call`` requests per HTTP batch (default: 150).
+    :param batch_size: ``eth_call`` requests per HTTP batch (default: 130).
     :param timeout: Per-request timeout in seconds (default: 120).
     :returns: Dict mapping block number → {market address → int256 value}.
     """
@@ -244,8 +232,7 @@ def batch_fetch_funding_rates(
         if fetched % 2000 == 0 or fetched == total:
             console.print(
                 f"  DataStore reads: {fetched:,}/{total:,} "
-                f"({fetched/total*100:.0f}%)"
-                + (f" [{errors} decode errors]" if errors else "")
+                f"({fetched / total * 100:.0f}%)" + (f" [{errors} decode errors]" if errors else "")
             )
 
     return results
@@ -316,13 +303,9 @@ def get_rpc_config() -> str:
     :returns: Raw configuration string for :func:`create_multi_provider_web3`.
     :raises ValueError: If no RPC URL is configured.
     """
-    rpc_raw = os.environ.get("JSON_RPC_ARBITRUM") or os.environ.get(
-        "ARBITRUM_CHAIN_JSON_RPC", ""
-    )
+    rpc_raw = os.environ.get("JSON_RPC_ARBITRUM") or os.environ.get("ARBITRUM_CHAIN_JSON_RPC", "")
     if not rpc_raw.strip():
-        raise ValueError(
-            "Set JSON_RPC_ARBITRUM to one or more archive node URLs (space-separated)"
-        )
+        raise ValueError("Set JSON_RPC_ARBITRUM to one or more archive node URLs (space-separated)")
     return rpc_raw.strip()
 
 
@@ -338,8 +321,8 @@ def extract_funding_rates(
     to_block: int,
     markets: dict[str, dict],
     interval_blocks: int = BLOCKS_PER_HOUR,
-    market_filter: Optional[str] = None,
-    checkpoint_dir: Optional[Path] = None,
+    market_filter: str | None = None,
+    checkpoint_dir: Path | None = None,
     checkpoint_interval: int = 500,
 ) -> list[FundingDatastoreRecord]:
     """Extract historical funding rates via fully-batched JSON-RPC requests.
@@ -350,12 +333,12 @@ def extract_funding_rates(
     1. **Timestamp batch**: ``eth_getBlockByNumber`` for all sample blocks
        in groups of 200, reducing N round-trips to ``ceil(N/200)``.
     2. **DataStore batch**: ``eth_call`` with ``GMXFundingRateBatchRequest``
-       bytecode for all sample blocks in groups of 100, reducing N round-trips
-       to ``ceil(N/100)``.  All market keys computed on-chain; no pre-computation
+       bytecode for all sample blocks in groups of 130, reducing N round-trips
+       to ``ceil(N/130)``.  All market keys computed on-chain; no pre-computation
        needed.
     3. **Record construction**: pure CPU loop over pre-fetched data — no RPC.
 
-    Total HTTP requests: ``ceil(N/200) + ceil(N/100)`` ≈ 255 for a full run
+    Total HTTP requests: ``ceil(N/200) + ceil(N/130)`` ≈ 221 for a full run
     (vs. ~17,000 sequential calls in the old approach).
 
     :param w3: Web3 instance (used only for ``is_connected()`` check).
@@ -388,11 +371,15 @@ def extract_funding_rates(
 
     console.print(f"\n  Markets:       {len(target_markets)}")
     console.print(f"  Block range:   {from_block:,} → {to_block:,}")
-    console.print(f"  Interval:      {interval_blocks} blocks (~{interval_blocks / BLOCKS_PER_HOUR:.1f}h)")
+    console.print(
+        f"  Interval:      {interval_blocks} blocks (~{interval_blocks / BLOCKS_PER_HOUR:.1f}h)"
+    )
     console.print(f"  Sample points: {total_samples:,}")
     ts_batches = (total_samples + 199) // 200
-    ds_batches = (total_samples + 149) // 150
-    console.print(f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total")
+    ds_batches = (total_samples + 129) // 130
+    console.print(
+        f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total"
+    )
 
     # --- Phase 1: batch-fetch all block timestamps upfront ---
     console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 200...")
@@ -401,40 +388,42 @@ def extract_funding_rates(
     console.print(f"  Timestamps ready in {time.monotonic() - t_ts:.1f}s")
 
     # --- Phase 2: batch-fetch all DataStore values upfront ---
-    console.print(f"\n  Batch-fetching DataStore values for {total_samples:,} blocks in batches of 100...")
+    console.print(
+        f"\n  Batch-fetching DataStore values for {total_samples:,} blocks in batches of 130..."
+    )
     t_ds = time.monotonic()
     block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, sample_blocks)
     console.print(f"  DataStore reads ready in {time.monotonic() - t_ds:.1f}s")
 
     # --- Phase 3: build records (pure CPU — no more RPC calls) ---
     records: list[FundingDatastoreRecord] = []
-    t_start = time.monotonic()
 
     for i, block_num in enumerate(sample_blocks):
         ts = block_timestamps.get(block_num, 0)
-        dt_str = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
         market_values = block_funding.get(block_num, {})
         for addr, value in market_values.items():
             if value == 0:
                 continue
             rate = value / FUNDING_FACTOR_PRECISION
             sym = market_symbol(addr, markets)
-            records.append(FundingDatastoreRecord(
-                symbol=sym,
-                market=addr.lower(),
-                funding_factor_per_second=str(value),
-                funding_rate_per_second=rate,
-                longs_pay_shorts=(value > 0),
-                block_number=block_num,
-                block_timestamp=ts,
-                block_datetime=dt_str,
-            ))
+            records.append(
+                FundingDatastoreRecord(
+                    symbol=sym,
+                    market=addr.lower(),
+                    funding_factor_per_second=str(value),
+                    funding_rate_per_second=rate,
+                    longs_pay_shorts=(value > 0),
+                    block_number=block_num,
+                    block_timestamp=ts,
+                    block_datetime=dt_str,
+                )
+            )
         if checkpoint_dir and (i + 1) % checkpoint_interval == 0:
             save_checkpoint(checkpoint_dir, block_num, len(records))
 
     records.sort(key=lambda r: (r.block_number, r.symbol))
 
-    elapsed = time.monotonic() - t_start
     console.print(
         f"\n  Extraction complete in {time.monotonic() - t_ts:.1f}s total: "
         f"{len(records):,} non-zero readings from {total_samples:,} sampled blocks"
@@ -513,20 +502,22 @@ def aggregate_hourly_rates(
     result = {}
     for symbol in hourly["symbol"].unique().sort().to_list():
         sym_df = hourly.filter(pl.col("symbol") == symbol)
-        sym_df = sym_df.select([
-            "timestamp",
-            "funding_rate",
-            "funding_rate_min",
-            "funding_rate_max",
-            "funding_rate_hourly",
-            "funding_rate_annualized",
-            "longs_pay_shorts",
-            "funding_fee_long",
-            "funding_fee_short",
-            "update_count",
-            "symbol",
-            "market",
-        ]).cast({"update_count": pl.UInt32})
+        sym_df = sym_df.select(
+            [
+                "timestamp",
+                "funding_rate",
+                "funding_rate_min",
+                "funding_rate_max",
+                "funding_rate_hourly",
+                "funding_rate_annualized",
+                "longs_pay_shorts",
+                "funding_fee_long",
+                "funding_fee_short",
+                "update_count",
+                "symbol",
+                "market",
+            ]
+        ).cast({"update_count": pl.UInt32})
         result[symbol] = sym_df
 
     return result
@@ -580,7 +571,7 @@ def save_json(records: list[FundingDatastoreRecord], output_dir: Path) -> None:
 # =============================================================================
 
 
-def load_checkpoint(checkpoint_dir: Path) -> Optional[int]:
+def load_checkpoint(checkpoint_dir: Path) -> int | None:
     """Load the last processed block from checkpoint file.
 
     :param checkpoint_dir: Directory containing checkpoint file.
@@ -606,7 +597,7 @@ def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -
     data = {
         "last_block": last_block,
         "total_records": total_records,
-        "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+        "updated_at": datetime.now(tz=UTC).isoformat(),
     }
     with open(filepath, "w") as f:
         json.dump(data, f, indent=2)
@@ -684,7 +675,9 @@ def main():
         for addr, info in sorted(markets.items(), key=lambda x: x[1]["symbol"]):
             if info.get("indexToken"):
                 console.print(f"{info['symbol']:<30} {addr}")
-        console.print(f"\nTotal: {sum(1 for v in markets.values() if v.get('indexToken'))} perpetual markets")
+        console.print(
+            f"\nTotal: {sum(1 for v in markets.values() if v.get('indexToken'))} perpetual markets"
+        )
         sys.exit(0)
 
     output_dir = Path(args.output_dir)
@@ -749,13 +742,13 @@ def main():
     # Summary
     symbols = set(r.symbol for r in records)
     timestamps = [r.block_timestamp for r in records]
-    first = datetime.fromtimestamp(min(timestamps), tz=timezone.utc)
-    last = datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
+    first = datetime.fromtimestamp(min(timestamps), tz=UTC)
+    last = datetime.fromtimestamp(max(timestamps), tz=UTC)
 
     console.print(f"\n  Symbols:    {len(symbols)}")
     console.print(f"  Time range: {first.date()} → {last.date()}")
     console.print(f"  Records:    {len(records):,}")
-    console.print(f"\n  Done!")
+    console.print("\n  Done!")
 
 
 if __name__ == "__main__":

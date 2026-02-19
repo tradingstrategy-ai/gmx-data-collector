@@ -4,8 +4,9 @@ This module fetches recent price data from GMX's official API and combines it
 with historical Chainlink oracle data to provide complete coverage.
 """
 
+from datetime import UTC, datetime
+
 import pandas as pd
-from datetime import datetime, timezone
 from eth_defi.gmx.api import GMXAPI
 
 
@@ -43,9 +44,9 @@ class GMXDataFetcher:
 
             # Convert to timezone-aware datetime
             if earliest.tzinfo is None:
-                earliest = earliest.replace(tzinfo=timezone.utc)
+                earliest = earliest.replace(tzinfo=UTC)
             if latest.tzinfo is None:
-                latest = latest.replace(tzinfo=timezone.utc)
+                latest = latest.replace(tzinfo=UTC)
 
             return earliest, latest
 
@@ -74,7 +75,7 @@ class GMXDataFetcher:
 
             # Ensure timezone-aware timestamps
             if df["timestamp"].dt.tz is None:
-                df["timestamp"] = df["timestamp"].dt.tz_localize(timezone.utc)
+                df["timestamp"] = df["timestamp"].dt.tz_localize(UTC)
 
             # Add symbol column for consistency with Chainlink data
             df["symbol"] = symbol

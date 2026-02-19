@@ -5,8 +5,8 @@ OHLCV data suitable for backtesting and analysis.
 """
 
 import pandas as pd
-from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
+from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
 #: GMX USD precision (30 decimals)
 GMX_USD_PRECISION = 10**30
@@ -34,9 +34,7 @@ def aggregate_events_to_ohlcv(
     """
     if not events:
         # Return empty DataFrame with correct schema
-        return pd.DataFrame(
-            columns=["timestamp", "open", "high", "low", "close", "symbol"]
-        )
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "symbol"])
 
     # Convert events to DataFrame
     if use_execution_price:

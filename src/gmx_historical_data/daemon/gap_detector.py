@@ -2,12 +2,10 @@
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 
-
 from gmx_historical_data.storage import ParquetStorage
-
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +122,7 @@ class GapDetector:
         existing_df = self.storage.read_candles(timeframe, symbol)
 
         # Current time as end of gap
-        fetch_end = datetime.now(timezone.utc)
+        fetch_end = datetime.now(UTC)
 
         if existing_df.empty:
             # No existing data - fetch all available from GMX API
@@ -135,7 +133,7 @@ class GapDetector:
 
         # Ensure latest_timestamp is timezone-aware
         if latest_timestamp.tzinfo is None:
-            latest_timestamp = latest_timestamp.replace(tzinfo=timezone.utc)
+            latest_timestamp = latest_timestamp.replace(tzinfo=UTC)
 
         # Calculate fetch start: latest + 1 interval
         interval_delta = self.TIMEFRAME_DELTAS.get(timeframe)
@@ -172,9 +170,7 @@ class GapDetector:
         # Gap exists if start < end
         return fetch_start < fetch_end
 
-    def get_gap_info(
-        self, symbol: str, timeframe: str
-    ) -> dict[str, datetime | None | int]:
+    def get_gap_info(self, symbol: str, timeframe: str) -> dict[str, datetime | None | int]:
         """Get detailed gap information.
 
         :param symbol: Token symbol
@@ -207,9 +203,7 @@ class GapDetector:
         return {
             "has_gap": True,
             "existing_candles": len(existing_df),
-            "latest_timestamp": (
-                existing_df["timestamp"].max() if not existing_df.empty else None
-            ),
+            "latest_timestamp": (existing_df["timestamp"].max() if not existing_df.empty else None),
             "fetch_start": fetch_start,
             "fetch_end": fetch_end,
             "estimated_missing_candles": estimated_missing,
@@ -296,7 +290,7 @@ class AdaptiveGapDetector:
         """
         from gmx_historical_data.gmx_api_integration import map_timeframe_to_gmx_period
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         interval_delta = self.TIMEFRAME_DELTAS.get(timeframe)
         if not interval_delta:
             raise ValueError(f"Unknown timeframe: {timeframe}")
@@ -308,13 +302,11 @@ class AdaptiveGapDetector:
         if not existing_df.empty:
             our_latest = existing_df["timestamp"].max()
             if our_latest.tzinfo is None:
-                our_latest = our_latest.replace(tzinfo=timezone.utc)
+                our_latest = our_latest.replace(tzinfo=UTC)
 
         # Step 2: Query GMX API for its data range
         gmx_period = map_timeframe_to_gmx_period(timeframe)
-        api_earliest, api_latest = self.gmx_fetcher.get_latest_data_range(
-            symbol, gmx_period
-        )
+        api_earliest, api_latest = self.gmx_fetcher.get_latest_data_range(symbol, gmx_period)
 
         # Handle API unavailable
         if api_earliest is None or api_latest is None:

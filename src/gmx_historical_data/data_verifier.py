@@ -1,7 +1,9 @@
 """Verify data collection completeness and quality."""
 
-import pandas as pd
 from dataclasses import dataclass
+
+import pandas as pd
+
 from gmx_historical_data.storage import ParquetStorage
 
 

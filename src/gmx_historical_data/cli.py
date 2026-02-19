@@ -1,59 +1,58 @@
 """Command-line interface for GMX historical data collection."""
 
 import asyncio
+import logging
+import traceback
 from collections import defaultdict
 from datetime import datetime
-import logging
 from pathlib import Path
-import traceback
-from typing import Optional
+
 import pandas as pd
 import typer
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich import box
 from web3 import Web3
 
-logger = logging.getLogger(__name__)
-
-console = Console()
-
+from gmx_historical_data.chainlink_feeds_complete import (
+    find_chainlink_symbol,
+    get_feed_address_for_gmx_symbol,
+)
+from gmx_historical_data.chainlink_rpc_collector import ChainlinkRPCCollector
+from gmx_historical_data.checkpoint import CheckpointManager
 from gmx_historical_data.config import (
+    GMX_V2_GENESIS_BLOCK,
+    TIMEFRAMES,
     CollectionConfig,
     FetchMode,
-    TIMEFRAMES,
-    GMX_V2_GENESIS_BLOCK,
     is_excluded_symbol,
 )
-from gmx_historical_data.gmx_event_collector import GMXEventCollector
-from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
-from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
-from gmx_historical_data.chainlink_feeds_complete import (
-    get_feed_address_for_gmx_symbol,
-    find_chainlink_symbol,
+from gmx_historical_data.daemon.config import (
+    get_gmx_markets_with_chainlink_feeds,
+    get_gmx_markets_without_chainlink_feeds,
 )
-from gmx_historical_data.aggregator_discovery import AggregatorDiscovery
-from gmx_historical_data.hypersync_collector import HyperSyncCollector
-from gmx_historical_data.chainlink_rpc_collector import ChainlinkRPCCollector
-from gmx_historical_data.storage import ParquetStorage
-from gmx_historical_data.checkpoint import CheckpointManager
-from gmx_historical_data.resampler import OHLCVResampler
+from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
+from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector
+from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
+from gmx_historical_data.fetch_boundary_calculator import FetchBoundaryCalculator
+from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 from gmx_historical_data.gmx_api_integration import (
     GMXDataFetcher,
     combine_gmx_and_chainlink_data,
     map_timeframe_to_gmx_period,
 )
+from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.gap_analyzer import DataGapAnalyzer
-from gmx_historical_data.daemon.config import (
-    get_gmx_markets_with_chainlink_feeds,
-    get_gmx_markets_without_chainlink_feeds,
-)
-from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector
-from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
-from gmx_historical_data.fetch_boundary_calculator import FetchBoundaryCalculator
+from gmx_historical_data.hypersync_collector import HyperSyncCollector
+from gmx_historical_data.market_registry import fetch_markets
+from gmx_historical_data.resampler import OHLCVResampler
+from gmx_historical_data.storage import ParquetStorage
+
+logger = logging.getLogger(__name__)
+
+console = Console()
 
 
 class DataCollector:
@@ -86,7 +85,9 @@ class DataCollector:
         rpc_urls = config.rpc_url.strip().split()
         if len(rpc_urls) > 1:
             # Multiple RPC URLs - use multi-provider
-            console.print(f"[green]Using {len(rpc_urls)} RPC provider(s) with automatic failover[/green]")
+            console.print(
+                f"[green]Using {len(rpc_urls)} RPC provider(s) with automatic failover[/green]"
+            )
             self.rpc_collector = ChainlinkRPCCollector(rpc_config=config.rpc_url)
             # Create Web3 with first URL for basic operations
             self.web3 = Web3(Web3.HTTPProvider(rpc_urls[0]))
@@ -161,9 +162,7 @@ class DataCollector:
         results = {}
         for timeframe in TIMEFRAMES:
             try:
-                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(
-                    symbol, timeframe
-                )
+                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(symbol, timeframe)
                 results[timeframe] = {
                     "status": gap_result.status.value,
                     "needs_fetch": gap_result.needs_fetch,
@@ -177,9 +176,7 @@ class DataCollector:
 
                 # Handle data loss
                 if gap_result.has_data_loss and self.data_loss_handler:
-                    event = self.data_loss_handler.handle_gap_result(
-                        symbol, timeframe, gap_result
-                    )
+                    event = self.data_loss_handler.handle_gap_result(symbol, timeframe, gap_result)
                     if event:
                         console.print(
                             f"  [red bold]DATA LOSS[/red bold] {timeframe}: "
@@ -188,9 +185,7 @@ class DataCollector:
                         )
 
             except Exception as e:
-                console.print(
-                    f"  [yellow]Warning: Could not check {timeframe}: {e}[/yellow]"
-                )
+                console.print(f"  [yellow]Warning: Could not check {timeframe}: {e}[/yellow]")
                 results[timeframe] = {"error": str(e)}
 
         return results
@@ -207,34 +202,24 @@ class DataCollector:
         """
         console.print()
         console.print(
-            Panel(
-                f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED
-            )
+            Panel(f"[bold cyan]Collecting data for {symbol}[/bold cyan]", box=box.ROUNDED)
         )
 
         # Step 0: Check for data loss (adaptive gap detection)
         if self.adaptive_gap_detector:
-            console.print(
-                "\n[bold]Checking for data gaps (sliding window awareness)...[/bold]"
-            )
+            console.print("\n[bold]Checking for data gaps (sliding window awareness)...[/bold]")
             gap_info = self.check_and_report_data_loss(symbol)
 
             # Summarize gap status
-            data_loss_count = sum(
-                1 for tf, info in gap_info.items() if info.get("has_data_loss")
-            )
-            no_gap_count = sum(
-                1 for tf, info in gap_info.items() if info.get("status") == "no_gap"
-            )
+            data_loss_count = sum(1 for tf, info in gap_info.items() if info.get("has_data_loss"))
+            no_gap_count = sum(1 for tf, info in gap_info.items() if info.get("status") == "no_gap")
 
             if data_loss_count > 0:
                 console.print(
                     f"  [red]⚠ Data loss detected in {data_loss_count} timeframe(s)[/red]"
                 )
             if no_gap_count > 0:
-                console.print(
-                    f"  [green]✓ {no_gap_count} timeframe(s) are up to date[/green]"
-                )
+                console.print(f"  [green]✓ {no_gap_count} timeframe(s) are up to date[/green]")
             if no_gap_count < len(gap_info) - data_loss_count:
                 needs_update = len(gap_info) - no_gap_count - data_loss_count
                 console.print(
@@ -276,9 +261,7 @@ class DataCollector:
                         gmx_candles[tf] = existing_df
                 else:
                     mode_label = "full" if boundaries.mode == FetchMode.FULL else "incremental"
-                    console.print(
-                        f"  [cyan]→[/cyan] {tf}: Fetching from GMX API ({mode_label})"
-                    )
+                    console.print(f"  [cyan]→[/cyan] {tf}: Fetching from GMX API ({mode_label})")
 
             # Fetch only timeframes that need updates
             async def fetch_timeframe(tf: str, timeout: float = 120.0):
@@ -294,9 +277,7 @@ class DataCollector:
                 gmx_period = map_timeframe_to_gmx_period(tf)
                 try:
                     df = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
-                        ),
+                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
                         timeout=timeout,
                     )
 
@@ -305,10 +286,8 @@ class DataCollector:
                         df = df[df["timestamp"] >= boundaries.gmx_api_start]
 
                     return tf, df
-                except asyncio.TimeoutError:
-                    console.print(
-                        f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
-                    )
+                except TimeoutError:
+                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
                     return tf, pd.DataFrame()  # Return empty DataFrame on timeout
 
             # Execute fetches in parallel (only for timeframes that need updates)
@@ -342,16 +321,12 @@ class DataCollector:
                 gmx_period = map_timeframe_to_gmx_period(tf)
                 try:
                     df = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
-                        ),
+                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
                         timeout=timeout,
                     )
                     return tf, df
-                except asyncio.TimeoutError:
-                    console.print(
-                        f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]"
-                    )
+                except TimeoutError:
+                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
                     return tf, pd.DataFrame()
 
             timeframe_tasks = [fetch_timeframe(tf) for tf in TIMEFRAMES]
@@ -395,17 +370,13 @@ class DataCollector:
 
             if boundaries_1h and boundaries_1h.chainlink_needed:
                 console.print("\n[bold]Backfilling with Chainlink data...[/bold]")
-                console.print(
-                    f"  [dim]Mode:[/dim] {boundaries_1h.mode.value}"
-                )
+                console.print(f"  [dim]Mode:[/dim] {boundaries_1h.mode.value}")
                 if boundaries_1h.chainlink_end_timestamp:
                     console.print(
                         f"  [dim]Fetch range:[/dim] all historical to timestamp {boundaries_1h.chainlink_end_timestamp}"
                     )
                 else:
-                    console.print(
-                        f"  [dim]Fetch range:[/dim] all available historical data"
-                    )
+                    console.print("  [dim]Fetch range:[/dim] all available historical data")
 
                 # Use feed proxy address directly (NOT underlying aggregator!)
                 # The aggregator blocks contract-to-contract calls with "No access"
@@ -418,7 +389,7 @@ class DataCollector:
                     rounds = self.rpc_collector.collect_historical_rounds(
                         feed_address=chainlink_feed_address,  # Use feed proxy, NOT aggregator!
                         start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
-                        end_timestamp=boundaries_1h.chainlink_end_timestamp,      # Use calculated boundary
+                        end_timestamp=boundaries_1h.chainlink_end_timestamp,  # Use calculated boundary
                         max_rounds=1000000,
                         batch_size=1500,  # Safe for most RPC providers; auto-reduces on 413
                         concurrency=self.chainlink_concurrency,
@@ -446,27 +417,17 @@ class DataCollector:
 
                         # Save raw events
                         if full:
-                            self.storage.save_raw_events(
-                                events, symbol, partition_id=0
-                            )
+                            self.storage.save_raw_events(events, symbol, partition_id=0)
                         else:
                             self.storage.append_raw_events(events, symbol)
 
                         # Resample to OHLCV
                         raw_df = self.storage.read_raw_events(symbol)
-                        chainlink_candles = (
-                            self.resampler.resample_all_timeframes(
-                                raw_df, symbol
-                            )
-                        )
+                        chainlink_candles = self.resampler.resample_all_timeframes(raw_df, symbol)
 
-                        console.print(
-                            "  [green]✓[/green] Resampled to OHLCV candles"
-                        )
+                        console.print("  [green]✓[/green] Resampled to OHLCV candles")
                     else:
-                        console.print(
-                            "  [yellow]⚠ RPC collection returned no data[/yellow]"
-                        )
+                        console.print("  [yellow]⚠ RPC collection returned no data[/yellow]")
 
                 except Exception as e:
                     console.print(f"[red]✗ Chainlink backfill failed: {e}[/red]")
@@ -497,18 +458,14 @@ class DataCollector:
                                 f"[yellow]  Oracle fallback also failed: {fallback_e}[/yellow]"
                             )
             else:
-                console.print(
-                    "\n[green]✓[/green] Chainlink backfill not needed - data is complete"
-                )
+                console.print("\n[green]✓[/green] Chainlink backfill not needed - data is complete")
         else:
             # No Chainlink feed - use oracle events for historical data (requires HyperSync)
             if self.hypersync is None:
                 console.print(
                     "\n[yellow]⚠ No Chainlink feed found and HyperSync not initialized[/yellow]"
                 )
-                console.print(
-                    "[dim]This symbol requires oracle events, which need HyperSync[/dim]"
-                )
+                console.print("[dim]This symbol requires oracle events, which need HyperSync[/dim]")
             else:
                 console.print("\n[bold]Backfilling with oracle events...[/bold]")
                 try:
@@ -523,9 +480,7 @@ class DataCollector:
                                 f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
                             )
                 except Exception as fallback_e:
-                    console.print(
-                        f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]"
-                    )
+                    console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
 
         # Step 4: Merge and save (incremental mode merges with existing data)
         console.print("\n[bold]Saving candles...[/bold]")
@@ -591,11 +546,11 @@ class DataCollector:
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
         """
-        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.oracle_event_aggregator import (
             aggregate_oracle_events_to_ohlcv,
         )
+        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
 
         # Initialize oracle collector (pure HyperSync, no RPC needed)
         oracle_collector = OraclePriceCollector(
@@ -651,9 +606,7 @@ class DataCollector:
             console.print(f"  [yellow]No oracle events found for {symbol}[/yellow]")
             return
 
-        console.print(
-            f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events"
-        )
+        console.print(f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] oracle events")
 
         # Aggregate to OHLCV
         for timeframe in TIMEFRAMES:
@@ -681,9 +634,7 @@ class DataCollector:
                 )
 
             except Exception as e:
-                console.print(
-                    f"  [red]✗ {timeframe} oracle aggregation failed: {e}[/red]"
-                )
+                console.print(f"  [red]✗ {timeframe} oracle aggregation failed: {e}[/red]")
 
     async def collect_all_symbols(
         self,
@@ -705,14 +656,10 @@ class DataCollector:
                 console.print(
                     "[red]✗ HyperSync not initialized - cannot use event-based collection[/red]"
                 )
-                console.print(
-                    "[dim]Event-based collection requires HyperSync API token.[/dim]"
-                )
+                console.print("[dim]Event-based collection requires HyperSync API token.[/dim]")
                 return
 
-            console.print(
-                "[cyan]Using event-based collection (indexing position events)[/cyan]\n"
-            )
+            console.print("[cyan]Using event-based collection (indexing position events)[/cyan]\n")
 
             # Initialize event collector
             event_collector = GMXEventCollector(
@@ -721,14 +668,9 @@ class DataCollector:
                 api_token=self.config.hypersync_api_token,
             )
 
-            # Initialize market mapper
-            mapper = GMXMarketMapper(self.web3)
-            market_mapping = mapper.get_market_symbol_mapping()
-
-            # Invert mapping: market address -> symbol
-            address_to_symbol = {
-                addr.lower(): sym for addr, sym in market_mapping.items()
-            }
+            # Fetch market registry (address -> symbol mapping)
+            markets = fetch_markets("arbitrum")
+            address_to_symbol = {addr: info["symbol"] for addr, info in markets.items()}
 
             console.print(
                 f"[dim]Mapped {len(address_to_symbol)} market addresses to symbols[/dim]\n"
@@ -748,9 +690,7 @@ class DataCollector:
                 end_block=end_block,
             )
 
-            console.print(
-                f"[green]✓[/green] Collected {len(all_events)} total events\n"
-            )
+            console.print(f"[green]✓[/green] Collected {len(all_events)} total events\n")
 
             # Group events by market address to aggregate per-symbol OHLCV data
             events_by_market = defaultdict(list)
@@ -770,7 +710,8 @@ class DataCollector:
             if chainlink_only:
                 chainlink_upper_set = {s.upper() for s in get_gmx_markets_with_chainlink_feeds()}
                 skipped = sum(
-                    1 for addr in events_by_market
+                    1
+                    for addr in events_by_market
                     if address_to_symbol.get(addr, "").upper() not in chainlink_upper_set
                 )
                 if skipped > 0:
@@ -799,7 +740,7 @@ class DataCollector:
 
                 try:
                     # Save raw events
-                    events_path = self.storage.save_position_events(
+                    self.storage.save_position_events(
                         market_events,
                         symbol,
                         partition_id=0,
@@ -820,9 +761,7 @@ class DataCollector:
 
                             self.storage.save_candles(ohlcv, timeframe, symbol)
 
-                            console.print(
-                                f"  [green]✓[/green] {timeframe}: {len(ohlcv)} candles"
-                            )
+                            console.print(f"  [green]✓[/green] {timeframe}: {len(ohlcv)} candles")
 
                         except Exception as e:
                             console.print(f"  [red]✗ {timeframe} failed: {e}[/red]")
@@ -902,15 +841,11 @@ class DataCollector:
                         successful += 1
 
         # Create summary table
-        summary_table = Table(
-            title="Collection Summary", box=box.ROUNDED, show_header=False
-        )
+        summary_table = Table(title="Collection Summary", box=box.ROUNDED, show_header=False)
         summary_table.add_column("Status", style="bold")
         summary_table.add_column("Count", justify="right")
 
-        summary_table.add_row(
-            "[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]"
-        )
+        summary_table.add_row("[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]")
         summary_table.add_row("[red]✗ Failed[/red]", f"[red]{failed}/{total}[/red]")
         if failed_symbols:
             summary_table.add_row(
@@ -941,22 +876,18 @@ class DataCollector:
             console.print(
                 "[red]✗ HyperSync not initialized - cannot collect non-Chainlink markets[/red]"
             )
-            console.print(
-                "[dim]Non-Chainlink markets require oracle events via HyperSync.[/dim]"
-            )
-            console.print(
-                "[dim]Use --all-markets (default) or set HYPERSYNC_API_TOKEN.[/dim]"
-            )
+            console.print("[dim]Non-Chainlink markets require oracle events via HyperSync.[/dim]")
+            console.print("[dim]Use --all-markets (default) or set HYPERSYNC_API_TOKEN.[/dim]")
             return
 
-        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
+        from gmx_historical_data.block_timestamp_cache import BlockTimestampCache
+        from gmx_historical_data.data_coverage_analyzer import DataCoverageAnalyzer
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+        from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
         from gmx_historical_data.oracle_event_aggregator import (
             aggregate_oracle_events_to_ohlcv,
         )
-        from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
-        from gmx_historical_data.block_timestamp_cache import BlockTimestampCache
-        from gmx_historical_data.data_coverage_analyzer import DataCoverageAnalyzer
+        from gmx_historical_data.oracle_price_collector import OraclePriceCollector
 
         console.print(
             Panel(
@@ -973,7 +904,7 @@ class DataCollector:
 
         # Initialize key rotator if multiple keys provided
         key_rotator = None
-        if self.config.hypersync_api_token and ' ' in self.config.hypersync_api_token:
+        if self.config.hypersync_api_token and " " in self.config.hypersync_api_token:
             key_rotator = HyperSyncKeyRotator(self.config.hypersync_api_token)
             console.print(
                 f"[green]✓[/green] Initialized HyperSync key rotation "
@@ -1030,9 +961,7 @@ class DataCollector:
             symbols_to_collect = filtered_symbols
             # Filter token_mapping to only include tokens for requested symbols
             token_mapping = {
-                addr: sym
-                for addr, sym in token_mapping.items()
-                if sym.upper() in requested_upper
+                addr: sym for addr, sym in token_mapping.items() if sym.upper() in requested_upper
             }
             console.print(
                 f"[green]✓[/green] Collecting [cyan]{len(symbols_to_collect)}[/cyan] "
@@ -1067,13 +996,11 @@ class DataCollector:
                     gmx_period = map_timeframe_to_gmx_period(tf)
                     try:
                         df = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                self.gmx_fetcher.fetch_gmx_candles, sym, gmx_period
-                            ),
+                            asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, sym, gmx_period),
                             timeout=timeout,
                         )
                         return tf, df
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         return tf, pd.DataFrame()
                     except Exception:
                         return tf, pd.DataFrame()
@@ -1109,8 +1036,6 @@ class DataCollector:
 
         # Determine default block range
         default_start = start_block or GMX_V2_GENESIS_BLOCK
-        default_end = end_block  # None = latest
-
         # Process each symbol individually for incremental collection
         oracle_events_by_symbol: dict[str, list] = {}
 
@@ -1127,8 +1052,8 @@ class DataCollector:
                     f"{len(coverage.timeframe_coverage)} timeframe(s)"
                 )
                 for tf, tf_cov in coverage.timeframe_coverage.items():
-                    earliest_dt = pd.to_datetime(tf_cov.earliest, unit='s', utc=True)
-                    latest_dt = pd.to_datetime(tf_cov.latest, unit='s', utc=True)
+                    earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
+                    latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
                     console.print(
                         f"    {tf}: {tf_cov.candle_count:,} candles "
                         f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
@@ -1180,9 +1105,7 @@ class DataCollector:
                 oracle_events_by_symbol[symbol] = events
 
                 if events:
-                    console.print(
-                        f"  [green]✓[/green] Collected {len(events):,} oracle events"
-                    )
+                    console.print(f"  [green]✓[/green] Collected {len(events):,} oracle events")
                 else:
                     console.print("  [yellow]○[/yellow] No oracle events found in range")
 
@@ -1213,9 +1136,7 @@ class DataCollector:
             decimals = token_decimals_map.get(symbol, 18)
 
             if not gmx_candles and not token_events:
-                console.print(
-                    "  [yellow]○[/yellow] No data available (GMX API or oracle events)"
-                )
+                console.print("  [yellow]○[/yellow] No data available (GMX API or oracle events)")
                 failed += 1
                 failed_symbols.append(symbol)
                 continue
@@ -1237,17 +1158,13 @@ class DataCollector:
                     if gmx_df is not None and oracle_df is not None:
                         # Filter oracle data to only before GMX coverage
                         gmx_earliest = gmx_df["timestamp"].min()
-                        oracle_df_filtered = oracle_df[
-                            oracle_df["timestamp"] < gmx_earliest
-                        ]
+                        oracle_df_filtered = oracle_df[oracle_df["timestamp"] < gmx_earliest]
 
                         if not oracle_df_filtered.empty:
-                            combined = pd.concat(
-                                [oracle_df_filtered, gmx_df], ignore_index=True
+                            combined = pd.concat([oracle_df_filtered, gmx_df], ignore_index=True)
+                            combined = combined.sort_values("timestamp").drop_duplicates(
+                                subset=["timestamp"], keep="last"
                             )
-                            combined = combined.sort_values(
-                                "timestamp"
-                            ).drop_duplicates(subset=["timestamp"], keep="last")
                             self.storage.save_candles(combined, timeframe, symbol)
                             console.print(
                                 f"  [green]✓[/green] {timeframe}: {len(combined):,} candles "
@@ -1286,9 +1203,7 @@ class DataCollector:
         summary_table.add_column("Status", style="bold")
         summary_table.add_column("Count", justify="right")
 
-        summary_table.add_row(
-            "[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]"
-        )
+        summary_table.add_row("[green]✓ Successful[/green]", f"[green]{successful}/{total}[/green]")
         summary_table.add_row("[red]✗ Failed[/red]", f"[red]{failed}/{total}[/red]")
         if failed_symbols:
             summary_table.add_row(
@@ -1311,7 +1226,7 @@ def cli(
         "--update",
         help="Incremental update from last checkpoint",
     ),
-    symbol: Optional[str] = typer.Option(
+    symbol: str | None = typer.Option(
         None,
         "--symbol",
         help="Token symbol(s) to collect, comma-separated (e.g., ETH,BTC,SUI)",
@@ -1321,24 +1236,24 @@ def cli(
         "--output-dir",
         help="Output directory for data",
     ),
-    rpc_url: Optional[str] = typer.Option(
+    rpc_url: str | None = typer.Option(
         None,
         "--rpc-url",
         envvar="JSON_RPC_ARBITRUM",
         help="Arbitrum RPC URL (or set JSON_RPC_ARBITRUM env var)",
     ),
-    hypersync_token: Optional[str] = typer.Option(
+    hypersync_token: str | None = typer.Option(
         None,
         "--hypersync-token",
         envvar="HYPERSYNC_API_TOKEN",
         help="HyperSync API token(s) - space-separated for multiple tokens (or set HYPERSYNC_API_TOKEN env var)",
     ),
-    start_block: Optional[int] = typer.Option(
+    start_block: int | None = typer.Option(
         None,
         "--start-block",
         help="Starting block number (default: 0)",
     ),
-    end_block: Optional[int] = typer.Option(
+    end_block: int | None = typer.Option(
         None,
         "--end-block",
         help="Ending block number (default: latest)",
@@ -1370,7 +1285,7 @@ def cli(
         "--default",
         help="Recommended: GMX API + Chainlink historical backfill for all tokens",
     ),
-    log_file: Optional[str] = typer.Option(
+    log_file: str | None = typer.Option(
         None,
         "--log-file",
         help="Path to log file. If not specified, logs to ./logs/gmx-YYYY-MM-DD-HH-MM-SS.log",
@@ -1480,12 +1395,12 @@ def cli(
 def _cli_impl(
     full: bool,
     update: bool,
-    symbol: Optional[str],
+    symbol: str | None,
     output_dir: Path,
-    rpc_url: Optional[str],
-    hypersync_token: Optional[str],
-    start_block: Optional[int],
-    end_block: Optional[int],
+    rpc_url: str | None,
+    hypersync_token: str | None,
+    start_block: int | None,
+    end_block: int | None,
     use_gmx_api: bool,
     use_events: bool,
     chainlink_only: bool,
@@ -1496,12 +1411,8 @@ def _cli_impl(
     # Validate --default flag
     if default_mode:
         if use_events:
-            console.print(
-                "[red]Error: --default and --use-events are mutually exclusive[/red]"
-            )
-            console.print(
-                "[dim]--default uses oracle-based collection (GMX API + Chainlink)[/dim]"
-            )
+            console.print("[red]Error: --default and --use-events are mutually exclusive[/red]")
+            console.print("[dim]--default uses oracle-based collection (GMX API + Chainlink)[/dim]")
             raise typer.Exit(1)
         # --default implies --full and enables GMX API
         full = True
@@ -1656,12 +1567,8 @@ def _cli_impl(
 
 
 def verify_command(
-    symbol: Optional[str] = typer.Option(
-        None, "--symbol", help="Symbol to verify (omit for all)"
-    ),
-    output_dir: Path = typer.Option(
-        Path("./data"), "--output-dir", help="Data directory"
-    ),
+    symbol: str | None = typer.Option(None, "--symbol", help="Symbol to verify (omit for all)"),
+    output_dir: Path = typer.Option(Path("./data"), "--output-dir", help="Data directory"),
     timeframe: str = typer.Option("1h", "--timeframe", help="Timeframe to verify"),
 ) -> None:
     """Verify collected data quality.
@@ -1757,9 +1664,7 @@ def verify_command(
             if report.quality_score > 60
             else "red"
         )
-        quality_str = (
-            f"[{quality_color}]{report.quality_score:.0f}/100[/{quality_color}]"
-        )
+        quality_str = f"[{quality_color}]{report.quality_score:.0f}/100[/{quality_color}]"
 
         table.add_row(
             sym,
@@ -1775,18 +1680,18 @@ def verify_command(
 
 
 def debug_oracle_command(
-    symbol: Optional[str] = typer.Option(
+    symbol: str | None = typer.Option(
         None,
         "--symbol",
         help="Specific token symbol to debug (e.g., SUI, TAO). If not provided, lists all non-Chainlink markets.",
     ),
-    rpc_url: Optional[str] = typer.Option(
+    rpc_url: str | None = typer.Option(
         None,
         "--rpc-url",
         envvar="JSON_RPC_ARBITRUM",
         help="Arbitrum RPC URL",
     ),
-    hypersync_token: Optional[str] = typer.Option(
+    hypersync_token: str | None = typer.Option(
         None,
         "--hypersync-token",
         envvar="HYPERSYNC_API_TOKEN",
@@ -1853,7 +1758,9 @@ def debug_oracle_command(
         3. Try increasing --concurrency for faster scanning
     """
     import asyncio
+
     from web3 import Web3
+
     from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
 
     # Validate RPC URL
@@ -1901,9 +1808,7 @@ def debug_oracle_command(
         console.print()
 
         # Show non-Chainlink markets
-        non_chainlink_table = Table(
-            title="Non-Chainlink Markets (Oracle Events)", box=box.ROUNDED
-        )
+        non_chainlink_table = Table(title="Non-Chainlink Markets (Oracle Events)", box=box.ROUNDED)
         non_chainlink_table.add_column("Symbol", style="magenta")
         non_chainlink_table.add_column("Token Address", style="dim")
 
@@ -1942,19 +1847,16 @@ def debug_oracle_command(
 
     if is_chainlink:
         console.print(f"\n[yellow]Note: {symbol_upper} is a Chainlink market.[/yellow]")
-        console.print(
-            "[yellow]It uses GMX API for data, but may also have oracle events.[/yellow]"
-        )
+        console.print("[yellow]It uses GMX API for data, but may also have oracle events.[/yellow]")
+
+    from hypersync import ClientConfig, HypersyncClient
 
     from gmx_historical_data.oracle_price_collector import OraclePriceCollector
-    from hypersync import HypersyncClient, ClientConfig
 
     # Get current block via HyperSync (no RPC needed)
     console.print("\n[bold]Initializing HyperSync collector...[/bold]")
     try:
-        config = ClientConfig(
-            url="https://arbitrum.hypersync.xyz", bearer_token=hypersync_token
-        )
+        config = ClientConfig(url="https://arbitrum.hypersync.xyz", bearer_token=hypersync_token)
         hs_client = HypersyncClient(config)
         current_block = asyncio.run(hs_client.get_height())
         console.print(f"  [dim]Current block:[/dim] {current_block:,}")
@@ -1972,9 +1874,7 @@ def debug_oracle_command(
     total_blocks = current_block - start_block
     console.print("\n[bold]Fetching oracle events from HyperSync...[/bold]")
     console.print(f"  [dim]Block range:[/dim] {total_blocks:,} blocks to scan")
-    console.print(
-        f"  [dim]Using {concurrency} parallel workers for faster collection[/dim]"
-    )
+    console.print(f"  [dim]Using {concurrency} parallel workers for faster collection[/dim]")
     console.print()
 
     # Pure HyperSync collector - no RPC needed for maximum speed
@@ -2043,15 +1943,14 @@ def debug_oracle_command(
     events_table.add_column("Mid Price (USD)", justify="right", style="green")
 
     from datetime import datetime
+
     from gmx_historical_data.oracle_event_aggregator import get_price_divisor
 
     # Calculate divisor based on token decimals
     price_divisor = get_price_divisor(token_decimals)
 
     for event in events[:limit]:
-        timestamp = datetime.utcfromtimestamp(event.block_timestamp).strftime(
-            "%Y-%m-%d %H:%M:%S"
-        )
+        timestamp = datetime.utcfromtimestamp(event.block_timestamp).strftime("%Y-%m-%d %H:%M:%S")
         min_price = event.min_price / price_divisor
         max_price = event.max_price / price_divisor
         mid_price = (min_price + max_price) / 2
@@ -2074,8 +1973,6 @@ def debug_oracle_command(
 
     # Show summary statistics
     console.print()
-    min_prices = [e.min_price / price_divisor for e in events]
-    max_prices = [e.max_price / price_divisor for e in events]
     mid_prices = [(e.min_price + e.max_price) / 2 / price_divisor for e in events]
 
     summary_table = Table(title="Price Summary", box=box.ROUNDED, show_header=False)
@@ -2083,9 +1980,7 @@ def debug_oracle_command(
     summary_table.add_column("Value", style="cyan")
 
     summary_table.add_row("Events count", f"{len(events):,}")
-    summary_table.add_row(
-        "Price range", f"${min(mid_prices):,.4f} - ${max(mid_prices):,.4f}"
-    )
+    summary_table.add_row("Price range", f"${min(mid_prices):,.4f} - ${max(mid_prices):,.4f}")
     summary_table.add_row("Latest price", f"${mid_prices[-1]:,.4f}")
     summary_table.add_row(
         "Block range", f"{events[0].block_number:,} - {events[-1].block_number:,}"
@@ -2109,12 +2004,12 @@ def export_freqtrade_command(
         "--output-dir",
         help="Output directory for Freqtrade files",
     ),
-    symbol: Optional[list[str]] = typer.Option(
+    symbol: list[str] | None = typer.Option(
         None,
         "--symbol",
         help="Specific symbols to export (can be repeated)",
     ),
-    timeframe: Optional[list[str]] = typer.Option(
+    timeframe: list[str] | None = typer.Option(
         None,
         "--timeframe",
         help="Specific timeframes to export (can be repeated)",
@@ -2233,7 +2128,6 @@ def export_freqtrade_command(
         raise typer.Exit(1)
 
     # Summary
-    total_files = sum(r["files"] for r in results.values())
     total_candles = sum(r["candles"] for r in results.values())
     total_ohlcv = sum(r.get("ohlcv_files", r["files"]) for r in results.values())
     total_funding = sum(r.get("funding_files", 0) for r in results.values())

@@ -12,6 +12,7 @@ class FetchMode(Enum):
     :cvar INCREMENTAL: Only fetch new data since last collection
     :cvar NO_FETCH: Data is current, no fetch needed
     """
+
     FULL = "full"
     INCREMENTAL = "incremental"
     NO_FETCH = "no_fetch"
@@ -122,9 +123,7 @@ TIMEFRAME_TO_FILENAME = {
 FILENAME_TO_TIMEFRAME = {v: k for k, v in TIMEFRAME_TO_FILENAME.items()}
 
 # AnswerUpdated event signature
-ANSWER_UPDATED_TOPIC = (
-    "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
-)
+ANSWER_UPDATED_TOPIC = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
 
 # GMX V2 EventEmitter contract address (Arbitrum)
 EVENT_EMITTER_ADDRESS = "0xC8ee91A54287DB53897056e12D9819156D3822Fb"

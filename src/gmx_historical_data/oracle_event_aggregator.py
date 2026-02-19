@@ -32,7 +32,7 @@ def get_price_divisor(token_decimals: int) -> int:
 
 
 def aggregate_oracle_events_to_ohlcv(
-    events: "list[OraclePriceEvent]",
+    events: list[OraclePriceEvent],
     timeframe: str,
     symbol: str,
     token_decimals: int = 18,
@@ -54,9 +54,7 @@ def aggregate_oracle_events_to_ohlcv(
     """
     if not events:
         # Return empty DataFrame with correct schema
-        return pd.DataFrame(
-            columns=["timestamp", "open", "high", "low", "close", "symbol"]
-        )
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "symbol"])
 
     # Calculate divisor based on token decimals
     divisor = get_price_divisor(token_decimals)

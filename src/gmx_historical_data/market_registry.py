@@ -36,7 +36,6 @@ import logging
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +52,7 @@ _CACHE_MAX_AGE = 86_400
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
 
 def _extract_base_symbol(api_name: str) -> str:
     """Extract the base token symbol from an API market name.
@@ -137,8 +137,8 @@ def _build_registry(raw_markets: list[dict]) -> dict[str, dict]:
                 # Extract long/short token symbols from bracket in API name
                 # e.g. "BTC/USD [WBTC.b-USDC]" → long="WBTC.b", short="USDC"
                 bracket_start = api_name.find("[")
-                long_sym: Optional[str] = None
-                short_sym: Optional[str] = None
+                long_sym: str | None = None
+                short_sym: str | None = None
                 if bracket_start != -1:
                     bracket_end = api_name.rfind("]")
                     content = api_name[bracket_start + 1 : bracket_end].strip()
@@ -175,9 +175,10 @@ def _build_registry(raw_markets: list[dict]) -> dict[str, dict]:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def fetch_markets(
     chain: str = "arbitrum",
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
     force_refresh: bool = False,
 ) -> dict[str, dict]:
     """Fetch and return the GMX market registry for *chain*.
@@ -204,9 +205,7 @@ def fetch_markets(
                 cached = json.load(f)
             age = time.time() - cached.get("_fetched_at", 0)
             if age < _CACHE_MAX_AGE:
-                logger.debug(
-                    "Using cached GMX markets for %s (age %.0fs)", chain, age
-                )
+                logger.debug("Using cached GMX markets for %s (age %.0fs)", chain, age)
                 return cached["markets"]
             else:
                 logger.debug("Cache stale (%.0fs old), refreshing…", age)
@@ -273,7 +272,7 @@ def market_symbol(address: str, markets: dict[str, dict]) -> str:
     return base.replace("[", "").replace("]", "").replace(" ", "_")
 
 
-def get_index_token(address: str, markets: dict[str, dict]) -> Optional[str]:
+def get_index_token(address: str, markets: dict[str, dict]) -> str | None:
     """Return the index token symbol for a market address, or ``None``.
 
     Returns ``None`` for swap-only markets (where ``indexToken`` is the zero

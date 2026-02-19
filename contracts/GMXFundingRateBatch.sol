@@ -32,14 +32,12 @@ contract GMXFundingRateBatchRequest {
     constructor(address[] memory markets) {
         IDataStore ds = IDataStore(DATASTORE);
 
-        // Mirrors Python: Web3.keccak(abi_encode(["string"], ["SAVED_FUNDING_FACTOR_PER_SECOND"]))
         bytes32 baseKey = keccak256(abi.encode("SAVED_FUNDING_FACTOR_PER_SECOND"));
 
         uint256 n = markets.length;
         int256[] memory results = new int256[](n);
 
         for (uint256 i = 0; i < n; i++) {
-            // Mirrors Python: Web3.keccak(abi_encode(["bytes32", "address"], [baseKey, market]))
             bytes32 key = keccak256(abi.encode(baseKey, markets[i]));
             try ds.getInt(key) returns (int256 value) {
                 results[i] = value;

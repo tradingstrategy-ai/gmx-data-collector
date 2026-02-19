@@ -1,6 +1,6 @@
 """Analyze data gaps between GMX and Chainlink data sources."""
 
-from datetime import timezone
+from datetime import UTC
 
 import pandas as pd
 
@@ -46,9 +46,7 @@ class DataGapAnalyzer:
         else:  # INCREMENTAL
             return self._calculate_incremental_gap(gmx_df, existing_df)
 
-    def _calculate_full_gap(
-        self, gmx_df: pd.DataFrame
-    ) -> tuple[int | None, int | None]:
+    def _calculate_full_gap(self, gmx_df: pd.DataFrame) -> tuple[int | None, int | None]:
         """Calculate gap for full collection mode.
 
         Full mode: Collect ALL Chainlink data before GMX coverage.
@@ -96,9 +94,9 @@ class DataGapAnalyzer:
 
         # Ensure timezone-aware for comparison
         if our_earliest.tzinfo is None:
-            our_earliest = our_earliest.replace(tzinfo=timezone.utc)
+            our_earliest = our_earliest.replace(tzinfo=UTC)
         if gmx_earliest.tzinfo is None:
-            gmx_earliest = gmx_earliest.replace(tzinfo=timezone.utc)
+            gmx_earliest = gmx_earliest.replace(tzinfo=UTC)
 
         # Only backfill if our data doesn't cover the GMX range
         if our_earliest > gmx_earliest:

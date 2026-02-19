@@ -7,8 +7,7 @@ the GMX API's sliding window retention period.
 import json
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +43,7 @@ class DataLossEvent:
             "timeframe": self.timeframe,
             "detected_at": self.detected_at.isoformat(),
             "our_latest": self.our_latest.isoformat() if self.our_latest else None,
-            "api_earliest": self.api_earliest.isoformat()
-            if self.api_earliest
-            else None,
+            "api_earliest": self.api_earliest.isoformat() if self.api_earliest else None,
             "lost_candles": self.lost_candles,
             "lost_timespan": self.lost_timespan,
         }
@@ -82,7 +79,7 @@ class DataLossHandler:
         event = DataLossEvent(
             symbol=symbol,
             timeframe=timeframe,
-            detected_at=datetime.now(timezone.utc),
+            detected_at=datetime.now(UTC),
             our_latest=gap_result.our_latest,
             api_earliest=gap_result.api_earliest,
             lost_candles=gap_result.lost_candles_estimate,

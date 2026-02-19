@@ -85,35 +85,34 @@ import os
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
-
-from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 import hypersync
-from hypersync import (
-    HypersyncClient,
-    ClientConfig,
-    Query,
-    LogSelection,
-    FieldSelection,
-    LogField,
-    BlockField,
-)
 from eth_abi import decode as abi_decode
 from eth_utils import keccak
+from hypersync import (
+    BlockField,
+    ClientConfig,
+    FieldSelection,
+    HypersyncClient,
+    LogField,
+    LogSelection,
+    Query,
+)
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    BarColumn,
     TextColumn,
     TimeElapsedColumn,
 )
 from rich.table import Table
+
+from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 try:
     import polars as pl
@@ -123,7 +122,6 @@ except ImportError:
     HAS_POLARS = False
 
 try:
-    import pandas as pd
     import pyarrow.feather as pq_feather
 
     HAS_FEATHER = True
@@ -225,7 +223,8 @@ class FundingFeePerSizeRecord:
 # ABI DECODING
 # =============================================================================
 
-def decode_fee_per_size_event(hex_data: str) -> Optional[dict]:
+
+def decode_fee_per_size_event(hex_data: str) -> dict | None:
     """Decode FundingFeeAmountPerSizeUpdated from EventLog1 data.
 
     :param hex_data: Hex-encoded data field (with ``0x`` prefix).
@@ -248,7 +247,11 @@ def decode_fee_per_size_event(hex_data: str) -> Optional[dict]:
 
     addresses = {}
     for key, val in event_data[IDX_ADDRESS][0]:
-        addr = val if isinstance(val, str) else ("0x" + val.hex() if isinstance(val, bytes) else str(val))
+        addr = (
+            val
+            if isinstance(val, str)
+            else ("0x" + val.hex() if isinstance(val, bytes) else str(val))
+        )
         addresses[key] = addr.lower() if isinstance(addr, str) else addr
 
     uints = {key: val for key, val in event_data[IDX_UINT][0]}
@@ -267,7 +270,8 @@ def decode_fee_per_size_event(hex_data: str) -> Optional[dict]:
 # CHECKPOINT
 # =============================================================================
 
-def load_checkpoint(path: Path) -> Optional[dict]:
+
+def load_checkpoint(path: Path) -> dict | None:
     """Load checkpoint from JSON file.
 
     :param path: Path to checkpoint JSON file.
@@ -276,7 +280,7 @@ def load_checkpoint(path: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         console.print(f"[yellow]Warning: could not load checkpoint {path}: {e}[/yellow]")
@@ -304,19 +308,18 @@ def save_checkpoint(
         "last_block": last_block,
         "last_timestamp": last_timestamp,
         "total_events": total_events,
-        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+        "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
-    console.print(
-        f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]"
-    )
+    console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
 
 
 # =============================================================================
 # BACKGROUND / DAEMON
 # =============================================================================
+
 
 def run_in_background(log_file: str, pid_file: str) -> bool:
     """Fork the process to run in the background.
@@ -360,6 +363,7 @@ def run_in_background(log_file: str, pid_file: str) -> bool:
 # =============================================================================
 # HYPERSYNC CLIENT
 # =============================================================================
+
 
 async def create_client(network: str) -> HypersyncClient:
     """Create HyperSync client.
@@ -437,13 +441,14 @@ async def _stream_with_retry(
 # EXTRACTION
 # =============================================================================
 
+
 async def extract_fee_per_size_events(
     client: HypersyncClient,
     network: str,
     from_block: int,
-    to_block: Optional[int],
-    market_filter: Optional[str] = None,
-    markets: Optional[dict] = None,
+    to_block: int | None,
+    market_filter: str | None = None,
+    markets: dict | None = None,
 ) -> list[FundingFeePerSizeRecord]:
     """Extract FundingFeeAmountPerSizeUpdated events from GMX V2 EventEmitter.
 
@@ -494,7 +499,7 @@ async def extract_fee_per_size_events(
         f"  Block range:  [cyan]{from_block:,}[/cyan] to "
         f"[cyan]{to_block or 'latest':,}[/cyan] ({total_blocks:,} blocks)"
     )
-    console.print(f"  Event:        [cyan]FundingFeeAmountPerSizeUpdated[/cyan]")
+    console.print("  Event:        [cyan]FundingFeeAmountPerSizeUpdated[/cyan]")
 
     records: list[FundingFeePerSizeRecord] = []
     block_timestamps: dict[int, int] = {}
@@ -578,11 +583,7 @@ async def extract_fee_per_size_events(
 
                 block_num = log.block_number or 0
                 ts = block_timestamps.get(block_num, 0)
-                dt_str = (
-                    datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-                    if ts
-                    else ""
-                )
+                dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts else ""
 
                 record = FundingFeePerSizeRecord(
                     symbol=symbol,
@@ -650,6 +651,7 @@ async def extract_fee_per_size_events(
 # AGGREGATION
 # =============================================================================
 
+
 def aggregate_hourly_direction(
     records: list[FundingFeePerSizeRecord],
 ) -> dict[str, "pl.DataFrame"]:
@@ -693,22 +695,19 @@ def aggregate_hourly_direction(
     )
 
     # Aggregate per symbol per hour per side (sum deltas across collateral tokens)
-    by_side = (
-        df.group_by(["symbol", "market", "hour", "is_long"])
-        .agg(
-            pl.col("delta_float").sum().alias("delta_sum"),
-            pl.len().alias("event_count"),
-        )
+    by_side = df.group_by(["symbol", "market", "hour", "is_long"]).agg(
+        pl.col("delta_float").sum().alias("delta_sum"),
+        pl.len().alias("event_count"),
     )
 
     # Pivot: get long and short delta sums side by side
     long_df = (
-        by_side.filter(pl.col("is_long") == True)
+        by_side.filter(pl.col("is_long"))
         .select(["symbol", "market", "hour", "delta_sum", "event_count"])
         .rename({"delta_sum": "long_delta_sum", "event_count": "long_events"})
     )
     short_df = (
-        by_side.filter(pl.col("is_long") == False)
+        by_side.filter(~pl.col("is_long"))
         .select(["symbol", "market", "hour", "delta_sum", "event_count"])
         .rename({"delta_sum": "short_delta_sum", "event_count": "short_events"})
     )
@@ -744,18 +743,20 @@ def aggregate_hourly_direction(
     result = {}
     for symbol in hourly["symbol"].unique().sort().to_list():
         sym_df = hourly.filter(pl.col("symbol") == symbol)
-        sym_df = sym_df.select([
-            "timestamp",
-            "longs_pay_shorts",
-            "long_short_ratio",
-            "update_count",
-            "long_delta_sum",
-            "short_delta_sum",
-            "long_events",
-            "short_events",
-            "symbol",
-            "market",
-        ]).cast({"update_count": pl.UInt32})
+        sym_df = sym_df.select(
+            [
+                "timestamp",
+                "longs_pay_shorts",
+                "long_short_ratio",
+                "update_count",
+                "long_delta_sum",
+                "short_delta_sum",
+                "long_events",
+                "short_events",
+                "symbol",
+                "market",
+            ]
+        ).cast({"update_count": pl.UInt32})
         result[symbol] = sym_df
 
     return result
@@ -764,6 +765,7 @@ def aggregate_hourly_direction(
 # =============================================================================
 # STORAGE
 # =============================================================================
+
 
 def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
     """Append DataFrame to existing Parquet file, deduplicating.
@@ -826,9 +828,7 @@ def save_direction_per_symbol(
     for symbol, df in sorted(hourly_by_symbol.items()):
         filepath = output_dir / "direction" / symbol / "1h.parquet"
         append_parquet(df, filepath)
-        console.print(
-            f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]"
-        )
+        console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 
 def save_feather_freqtrade(
@@ -871,9 +871,7 @@ def save_feather_freqtrade(
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
         pq_feather.write_feather(pdf, filepath)
-        console.print(
-            f"  Feather: [cyan]{len(pdf):,}[/cyan] hours -> [green]{filepath}[/green]"
-        )
+        console.print(f"  Feather: [cyan]{len(pdf):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 
 def save_json(data: list, filename: str) -> None:
@@ -890,6 +888,7 @@ def save_json(data: list, filename: str) -> None:
 # =============================================================================
 # SUMMARY
 # =============================================================================
+
 
 def print_summary(records: list[FundingFeePerSizeRecord]) -> None:
     """Print summary statistics.
@@ -937,11 +936,10 @@ def print_summary(records: list[FundingFeePerSizeRecord]) -> None:
 
     timestamps = [r.block_timestamp for r in records if r.block_timestamp]
     if timestamps:
-        first = datetime.fromtimestamp(min(timestamps), tz=timezone.utc)
-        last = datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
+        first = datetime.fromtimestamp(min(timestamps), tz=UTC)
+        last = datetime.fromtimestamp(max(timestamps), tz=UTC)
         console.print(
-            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to "
-            f"[cyan]{last.isoformat()}[/cyan]"
+            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to [cyan]{last.isoformat()}[/cyan]"
         )
 
     console.print(f"  Total events: [cyan]{len(records):,}[/cyan]")
@@ -951,6 +949,7 @@ def print_summary(records: list[FundingFeePerSizeRecord]) -> None:
 # =============================================================================
 # MAIN
 # =============================================================================
+
 
 async def async_main(args: argparse.Namespace) -> None:
     """Async main entry point.
@@ -969,14 +968,11 @@ async def async_main(args: argparse.Namespace) -> None:
         checkpoint = load_checkpoint(checkpoint_path)
         if checkpoint:
             from_block = checkpoint["last_block"] + 1
-            console.print(
-                f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]"
-            )
+            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
         else:
             from_block = GMX_V2_GENESIS_BLOCK
             console.print(
-                f"  No checkpoint found. Starting from genesis: "
-                f"[cyan]{from_block:,}[/cyan]"
+                f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]"
             )
     elif from_block is None:
         from_block = GMX_V2_GENESIS_BLOCK
@@ -990,9 +986,7 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.market:
         header_lines.append(f"Market:      [cyan]{args.market}[/cyan]")
     if args.resume:
-        header_lines.append(
-            f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})"
-        )
+        header_lines.append(f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})")
     if args.feather_dir:
         header_lines.append(f"Feather dir: [cyan]{args.feather_dir}[/cyan]")
 
@@ -1209,6 +1203,7 @@ Examples:
     except Exception as e:
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

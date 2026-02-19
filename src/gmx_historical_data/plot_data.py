@@ -2,18 +2,18 @@
 """Plot historical data to verify collection worked correctly."""
 
 from pathlib import Path
-from typing import Optional
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import typer
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
-from rich.panel import Panel
-from rich import box
 
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import pandas as pd
+import typer
+from rich import box
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+
+from gmx_historical_data.config import TIMEFRAME_TO_FILENAME, TIMEFRAMES
 from gmx_historical_data.storage import ParquetStorage
-from gmx_historical_data.config import TIMEFRAMES, TIMEFRAME_TO_FILENAME
 
 
 def normalize_timeframe(tf: str) -> str:
@@ -87,9 +87,7 @@ def plot_raw_events(
     df["price_scaled"] = df["price"] / 1e8
 
     console.print(f"  [cyan]Found {len(df):,} events[/cyan]")
-    console.print(
-        f"  [dim]Date range: {df['datetime'].min()} to {df['datetime'].max()}[/dim]"
-    )
+    console.print(f"  [dim]Date range: {df['datetime'].min()} to {df['datetime'].max()}[/dim]")
     console.print(
         f"  [dim]Price range: ${df['price_scaled'].min():.2f} to ${df['price_scaled'].max():.2f}[/dim]"
     )
@@ -100,9 +98,7 @@ def plot_raw_events(
     # Price over time
     ax1 = axes[0]
     ax1.plot(df["datetime"], df["price_scaled"], "b-", linewidth=0.5, alpha=0.7)
-    ax1.set_title(
-        f"{symbol}/USD - Raw Event Data (Tick Data)", fontsize=14, fontweight="bold"
-    )
+    ax1.set_title(f"{symbol}/USD - Raw Event Data (Tick Data)", fontsize=14, fontweight="bold")
     ax1.set_xlabel("Date")
     ax1.set_ylabel("Price (USD)")
     ax1.grid(True, alpha=0.3)
@@ -141,18 +137,12 @@ def plot_candles(
     df = storage.read_candles(timeframe, symbol)
 
     if df.empty:
-        console.print(
-            f"  [yellow]No candle data found for {symbol} at {timeframe}[/yellow]"
-        )
+        console.print(f"  [yellow]No candle data found for {symbol} at {timeframe}[/yellow]")
         return
 
     console.print(f"  [cyan]Found {len(df):,} candles[/cyan]")
-    console.print(
-        f"  [dim]Date range: {df['timestamp'].min()} to {df['timestamp'].max()}[/dim]"
-    )
-    console.print(
-        f"  [dim]Price range: ${df['low'].min():.2f} to ${df['high'].max():.2f}[/dim]"
-    )
+    console.print(f"  [dim]Date range: {df['timestamp'].min()} to {df['timestamp'].max()}[/dim]")
+    console.print(f"  [dim]Price range: ${df['low'].min():.2f} to ${df['high'].max():.2f}[/dim]")
 
     # Plot candlestick-style (using OHLC bars)
     fig, axes = plt.subplots(3, 1, figsize=(14, 12))
@@ -251,7 +241,7 @@ def plot_symbol(
     storage: ParquetStorage,
     symbol: str,
     output_dir: Path,
-    timeframe: Optional[str] = None,
+    timeframe: str | None = None,
     raw: bool = False,
 ) -> None:
     """Plot data for a single symbol.
@@ -282,7 +272,7 @@ def plot_symbol(
 
 
 def cli(
-    symbol: Optional[str] = typer.Argument(
+    symbol: str | None = typer.Argument(
         None,
         help="Token symbol to plot (e.g., ETH, BTC). Omit to use --all.",
     ),
@@ -296,7 +286,7 @@ def cli(
         "--output-dir",
         help="Output directory for plots",
     ),
-    timeframe: Optional[str] = typer.Option(
+    timeframe: str | None = typer.Option(
         None,
         "--timeframe",
         help="Specific timeframe to plot (default: all)",
@@ -402,9 +392,7 @@ def cli(
 
                 progress.update(task, advance=1)
 
-        console.print(
-            f"\n[green]✓ Successfully plotted: {successful}/{len(symbols)}[/green]"
-        )
+        console.print(f"\n[green]✓ Successfully plotted: {successful}/{len(symbols)}[/green]")
         if failed > 0:
             console.print(f"[red]✗ Failed: {failed}/{len(symbols)}[/red]")
 

@@ -73,35 +73,34 @@ import os
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
-
-from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 import hypersync
-from hypersync import (
-    HypersyncClient,
-    ClientConfig,
-    Query,
-    LogSelection,
-    FieldSelection,
-    LogField,
-    BlockField,
-)
 from eth_abi import decode as abi_decode
 from eth_utils import keccak
+from hypersync import (
+    BlockField,
+    ClientConfig,
+    FieldSelection,
+    HypersyncClient,
+    LogField,
+    LogSelection,
+    Query,
+)
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    BarColumn,
     TextColumn,
     TimeElapsedColumn,
 )
 from rich.table import Table
+
+from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 try:
     import polars as pl
@@ -209,6 +208,7 @@ class FundingFactorRecord:
 # ABI DECODING
 # =============================================================================
 
+
 def decode_event_log_data(hex_data: str) -> dict:
     """Decode GMX V2 EventLog1 data field using eth_abi.
 
@@ -223,9 +223,7 @@ def decode_event_log_data(hex_data: str) -> dict:
 
     try:
         data_bytes = bytes.fromhex(data)
-        msg_sender, event_name, event_data = abi_decode(
-            EVENTLOG1_ABI_TYPES, data_bytes
-        )
+        msg_sender, event_name, event_data = abi_decode(EVENTLOG1_ABI_TYPES, data_bytes)
     except Exception as e:
         return {"_decode_error": str(e)}
 
@@ -234,11 +232,7 @@ def decode_event_log_data(hex_data: str) -> dict:
         "msg_sender": (
             msg_sender
             if isinstance(msg_sender, str)
-            else (
-                "0x" + msg_sender.hex()
-                if isinstance(msg_sender, bytes)
-                else str(msg_sender)
-            )
+            else ("0x" + msg_sender.hex() if isinstance(msg_sender, bytes) else str(msg_sender))
         ),
         "addresses": {},
         "uints": {},
@@ -278,7 +272,8 @@ def decode_event_log_data(hex_data: str) -> dict:
 # CHECKPOINT
 # =============================================================================
 
-def load_checkpoint(path: Path) -> Optional[dict]:
+
+def load_checkpoint(path: Path) -> dict | None:
     """Load checkpoint from JSON file.
 
     :param path: Path to checkpoint JSON file.
@@ -287,7 +282,7 @@ def load_checkpoint(path: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         console.print(f"[yellow]Warning: could not load checkpoint {path}: {e}[/yellow]")
@@ -315,19 +310,18 @@ def save_checkpoint(
         "last_block": last_block,
         "last_timestamp": last_timestamp,
         "total_events": total_events,
-        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+        "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
-    console.print(
-        f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]"
-    )
+    console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
 
 
 # =============================================================================
 # BACKGROUND / DAEMON
 # =============================================================================
+
 
 def run_in_background(log_file: str, pid_file: str) -> bool:
     """Fork the process to run in the background.
@@ -371,6 +365,7 @@ def run_in_background(log_file: str, pid_file: str) -> bool:
 # =============================================================================
 # HYPERSYNC CLIENT
 # =============================================================================
+
 
 async def create_client(network: str) -> HypersyncClient:
     """Create HyperSync client.
@@ -450,13 +445,14 @@ async def _stream_with_retry(
 # EXTRACTION
 # =============================================================================
 
+
 async def extract_funding_events(
     client: HypersyncClient,
     network: str,
     from_block: int,
-    to_block: Optional[int],
-    market_filter: Optional[str] = None,
-    markets: Optional[dict] = None,
+    to_block: int | None,
+    market_filter: str | None = None,
+    markets: dict | None = None,
 ) -> list[FundingFactorRecord]:
     """Extract Funding events from GMX V2 EventEmitter.
 
@@ -507,7 +503,7 @@ async def extract_funding_events(
         f"  Block range:  [cyan]{from_block:,}[/cyan] to "
         f"[cyan]{to_block or 'latest':,}[/cyan] ({total_blocks:,} blocks)"
     )
-    console.print(f"  Event:        [cyan]Funding (fundingFactorPerSecond)[/cyan]")
+    console.print("  Event:        [cyan]Funding (fundingFactorPerSecond)[/cyan]")
 
     records: list[FundingFactorRecord] = []
     block_timestamps: dict[int, int] = {}
@@ -600,11 +596,7 @@ async def extract_funding_events(
 
                 block_num = log.block_number or 0
                 ts = block_timestamps.get(block_num, 0)
-                dt_str = (
-                    datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
-                    if ts
-                    else ""
-                )
+                dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts else ""
 
                 rate = factor_raw / FUNDING_FACTOR_PRECISION
 
@@ -673,6 +665,7 @@ async def extract_funding_events(
 # AGGREGATION
 # =============================================================================
 
+
 def aggregate_hourly_rates(
     records: list[FundingFactorRecord],
 ) -> dict[str, "pl.DataFrame"]:
@@ -740,20 +733,22 @@ def aggregate_hourly_rates(
     for symbol in hourly["symbol"].unique().sort().to_list():
         sym_df = hourly.filter(pl.col("symbol") == symbol)
         # Select columns in the expected order
-        sym_df = sym_df.select([
-            "timestamp",
-            "funding_rate",
-            "funding_rate_min",
-            "funding_rate_max",
-            "funding_rate_hourly",
-            "funding_rate_annualized",
-            "longs_pay_shorts",
-            "funding_fee_long",
-            "funding_fee_short",
-            "update_count",
-            "symbol",
-            "market",
-        ]).cast({"update_count": pl.UInt32})
+        sym_df = sym_df.select(
+            [
+                "timestamp",
+                "funding_rate",
+                "funding_rate_min",
+                "funding_rate_max",
+                "funding_rate_hourly",
+                "funding_rate_annualized",
+                "longs_pay_shorts",
+                "funding_fee_long",
+                "funding_fee_short",
+                "update_count",
+                "symbol",
+                "market",
+            ]
+        ).cast({"update_count": pl.UInt32})
         result[symbol] = sym_df
 
     return result
@@ -762,6 +757,7 @@ def aggregate_hourly_rates(
 # =============================================================================
 # STORAGE
 # =============================================================================
+
 
 def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
     """Append DataFrame to existing Parquet file, deduplicating.
@@ -814,9 +810,7 @@ def save_raw_per_symbol(records: list[FundingFactorRecord], output_dir: Path) ->
         )
 
 
-def save_rates_per_symbol(
-    hourly_by_symbol: dict[str, "pl.DataFrame"], output_dir: Path
-) -> None:
+def save_rates_per_symbol(hourly_by_symbol: dict[str, "pl.DataFrame"], output_dir: Path) -> None:
     """Save hourly aggregated rates to per-symbol Parquet files.
 
     :param hourly_by_symbol: Dict from :func:`aggregate_hourly_rates`.
@@ -825,9 +819,7 @@ def save_rates_per_symbol(
     for symbol, df in sorted(hourly_by_symbol.items()):
         filepath = output_dir / "rates" / symbol / "1h.parquet"
         append_parquet(df, filepath)
-        console.print(
-            f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]"
-        )
+        console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 
 def save_json(data: list, filename: str) -> None:
@@ -859,6 +851,7 @@ def save_csv(data: list, filename: str) -> None:
 # SUMMARY
 # =============================================================================
 
+
 def print_summary(records: list[FundingFactorRecord]) -> None:
     """Print summary statistics.
 
@@ -882,11 +875,7 @@ def print_summary(records: list[FundingFactorRecord]) -> None:
         avg_hourly = avg_rate * 3600
         avg_annual = avg_rate * 3600 * 8760
         longs_pay_count = sum(1 for r in sym_records if r.longs_pay_shorts)
-        direction = (
-            "Longs pay"
-            if longs_pay_count > len(sym_records) / 2
-            else "Shorts pay"
-        )
+        direction = "Longs pay" if longs_pay_count > len(sym_records) / 2 else "Shorts pay"
 
         table.add_row(
             symbol,
@@ -902,11 +891,10 @@ def print_summary(records: list[FundingFactorRecord]) -> None:
 
     timestamps = [r.block_timestamp for r in records if r.block_timestamp]
     if timestamps:
-        first = datetime.fromtimestamp(min(timestamps), tz=timezone.utc)
-        last = datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
+        first = datetime.fromtimestamp(min(timestamps), tz=UTC)
+        last = datetime.fromtimestamp(max(timestamps), tz=UTC)
         console.print(
-            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to "
-            f"[cyan]{last.isoformat()}[/cyan]"
+            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to [cyan]{last.isoformat()}[/cyan]"
         )
 
     console.print(f"  Total Funding events: [cyan]{len(records):,}[/cyan]")
@@ -916,6 +904,7 @@ def print_summary(records: list[FundingFactorRecord]) -> None:
 # =============================================================================
 # MAIN
 # =============================================================================
+
 
 async def async_main(args: argparse.Namespace) -> None:
     """Async main entry point.
@@ -934,14 +923,11 @@ async def async_main(args: argparse.Namespace) -> None:
         checkpoint = load_checkpoint(checkpoint_path)
         if checkpoint:
             from_block = checkpoint["last_block"] + 1
-            console.print(
-                f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]"
-            )
+            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
         else:
             from_block = GMX_V2_GENESIS_BLOCK
             console.print(
-                f"  No checkpoint found. Starting from genesis: "
-                f"[cyan]{from_block:,}[/cyan]"
+                f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]"
             )
     elif from_block is None:
         from_block = GMX_V2_GENESIS_BLOCK
@@ -955,9 +941,7 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.market:
         header_lines.append(f"Market:      [cyan]{args.market}[/cyan]")
     if args.resume:
-        header_lines.append(
-            f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})"
-        )
+        header_lines.append(f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})")
 
     console.print(
         Panel(

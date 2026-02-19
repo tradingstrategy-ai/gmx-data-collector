@@ -5,10 +5,10 @@ incremental updates.
 """
 
 import json
+from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from dataclasses import dataclass, asdict
-from datetime import datetime
 
 
 @dataclass
@@ -78,7 +78,7 @@ class CheckpointManager:
             return None
 
         try:
-            with open(checkpoint_path, "r") as f:
+            with open(checkpoint_path) as f:
                 data = json.load(f)
                 return Checkpoint(**data)
         except (json.JSONDecodeError, TypeError, KeyError) as e:
@@ -136,7 +136,7 @@ class CheckpointManager:
         checkpoints = []
         for checkpoint_file in self.checkpoint_dir.glob("*_checkpoint.json"):
             try:
-                with open(checkpoint_file, "r") as f:
+                with open(checkpoint_file) as f:
                     data = json.load(f)
                     checkpoints.append(Checkpoint(**data))
             except (json.JSONDecodeError, TypeError, KeyError) as e:

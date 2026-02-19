@@ -2,10 +2,8 @@
 
 import json
 import logging
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Dict
-
+from datetime import UTC, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +31,7 @@ class CycleMetrics:
     total_symbols_attempted: int = 0
     symbols_succeeded: int = 0
     symbols_failed: int = 0
-    candles_added: Dict[str, Dict[str, int]] = field(default_factory=dict)
+    candles_added: dict[str, dict[str, int]] = field(default_factory=dict)
     errors: list[dict] = field(default_factory=list)
     data_loss_events: list[dict] = field(default_factory=list)
 
@@ -50,7 +48,7 @@ class HealthMonitor:
         :param log_metrics: Whether to log metrics
         """
         self.log_metrics = log_metrics
-        self.daemon_start_time = datetime.now(timezone.utc)
+        self.daemon_start_time = datetime.now(UTC)
         self.current_cycle: CycleMetrics | None = None
         self.cycle_count = 0
         self.total_cycles_completed = 0
@@ -63,7 +61,7 @@ class HealthMonitor:
         self.cycle_count += 1
         self.current_cycle = CycleMetrics(
             cycle_number=self.cycle_count,
-            start_time=datetime.now(timezone.utc),
+            start_time=datetime.now(UTC),
         )
 
         if self.log_metrics:
@@ -77,9 +75,7 @@ class HealthMonitor:
                 )
             )
 
-    def record_symbol_success(
-        self, symbol: str, candles_by_timeframe: Dict[str, int]
-    ) -> None:
+    def record_symbol_success(self, symbol: str, candles_by_timeframe: dict[str, int]) -> None:
         """Record successful collection for a symbol.
 
         :param symbol: Token symbol
@@ -92,9 +88,7 @@ class HealthMonitor:
         self.current_cycle.symbols_succeeded += 1
         self.current_cycle.candles_added[symbol] = candles_by_timeframe
 
-    def record_symbol_failure(
-        self, symbol: str, error: str, timeframe: str = None
-    ) -> None:
+    def record_symbol_failure(self, symbol: str, error: str, timeframe: str = None) -> None:
         """Record failed collection for a symbol.
 
         :param symbol: Token symbol
@@ -111,7 +105,7 @@ class HealthMonitor:
                 "symbol": symbol,
                 "timeframe": timeframe,
                 "error": error,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         )
 
@@ -162,7 +156,7 @@ class HealthMonitor:
             logger.warning("No active cycle to end")
             return
 
-        self.current_cycle.end_time = datetime.now(timezone.utc)
+        self.current_cycle.end_time = datetime.now(UTC)
         self.current_cycle.total_symbols_attempted = total_symbols
         self.current_cycle.duration_seconds = (
             self.current_cycle.end_time - self.current_cycle.start_time
@@ -180,8 +174,7 @@ class HealthMonitor:
         # Log cycle summary
         if self.log_metrics:
             total_candles = sum(
-                sum(tf_candles.values())
-                for tf_candles in self.current_cycle.candles_added.values()
+                sum(tf_candles.values()) for tf_candles in self.current_cycle.candles_added.values()
             )
 
             logger.info(
@@ -204,9 +197,7 @@ class HealthMonitor:
 
         :return: Health status dictionary
         """
-        uptime_seconds = (
-            datetime.now(timezone.utc) - self.daemon_start_time
-        ).total_seconds()
+        uptime_seconds = (datetime.now(UTC) - self.daemon_start_time).total_seconds()
 
         # Determine status
         if not self.current_cycle:
@@ -214,8 +205,7 @@ class HealthMonitor:
         elif self.current_cycle.symbols_failed > 0:
             # Degraded if some symbols failed
             failure_rate = (
-                self.current_cycle.symbols_failed
-                / self.current_cycle.total_symbols_attempted
+                self.current_cycle.symbols_failed / self.current_cycle.total_symbols_attempted
             )
             status = "degraded" if failure_rate < 0.5 else "unhealthy"
         else:
@@ -228,9 +218,7 @@ class HealthMonitor:
             "total_cycles_completed": self.total_cycles_completed,
             "total_cycles_failed": self.total_cycles_failed,
             "last_cycle_end_time": (
-                self.last_cycle_end_time.isoformat()
-                if self.last_cycle_end_time
-                else None
+                self.last_cycle_end_time.isoformat() if self.last_cycle_end_time else None
             ),
             "current_cycle": (
                 {

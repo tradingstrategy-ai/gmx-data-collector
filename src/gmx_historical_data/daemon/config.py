@@ -162,8 +162,8 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "ZRO",
         "tBTC",
         "wstETH",  # Only has ETH-denominated feed (wstETH/ETH), not USD
-        "rETH",    # Only has ETH-denominated feed (rETH/ETH), not USD
-        "cbETH",   # Only has ETH-denominated feed (cbETH/ETH), not USD
+        "rETH",  # Only has ETH-denominated feed (rETH/ETH), not USD
+        "cbETH",  # Only has ETH-denominated feed (cbETH/ETH), not USD
     ]
 
 
@@ -185,6 +185,9 @@ class DaemonConfig:
     :param hypersync_api_token: Optional HyperSync API token for authentication
     :param hypersync_endpoint: HyperSync API endpoint URL
     :param enable_adaptive_gap_detection: If True, query API for actual data range to detect data loss
+    :param collect_live_funding: If True, append live GMX funding rate after each collection cycle
+    :param live_funding_feather_dir: Directory containing funding rate feather files to update
+        (required when collect_live_funding is True)
     """
 
     collection_interval_minutes: int = 60
@@ -201,12 +204,20 @@ class DaemonConfig:
     hypersync_api_token: str | None = None
     hypersync_endpoint: str = "https://arbitrum.hypersync.xyz"
     enable_adaptive_gap_detection: bool = True
+    collect_live_funding: bool = False
+    live_funding_feather_dir: Path | None = None
 
     def __post_init__(self):
         """Validate configuration after initialization."""
         # Ensure output_dir is a Path object
         if not isinstance(self.output_dir, Path):
             self.output_dir = Path(self.output_dir)
+
+        # Ensure live_funding_feather_dir is a Path object (if set)
+        if self.live_funding_feather_dir is not None and not isinstance(
+            self.live_funding_feather_dir, Path
+        ):
+            self.live_funding_feather_dir = Path(self.live_funding_feather_dir)
 
         # Initialize fallback_rpc_urls if None
         if self.fallback_rpc_urls is None:
@@ -269,9 +280,7 @@ class DaemonConfig:
         try:
             collection_interval_minutes = int(interval_str)
         except ValueError:
-            raise ValueError(
-                f"COLLECTION_INTERVAL_MINUTES must be an integer, got: {interval_str}"
-            )
+            raise ValueError(f"COLLECTION_INTERVAL_MINUTES must be an integer, got: {interval_str}")
 
         # Optional - specific symbols (comma-separated)
         symbols_str = os.getenv("COLLECTION_SYMBOLS", "").strip()
@@ -293,9 +302,7 @@ class DaemonConfig:
         try:
             timeframe_concurrency = int(concurrency_str)
         except ValueError:
-            raise ValueError(
-                f"TIMEFRAME_CONCURRENCY must be an integer, got: {concurrency_str}"
-            )
+            raise ValueError(f"TIMEFRAME_CONCURRENCY must be an integer, got: {concurrency_str}")
 
         # Optional - health check port
         port_str = os.getenv("HEALTH_CHECK_PORT", "8080")
@@ -317,13 +324,18 @@ class DaemonConfig:
 
         # Optional - HyperSync configuration
         hypersync_api_token = os.getenv("HYPERSYNC_API_TOKEN")
-        hypersync_endpoint = os.getenv(
-            "HYPERSYNC_ENDPOINT", "https://arbitrum.hypersync.xyz"
-        )
+        hypersync_endpoint = os.getenv("HYPERSYNC_ENDPOINT", "https://arbitrum.hypersync.xyz")
 
         # Optional - adaptive gap detection (enabled by default)
         adaptive_gap_str = os.getenv("ENABLE_ADAPTIVE_GAP_DETECTION", "true").lower()
         enable_adaptive_gap_detection = adaptive_gap_str in ("true", "1", "yes")
+
+        # Optional - live funding rate appender
+        collect_live_funding_str = os.getenv("COLLECT_LIVE_FUNDING", "false").lower()
+        collect_live_funding = collect_live_funding_str in ("true", "1", "yes")
+
+        live_feather_str = os.getenv("LIVE_FUNDING_FEATHER_DIR", "").strip()
+        live_funding_feather_dir = Path(live_feather_str) if live_feather_str else None
 
         return cls(
             collection_interval_minutes=collection_interval_minutes,
@@ -340,4 +352,6 @@ class DaemonConfig:
             hypersync_api_token=hypersync_api_token,
             hypersync_endpoint=hypersync_endpoint,
             enable_adaptive_gap_detection=enable_adaptive_gap_detection,
+            collect_live_funding=collect_live_funding,
+            live_funding_feather_dir=live_funding_feather_dir,
         )

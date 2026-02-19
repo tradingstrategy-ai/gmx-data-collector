@@ -75,35 +75,34 @@ CRONJOB SETUP
 import argparse
 import asyncio
 import json
-import os
 import sys
 import time
 from collections import defaultdict
-from dataclasses import dataclass, asdict, field
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import hypersync
-from hypersync import (
-    HypersyncClient,
-    ClientConfig,
-    Query,
-    LogSelection,
-    FieldSelection,
-    LogField,
-    BlockField,
-)
 from eth_abi import decode as abi_decode
 from eth_utils import keccak
+from hypersync import (
+    BlockField,
+    ClientConfig,
+    FieldSelection,
+    HypersyncClient,
+    LogField,
+    LogSelection,
+    Query,
+)
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 # Optional imports
 try:
     import polars as pl
+
     HAS_POLARS = True
 except ImportError:
     HAS_POLARS = False
@@ -186,35 +185,160 @@ IDX_STRING = 6
 # Source: https://github.com/gmx-io/gmx-interface and on-chain data
 MARKETS = {
     # Arbitrum GM markets (major pairs)
-    "0x70d95587d40a2caf56bd97485ab3eec10bee6336": {"symbol": "ETH/USD", "indexToken": "WETH", "longToken": "WETH", "shortToken": "USDC"},
-    "0x47c031236e19d024b42f8ae6780e44a573170703": {"symbol": "BTC/USD", "indexToken": "WBTC", "longToken": "WBTC", "shortToken": "USDC"},
-    "0x7f1fa204bb700853d36994da19f830b6ad18455c": {"symbol": "LINK/USD", "indexToken": "LINK", "longToken": "LINK", "shortToken": "USDC"},
-    "0xc25cef6061cf5de5eb761b50e4743c1f5d7e5407": {"symbol": "ARB/USD", "indexToken": "ARB", "longToken": "ARB", "shortToken": "USDC"},
-    "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9": {"symbol": "SOL/USD", "indexToken": "SOL", "longToken": "SOL", "shortToken": "USDC"},
-    "0xc7abb2c5f3bf3ceb389df0eecd6120d451170b50": {"symbol": "UNI/USD", "indexToken": "UNI", "longToken": "UNI", "shortToken": "USDC"},
-    "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4": {"symbol": "DOGE/USD", "indexToken": "DOGE", "longToken": "WETH", "shortToken": "USDC"},
-    "0xb686bcb112660343e6d15bdb65297e110c8311c4": {"symbol": "LTC/USD", "indexToken": "LTC", "longToken": "WETH", "shortToken": "USDC"},
-    "0xe2fecb78f76d937648c47e4e2cd5e47d27411545": {"symbol": "XRP/USD", "indexToken": "XRP", "longToken": "WETH", "shortToken": "USDC"},
-    "0x2d340912aa47e33c90efb078e69e70efe2b34b9b": {"symbol": "ATOM/USD", "indexToken": "ATOM", "longToken": "WETH", "shortToken": "USDC"},
-    "0x63dc80ee90f26363b3fcd609f370bb5549d6dbca": {"symbol": "NEAR/USD", "indexToken": "NEAR", "longToken": "WETH", "shortToken": "USDC"},
-    "0x0ccb4faa6f1f1b30911619f1184082ab4e25813c": {"symbol": "AAVE/USD", "indexToken": "AAVE", "longToken": "WETH", "shortToken": "USDC"},
-    "0x450bb6774dd8a756274e0ab4107953259d2ac541": {"symbol": "AVAX/USD", "indexToken": "AVAX", "longToken": "WETH", "shortToken": "USDC"},
-    "0xd9535bb5f58a1a75032416f2dfe7880c30575a41": {"symbol": "OP/USD", "indexToken": "OP", "longToken": "WETH", "shortToken": "USDC"},
-    "0xb56e5e2fb50d6fb510b4e4c086dcde66a866da24": {"symbol": "GMX/USD", "indexToken": "GMX", "longToken": "GMX", "shortToken": "USDC"},
-    "0x7c11f78ce78768518d743e81fdfa2f860c6b9a77": {"symbol": "PEPE/USD", "indexToken": "PEPE", "longToken": "WETH", "shortToken": "USDC"},
-    "0x2b477989a149b17073d9c9c82ec9cb03591325a6": {"symbol": "WIF/USD", "indexToken": "WIF", "longToken": "WETH", "shortToken": "USDC"},
+    "0x70d95587d40a2caf56bd97485ab3eec10bee6336": {
+        "symbol": "ETH/USD",
+        "indexToken": "WETH",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x47c031236e19d024b42f8ae6780e44a573170703": {
+        "symbol": "BTC/USD",
+        "indexToken": "WBTC",
+        "longToken": "WBTC",
+        "shortToken": "USDC",
+    },
+    "0x7f1fa204bb700853d36994da19f830b6ad18455c": {
+        "symbol": "LINK/USD",
+        "indexToken": "LINK",
+        "longToken": "LINK",
+        "shortToken": "USDC",
+    },
+    "0xc25cef6061cf5de5eb761b50e4743c1f5d7e5407": {
+        "symbol": "ARB/USD",
+        "indexToken": "ARB",
+        "longToken": "ARB",
+        "shortToken": "USDC",
+    },
+    "0x09400d9db990d5ed3f35d7be61dfaeb900af03c9": {
+        "symbol": "SOL/USD",
+        "indexToken": "SOL",
+        "longToken": "SOL",
+        "shortToken": "USDC",
+    },
+    "0xc7abb2c5f3bf3ceb389df0eecd6120d451170b50": {
+        "symbol": "UNI/USD",
+        "indexToken": "UNI",
+        "longToken": "UNI",
+        "shortToken": "USDC",
+    },
+    "0x6853ea96ff216fab11d2d930ce3c508556a4bdc4": {
+        "symbol": "DOGE/USD",
+        "indexToken": "DOGE",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0xb686bcb112660343e6d15bdb65297e110c8311c4": {
+        "symbol": "LTC/USD",
+        "indexToken": "LTC",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0xe2fecb78f76d937648c47e4e2cd5e47d27411545": {
+        "symbol": "XRP/USD",
+        "indexToken": "XRP",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x2d340912aa47e33c90efb078e69e70efe2b34b9b": {
+        "symbol": "ATOM/USD",
+        "indexToken": "ATOM",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x63dc80ee90f26363b3fcd609f370bb5549d6dbca": {
+        "symbol": "NEAR/USD",
+        "indexToken": "NEAR",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x0ccb4faa6f1f1b30911619f1184082ab4e25813c": {
+        "symbol": "AAVE/USD",
+        "indexToken": "AAVE",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x450bb6774dd8a756274e0ab4107953259d2ac541": {
+        "symbol": "AVAX/USD",
+        "indexToken": "AVAX",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0xd9535bb5f58a1a75032416f2dfe7880c30575a41": {
+        "symbol": "OP/USD",
+        "indexToken": "OP",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0xb56e5e2fb50d6fb510b4e4c086dcde66a866da24": {
+        "symbol": "GMX/USD",
+        "indexToken": "GMX",
+        "longToken": "GMX",
+        "shortToken": "USDC",
+    },
+    "0x7c11f78ce78768518d743e81fdfa2f860c6b9a77": {
+        "symbol": "PEPE/USD",
+        "indexToken": "PEPE",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x2b477989a149b17073d9c9c82ec9cb03591325a6": {
+        "symbol": "WIF/USD",
+        "indexToken": "WIF",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
     # Additional markets discovered from events
-    "0xe68caaacdf6439628dfd2fe624847602991a31eb": {"symbol": "BTC/USD [WBTC-WBTC]", "indexToken": "WBTC", "longToken": "WBTC", "shortToken": "WBTC"},
-    "0xdab9ba9e3a301ccb353f18b4c8542ba2149e4010": {"symbol": "ETH/USD [WETH-WETH]", "indexToken": "WETH", "longToken": "WETH", "shortToken": "WETH"},
-    "0x08a902113f7f41a8658ebb1175f9c847bf4fb9d8": {"symbol": "ETH/USD [WETH-USDT]", "indexToken": "WETH", "longToken": "WETH", "shortToken": "USDT"},
+    "0xe68caaacdf6439628dfd2fe624847602991a31eb": {
+        "symbol": "BTC/USD [WBTC-WBTC]",
+        "indexToken": "WBTC",
+        "longToken": "WBTC",
+        "shortToken": "WBTC",
+    },
+    "0xdab9ba9e3a301ccb353f18b4c8542ba2149e4010": {
+        "symbol": "ETH/USD [WETH-WETH]",
+        "indexToken": "WETH",
+        "longToken": "WETH",
+        "shortToken": "WETH",
+    },
+    "0x08a902113f7f41a8658ebb1175f9c847bf4fb9d8": {
+        "symbol": "ETH/USD [WETH-USDT]",
+        "indexToken": "WETH",
+        "longToken": "WETH",
+        "shortToken": "USDT",
+    },
     # Swap-only markets
-    "0x9c2433dfd71f7f773b4507b5a24f28d6e91e7f81": {"symbol": "USDC/USDT", "indexToken": "USDC", "longToken": "USDC", "shortToken": "USDT"},
+    "0x9c2433dfd71f7f773b4507b5a24f28d6e91e7f81": {
+        "symbol": "USDC/USDT",
+        "indexToken": "USDC",
+        "longToken": "USDC",
+        "shortToken": "USDT",
+    },
     # More synthetic markets
-    "0x1d50e6c56333c8a0d78c0e1c0e25e7e9f5c8c8c8": {"symbol": "MATIC/USD", "indexToken": "MATIC", "longToken": "WETH", "shortToken": "USDC"},
-    "0x248c35760068ce009a13076d573ed3497a47bcd4": {"symbol": "STX/USD", "indexToken": "STX", "longToken": "WETH", "shortToken": "USDC"},
-    "0xd70d3d6d0f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f": {"symbol": "ORDI/USD", "indexToken": "ORDI", "longToken": "WETH", "shortToken": "USDC"},
+    "0x1d50e6c56333c8a0d78c0e1c0e25e7e9f5c8c8c8": {
+        "symbol": "MATIC/USD",
+        "indexToken": "MATIC",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0x248c35760068ce009a13076d573ed3497a47bcd4": {
+        "symbol": "STX/USD",
+        "indexToken": "STX",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
+    "0xd70d3d6d0f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f": {
+        "symbol": "ORDI/USD",
+        "indexToken": "ORDI",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
     # WETH/USDC.e market
-    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": {"symbol": "ETH/USD [WETH]", "indexToken": "WETH", "longToken": "WETH", "shortToken": "USDC"},
+    "0x82af49447d8a07e3bd95bd0d56f35241523fbab1": {
+        "symbol": "ETH/USD [WETH]",
+        "indexToken": "WETH",
+        "longToken": "WETH",
+        "shortToken": "USDC",
+    },
 }
 
 # Token decimals
@@ -233,6 +357,7 @@ TOKEN_DECIMALS = {
 # =============================================================================
 # DATA CLASSES
 # =============================================================================
+
 
 @dataclass
 class OpenInterestRecord:
@@ -255,6 +380,7 @@ class OpenInterestRecord:
     :ivar logIndex: Log index within the transaction
     :ivar eventType: Event name (OpenInterestUpdated)
     """
+
     symbol: str
     market: str
     collateralToken: str
@@ -263,8 +389,8 @@ class OpenInterestRecord:
     deltaUsd: str
     nextValueUsd: str
     # Token values (stored as strings)
-    deltaTokens: Optional[str]
-    nextValueTokens: Optional[str]
+    deltaTokens: str | None
+    nextValueTokens: str | None
     # Human-readable
     deltaUsdFormatted: str
     nextValueUsdFormatted: str
@@ -290,6 +416,7 @@ class DailyOISnapshot:
     :ivar eventCount: Number of OI events on this date
     :ivar lastBlockNumber: Last block number for this date
     """
+
     symbol: str
     date: str
     longOiUsd: str
@@ -303,6 +430,7 @@ class DailyOISnapshot:
 # =============================================================================
 # ABI DECODING (from extract_funding_rates.py)
 # =============================================================================
+
 
 def decode_event_log_data(hex_data: str) -> dict:
     """Decode GMX V2 EventLog1 data field using eth_abi.
@@ -327,15 +455,15 @@ def decode_event_log_data(hex_data: str) -> dict:
 
     try:
         data_bytes = bytes.fromhex(data)
-        msg_sender, event_name, event_data = abi_decode(
-            EVENTLOG1_ABI_TYPES, data_bytes
-        )
+        msg_sender, event_name, event_data = abi_decode(EVENTLOG1_ABI_TYPES, data_bytes)
     except Exception as e:
         return {"_decode_error": str(e)}
 
     result = {
         "event_name": event_name,
-        "msg_sender": msg_sender if isinstance(msg_sender, str) else ("0x" + msg_sender.hex() if isinstance(msg_sender, bytes) else str(msg_sender)),
+        "msg_sender": msg_sender
+        if isinstance(msg_sender, str)
+        else ("0x" + msg_sender.hex() if isinstance(msg_sender, bytes) else str(msg_sender)),
         "addresses": {},
         "uints": {},
         "ints": {},
@@ -346,7 +474,11 @@ def decode_event_log_data(hex_data: str) -> dict:
 
     # Extract key-value pairs from each section
     for key, val in event_data[IDX_ADDRESS][0]:  # addressItems.items
-        addr = val if isinstance(val, str) else ("0x" + val.hex() if isinstance(val, bytes) else str(val))
+        addr = (
+            val
+            if isinstance(val, str)
+            else ("0x" + val.hex() if isinstance(val, bytes) else str(val))
+        )
         result["addresses"][key] = addr.lower() if isinstance(addr, str) else addr
 
     for key, val in event_data[IDX_UINT][0]:  # uintItems.items
@@ -371,7 +503,8 @@ def decode_event_log_data(hex_data: str) -> dict:
 # CHECKPOINT
 # =============================================================================
 
-def load_checkpoint(path: Path) -> Optional[dict]:
+
+def load_checkpoint(path: Path) -> dict | None:
     """Load checkpoint from JSON file.
 
     :param path: Path to checkpoint JSON file
@@ -380,7 +513,7 @@ def load_checkpoint(path: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         console.print(f"[yellow]Warning: could not load checkpoint {path}: {e}[/yellow]")
@@ -408,7 +541,7 @@ def save_checkpoint(
         "last_block": last_block,
         "last_timestamp": last_timestamp,
         "total_events": total_events,
-        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+        "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
     with open(path, "w") as f:
@@ -419,6 +552,7 @@ def save_checkpoint(
 # =============================================================================
 # HYPERSYNC EXTRACTION
 # =============================================================================
+
 
 async def create_client(network: str) -> HypersyncClient:
     """Create HyperSync client.
@@ -495,8 +629,8 @@ async def extract_oi_events(
     client: HypersyncClient,
     network: str,
     from_block: int,
-    to_block: Optional[int],
-    market_filter: Optional[str] = None,
+    to_block: int | None,
+    market_filter: str | None = None,
 ) -> list[OpenInterestRecord]:
     """Extract open interest events from GMX V2 EventEmitter.
 
@@ -525,8 +659,8 @@ async def extract_oi_events(
             LogSelection(
                 address=[emitter],
                 topics=[
-                    [EVENT_LOG1_TOPIC],   # topic0: EventLog1 signature
-                    oi_topic1_hashes,     # topic1: OI event hashes
+                    [EVENT_LOG1_TOPIC],  # topic0: EventLog1 signature
+                    oi_topic1_hashes,  # topic1: OI event hashes
                 ],
             )
         ],
@@ -548,7 +682,9 @@ async def extract_oi_events(
 
     total_blocks = (to_block or 0) - from_block
     console.print(f"  EventEmitter: [cyan]{emitter}[/cyan]")
-    console.print(f"  Block range:  [cyan]{from_block:,}[/cyan] to [cyan]{to_block or 'latest':,}[/cyan] ({total_blocks:,} blocks)")
+    console.print(
+        f"  Block range:  [cyan]{from_block:,}[/cyan] to [cyan]{to_block or 'latest':,}[/cyan] ({total_blocks:,} blocks)"
+    )
     console.print(f"  Events:       [cyan]{', '.join(OI_EVENT_NAMES)}[/cyan]")
 
     # Pairing dict for USD+token event matching.
@@ -686,7 +822,9 @@ async def extract_oi_events(
                         nextValueUsdFormatted=next_value_formatted,
                         blockNumber=log.block_number,
                         blockTimestamp=timestamp,
-                        blockDatetime=datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat() if timestamp else "",
+                        blockDatetime=datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
+                        if timestamp
+                        else "",
                         transactionHash=tx_hash,
                         logIndex=current_log_index,
                         eventType="OpenInterestUpdated",
@@ -724,7 +862,11 @@ async def extract_oi_events(
                             nextValueUsdFormatted="0",
                             blockNumber=log.block_number,
                             blockTimestamp=timestamp,
-                            blockDatetime=datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat() if timestamp else "",
+                            blockDatetime=datetime.fromtimestamp(
+                                timestamp, tz=UTC
+                            ).isoformat()
+                            if timestamp
+                            else "",
                             transactionHash=tx_hash,
                             logIndex=current_log_index,
                             eventType="OpenInterestInTokensUpdated",
@@ -753,8 +895,10 @@ async def extract_oi_events(
             if total_blocks > 0:
                 pct = (highest_block - from_block) / total_blocks * 100
                 crossed = None
-                while (next_milestone_idx < len(PROGRESS_MILESTONES)
-                       and pct >= PROGRESS_MILESTONES[next_milestone_idx]):
+                while (
+                    next_milestone_idx < len(PROGRESS_MILESTONES)
+                    and pct >= PROGRESS_MILESTONES[next_milestone_idx]
+                ):
                     crossed = PROGRESS_MILESTONES[next_milestone_idx]
                     next_milestone_idx += 1
                 if crossed is not None:
@@ -797,6 +941,7 @@ async def extract_oi_events(
 # AGGREGATION
 # =============================================================================
 
+
 def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISnapshot]:
     """Compute end-of-day OI snapshots per market.
 
@@ -814,7 +959,9 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
     by_symbol_date: dict[tuple[str, str], list[OpenInterestRecord]] = defaultdict(list)
     for r in records:
         if r.blockTimestamp:
-            date_str = datetime.fromtimestamp(r.blockTimestamp, tz=timezone.utc).strftime("%Y-%m-%d")
+            date_str = datetime.fromtimestamp(r.blockTimestamp, tz=UTC).strftime(
+                "%Y-%m-%d"
+            )
         else:
             continue
         by_symbol_date[(r.symbol, date_str)].append(r)
@@ -858,16 +1005,18 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
 
         last_block = max(r.blockNumber for r in day_records)
 
-        snapshots.append(DailyOISnapshot(
-            symbol=symbol,
-            date=date_str,
-            longOiUsd=f"{long_usd:.2f}",
-            shortOiUsd=f"{short_usd:.2f}",
-            totalOiUsd=f"{total_usd:.2f}",
-            longShortRatio=f"{ls_ratio:.4f}" if ls_ratio != float("inf") else "inf",
-            eventCount=len(day_records),
-            lastBlockNumber=last_block,
-        ))
+        snapshots.append(
+            DailyOISnapshot(
+                symbol=symbol,
+                date=date_str,
+                longOiUsd=f"{long_usd:.2f}",
+                shortOiUsd=f"{short_usd:.2f}",
+                totalOiUsd=f"{total_usd:.2f}",
+                longShortRatio=f"{ls_ratio:.4f}" if ls_ratio != float("inf") else "inf",
+                eventCount=len(day_records),
+                lastBlockNumber=last_block,
+            )
+        )
 
     return snapshots
 
@@ -875,6 +1024,7 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
 # =============================================================================
 # STORAGE
 # =============================================================================
+
 
 def append_parquet(new_df: "pl.DataFrame", filepath: Path) -> None:
     """Append new data to an existing Parquet file with deduplication.
@@ -918,7 +1068,9 @@ def save_raw_per_symbol(records: list[OpenInterestRecord], output_dir: Path) -> 
     :param output_dir: Base output directory (e.g., data/open_interest/arbitrum)
     """
     if not HAS_POLARS:
-        console.print("[red]Error: polars required for Parquet. Install with: pip install polars[/red]")
+        console.print(
+            "[red]Error: polars required for Parquet. Install with: pip install polars[/red]"
+        )
         return
 
     by_symbol: dict[str, list[OpenInterestRecord]] = defaultdict(list)
@@ -932,7 +1084,9 @@ def save_raw_per_symbol(records: list[OpenInterestRecord], output_dir: Path) -> 
 
         df = pl.DataFrame([asdict(r) for r in sym_records])
         append_parquet(df, filepath)
-        console.print(f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]")
+        console.print(
+            f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]"
+        )
 
 
 def save_snapshots_per_symbol(snapshots: list[DailyOISnapshot], output_dir: Path) -> None:
@@ -942,7 +1096,9 @@ def save_snapshots_per_symbol(snapshots: list[DailyOISnapshot], output_dir: Path
     :param output_dir: Base output directory (e.g., data/open_interest/arbitrum)
     """
     if not HAS_POLARS:
-        console.print("[red]Error: polars required for Parquet. Install with: pip install polars[/red]")
+        console.print(
+            "[red]Error: polars required for Parquet. Install with: pip install polars[/red]"
+        )
         return
 
     by_symbol: dict[str, list[DailyOISnapshot]] = defaultdict(list)
@@ -970,7 +1126,9 @@ def save_snapshots_per_symbol(snapshots: list[DailyOISnapshot], output_dir: Path
             filepath.parent.mkdir(parents=True, exist_ok=True)
             df.sort("date").write_parquet(filepath)
 
-        console.print(f"  Snapshots: [cyan]{len(sym_snapshots):,}[/cyan] days -> [green]{filepath}[/green]")
+        console.print(
+            f"  Snapshots: [cyan]{len(sym_snapshots):,}[/cyan] days -> [green]{filepath}[/green]"
+        )
 
 
 def save_json(data: list, filename: str) -> None:
@@ -1002,6 +1160,7 @@ def save_csv(data: list, filename: str) -> None:
 # =============================================================================
 # SUMMARY
 # =============================================================================
+
 
 def print_summary(records: list[OpenInterestRecord], snapshots: list[DailyOISnapshot]) -> None:
     """Print summary statistics using Rich tables.
@@ -1054,9 +1213,11 @@ def print_summary(records: list[OpenInterestRecord], snapshots: list[DailyOISnap
     # Time range from records
     timestamps = [r.blockTimestamp for r in records if r.blockTimestamp]
     if timestamps:
-        first = datetime.fromtimestamp(min(timestamps), tz=timezone.utc)
-        last = datetime.fromtimestamp(max(timestamps), tz=timezone.utc)
-        console.print(f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to [cyan]{last.isoformat()}[/cyan]")
+        first = datetime.fromtimestamp(min(timestamps), tz=UTC)
+        last = datetime.fromtimestamp(max(timestamps), tz=UTC)
+        console.print(
+            f"\n  Time range: [cyan]{first.isoformat()}[/cyan] to [cyan]{last.isoformat()}[/cyan]"
+        )
 
     console.print(f"  Total OI events: [cyan]{len(records):,}[/cyan]")
     console.print(f"  Daily snapshots: [cyan]{len(snapshots):,}[/cyan]")
@@ -1067,13 +1228,16 @@ def print_summary(records: list[OpenInterestRecord], snapshots: list[DailyOISnap
 # MAIN
 # =============================================================================
 
+
 async def async_main(args: argparse.Namespace) -> None:
     """Async main entry point.
 
     :param args: Parsed command-line arguments
     """
     output_dir = Path(args.output_dir) / args.network
-    checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else output_dir / "checkpoints"
+    checkpoint_dir = (
+        Path(args.checkpoint_dir) if args.checkpoint_dir else output_dir / "checkpoints"
+    )
     checkpoint_path = checkpoint_dir / "oi_checkpoint.json"
 
     # Determine starting block
@@ -1087,7 +1251,9 @@ async def async_main(args: argparse.Namespace) -> None:
             console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
         else:
             from_block = GMX_V2_GENESIS_BLOCK
-            console.print(f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]")
+            console.print(
+                f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]"
+            )
     elif from_block is None:
         from_block = GMX_V2_GENESIS_BLOCK
 
@@ -1102,14 +1268,18 @@ async def async_main(args: argparse.Namespace) -> None:
         header_lines.append(f"Market:      [cyan]{args.market}[/cyan]")
     if args.resume:
         header_lines.append(f"Resume:      [cyan]enabled[/cyan] (checkpoint: {checkpoint_path})")
-    header_lines.append(f"Retries:     [cyan]{MAX_RETRIES}[/cyan] (backoff: {RETRY_BASE_DELAY}s base)")
+    header_lines.append(
+        f"Retries:     [cyan]{MAX_RETRIES}[/cyan] (backoff: {RETRY_BASE_DELAY}s base)"
+    )
 
-    console.print(Panel(
-        "\n".join(header_lines),
-        title="GMX V2 Open Interest Extractor",
-        subtitle="HyperSync + eth_abi",
-        border_style="blue",
-    ))
+    console.print(
+        Panel(
+            "\n".join(header_lines),
+            title="GMX V2 Open Interest Extractor",
+            subtitle="HyperSync + eth_abi",
+            border_style="blue",
+        )
+    )
 
     # Create client
     with console.status("Connecting to HyperSync..."):
@@ -1123,7 +1293,9 @@ async def async_main(args: argparse.Namespace) -> None:
         console.print(f"  Latest block: [cyan]{to_block:,}[/cyan]")
 
     if from_block >= to_block:
-        console.print(f"\n[yellow]Already up to date (from_block {from_block:,} >= to_block {to_block:,})[/yellow]")
+        console.print(
+            f"\n[yellow]Already up to date (from_block {from_block:,} >= to_block {to_block:,})[/yellow]"
+        )
         return
 
     # Extract events
@@ -1209,22 +1381,40 @@ Examples:
         """,
     )
 
-    parser.add_argument("--network", choices=["arbitrum", "avalanche"],
-                        default="arbitrum", help="Network (default: arbitrum)")
-    parser.add_argument("--from-block", type=int, default=None,
-                        help="Start block for backfill (default: genesis or checkpoint)")
-    parser.add_argument("--to-block", type=int, default=None,
-                        help="End block (default: latest)")
-    parser.add_argument("--output-dir", type=str, default="./data/open_interest",
-                        help="Base output directory (default: ./data/open_interest)")
-    parser.add_argument("--output", choices=["json", "csv", "parquet"],
-                        default="parquet", help="Output format (default: parquet)")
-    parser.add_argument("--market", type=str, default=None,
-                        help="Filter by market symbol (e.g., 'ETH/USD')")
-    parser.add_argument("--resume", action="store_true",
-                        help="Enable checkpoint-based incremental mode")
-    parser.add_argument("--checkpoint-dir", type=str, default=None,
-                        help="Override checkpoint directory")
+    parser.add_argument(
+        "--network",
+        choices=["arbitrum", "avalanche"],
+        default="arbitrum",
+        help="Network (default: arbitrum)",
+    )
+    parser.add_argument(
+        "--from-block",
+        type=int,
+        default=None,
+        help="Start block for backfill (default: genesis or checkpoint)",
+    )
+    parser.add_argument("--to-block", type=int, default=None, help="End block (default: latest)")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./data/open_interest",
+        help="Base output directory (default: ./data/open_interest)",
+    )
+    parser.add_argument(
+        "--output",
+        choices=["json", "csv", "parquet"],
+        default="parquet",
+        help="Output format (default: parquet)",
+    )
+    parser.add_argument(
+        "--market", type=str, default=None, help="Filter by market symbol (e.g., 'ETH/USD')"
+    )
+    parser.add_argument(
+        "--resume", action="store_true", help="Enable checkpoint-based incremental mode"
+    )
+    parser.add_argument(
+        "--checkpoint-dir", type=str, default=None, help="Override checkpoint directory"
+    )
 
     args = parser.parse_args()
 
@@ -1236,6 +1426,7 @@ Examples:
     except Exception as e:
         print(f"Error: {e}")
         import traceback
+
         traceback.print_exc()
         sys.exit(1)
 

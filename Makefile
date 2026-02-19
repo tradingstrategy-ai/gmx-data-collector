@@ -3,22 +3,17 @@
 # ==============================================================================
 # You can override these defaults:
 #   1. Edit values below
-#   2. Pass on command line: make funding-full OUTPUT_DIR=/custom/path
+#   2. Pass on command line: make funding-unified INCLUDE_DATASTORE=1
 # ==============================================================================
 
 # Network configuration
 NETWORK ?= arbitrum
 
 # Directory paths
-OUTPUT_DIR ?= ./user_data/data/gmx
-CHECKPOINT_DIR ?= ./checkpoints
+UNIFIED_OUTPUT_DIR ?= ./data/funding
+FEATHER_DIR ?= ./user_data
 LOG_DIR ?= ./logs
-
-# File paths
-LOG_FILE ?= $(LOG_DIR)/funding.log
-PID_FILE ?= $(LOG_DIR)/funding.pid
-FUNDING_FACTOR_LOG ?= $(LOG_DIR)/funding_factor.log
-FUNDING_FACTOR_PID ?= $(LOG_DIR)/funding_factor.pid
+CHECKPOINT_DIR ?= ./checkpoints
 
 # Extraction options
 OUTPUT_FORMAT ?= parquet
@@ -26,272 +21,74 @@ FROM_BLOCK ?=
 TO_BLOCK ?=
 MARKET ?=
 
-# Background mode
-BACKGROUND ?= --background
-
-# Unified extraction
+# Set INCLUDE_DATASTORE=1 to include archive RPC reads (slow, requires JSON_RPC_ARBITRUM)
 INCLUDE_DATASTORE ?=
-UNIFIED_OUTPUT_DIR ?= ./data/funding
 
 # ==============================================================================
 # Targets
 # ==============================================================================
 
-.PHONY: help install funding-full funding-incremental funding-foreground funding-status funding-stop funding-logs funding-clean show-config funding-factor-full funding-factor-foreground funding-unified funding-unified-resume funding-unified-merge
+.PHONY: help install show-config \
+        funding-unified funding-unified-resume funding-unified-merge \
+        funding-feather funding-full \
+        funding-status funding-stop funding-logs funding-clean
 
 # Default target
 help:
 	@echo "GMX Historical Data Makefile"
 	@echo ""
 	@echo "Configuration (current values):"
-	@echo "  NETWORK         = $(NETWORK)"
-	@echo "  OUTPUT_DIR      = $(OUTPUT_DIR)"
-	@echo "  CHECKPOINT_DIR  = $(CHECKPOINT_DIR)"
-	@echo "  LOG_DIR         = $(LOG_DIR)"
-	@echo "  OUTPUT_FORMAT   = $(OUTPUT_FORMAT)"
+	@echo "  NETWORK             = $(NETWORK)"
+	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
+	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
+	@echo "  LOG_DIR             = $(LOG_DIR)"
+	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
+	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes (archive RPC required),no)"
 	@echo ""
-	@echo "Available targets:"
+	@echo "Main targets:"
+	@echo "  funding-unified      - Extract all phases + merge (HyperSync only, fast)"
+	@echo "  funding-full         - Extract all phases including DataStore (slow, archive RPC)"
+	@echo "  funding-feather      - Export to FreqTrade feather format (run after extraction)"
+	@echo "  funding-unified-resume - Incremental update (resume from checkpoints)"
+	@echo "  funding-unified-merge  - Merge only (no re-extraction)"
+	@echo ""
+	@echo "Utility targets:"
 	@echo "  install              - Install dependencies with Poetry"
-	@echo "  funding-full         - Run full historical extraction (background)"
-	@echo "  funding-incremental  - Run incremental extraction (background)"
-	@echo "  funding-foreground   - Run extraction in foreground (for debugging)"
-	@echo "  funding-status       - Check status of background extraction"
-	@echo "  funding-stop         - Stop background extraction"
-	@echo "  funding-logs         - Tail extraction logs in real-time"
 	@echo "  funding-clean        - Clean up temporary files"
-	@echo "  funding-factor-full  - Run funding factor extraction (background)"
-	@echo "  funding-factor-foreground - Run funding factor extraction (foreground)"
-	@echo "  funding-unified      - Run unified extraction (all phases + merge)"
-	@echo "  funding-unified-resume - Incremental unified extraction"
-	@echo "  funding-unified-merge - Merge existing data only (no extraction)"
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
-	@echo "Usage Examples:"
-	@echo "  make install                              # First time setup"
-	@echo "  make funding-full                         # Start extraction with defaults"
-	@echo "  make funding-full OUTPUT_DIR=/mnt/data    # Custom output directory"
-	@echo "  make funding-status                       # Check if running"
-	@echo "  make funding-logs                         # Watch progress"
+	@echo "Usage examples:"
+	@echo "  make funding-unified                           # Fast: HyperSync phases only"
+	@echo "  make funding-full                              # Full history including DataStore"
+	@echo "  make funding-feather                           # Export to feather after extraction"
+	@echo "  make funding-full MARKET=ETH/USD               # Single market"
+	@echo "  make funding-unified-resume                    # Top up stale markets"
 	@echo ""
-	@echo "Override defaults on command line:"
-	@echo "  make funding-full NETWORK=avalanche OUTPUT_DIR=/custom/path"
-	@echo ""
-	@echo "Or edit defaults at the top of this Makefile"
+	@echo "Tip: set JSON_RPC_ARBITRUM before funding-full"
+	@echo "  export JSON_RPC_ARBITRUM=https://your-archive-node"
 
 # Show current configuration
 show-config:
 	@echo "Current Configuration:"
-	@echo "  NETWORK         = $(NETWORK)"
-	@echo "  OUTPUT_DIR      = $(OUTPUT_DIR)"
-	@echo "  CHECKPOINT_DIR  = $(CHECKPOINT_DIR)"
-	@echo "  LOG_DIR         = $(LOG_DIR)"
-	@echo "  LOG_FILE        = $(LOG_FILE)"
-	@echo "  PID_FILE        = $(PID_FILE)"
-	@echo "  OUTPUT_FORMAT   = $(OUTPUT_FORMAT)"
-	@echo "  FROM_BLOCK      = $(FROM_BLOCK)"
-	@echo "  TO_BLOCK        = $(TO_BLOCK)"
-	@echo "  MARKET          = $(MARKET)"
-	@echo "  BACKGROUND      = $(BACKGROUND)"
+	@echo "  NETWORK             = $(NETWORK)"
+	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
+	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
+	@echo "  CHECKPOINT_DIR      = $(CHECKPOINT_DIR)"
+	@echo "  LOG_DIR             = $(LOG_DIR)"
+	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
+	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes,no)"
+	@echo "  FROM_BLOCK          = $(FROM_BLOCK)"
+	@echo "  TO_BLOCK            = $(TO_BLOCK)"
+	@echo "  MARKET              = $(MARKET)"
 
 # Install dependencies
 install:
 	@echo "Installing dependencies with Poetry..."
 	poetry install
-	@echo "✓ Installation complete"
-
-# Build the extraction command with all options
-define EXTRACT_CMD
-poetry run python scripts/extract_funding_rates.py \
-	--network $(NETWORK) \
-	--output $(OUTPUT_FORMAT) \
-	--output-dir $(OUTPUT_DIR) \
-	--resume \
-	--checkpoint-dir $(CHECKPOINT_DIR) \
-	$(if $(BACKGROUND),$(BACKGROUND),) \
-	$(if $(BACKGROUND),--log-file $(LOG_FILE),) \
-	$(if $(BACKGROUND),--pid-file $(PID_FILE),) \
-	$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
-	$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
-	$(if $(MARKET),--market $(MARKET),)
-endef
-
-# Full historical extraction (background mode)
-funding-full:
-	@echo "Starting full historical funding rate extraction..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(OUTPUT_DIR)"
-	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
-	@echo "  Log file:    $(LOG_FILE)"
-	@echo "  Mode:        background"
-	@echo ""
-	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
-	@$(EXTRACT_CMD)
-	@echo ""
-	@echo "✓ Background extraction started"
-	@echo "  Check status: make funding-status"
-	@echo "  Watch logs:   make funding-logs"
-
-# Incremental extraction (for daily/hourly updates)
-funding-incremental:
-	@echo "Starting incremental funding rate extraction..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(OUTPUT_DIR)"
-	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
-	@echo "  Log file:    $(LOG_FILE)"
-	@echo "  Mode:        incremental + background"
-	@echo ""
-	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
-	@$(EXTRACT_CMD)
-	@echo ""
-	@echo "✓ Background extraction started"
-	@echo "  Check status: make funding-status"
-	@echo "  Watch logs:   make funding-logs"
-
-# Run in foreground (for debugging)
-funding-foreground:
-	@echo "Starting funding rate extraction in foreground..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(OUTPUT_DIR)"
-	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
-	@echo "  Mode:        foreground (Ctrl+C to stop)"
-	@echo ""
-	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
-	@poetry run python scripts/extract_funding_rates.py \
-		--network $(NETWORK) \
-		--output $(OUTPUT_FORMAT) \
-		--output-dir $(OUTPUT_DIR) \
-		--resume \
-		--checkpoint-dir $(CHECKPOINT_DIR) \
-		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
-		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
-		$(if $(MARKET),--market $(MARKET),)
-
-# Check status of background process
-funding-status:
-	@echo "Checking funding extraction status..."
-	@echo "  PID file: $(PID_FILE)"
-	@echo "  Log file: $(LOG_FILE)"
-	@echo ""
-	@if [ -f $(PID_FILE) ]; then \
-		PID=$$(cat $(PID_FILE)); \
-		if ps -p $$PID > /dev/null 2>&1; then \
-			echo "✓ Funding extraction is running (PID: $$PID)"; \
-			echo ""; \
-			echo "Memory usage:"; \
-			ps -p $$PID -o pid,vsz,rss,comm | head -2; \
-			echo ""; \
-			echo "Command line:"; \
-			ps -p $$PID -o args= | fold -s -w 80; \
-			echo ""; \
-			echo "Latest log entries (last 5 lines):"; \
-			tail -5 $(LOG_FILE) 2>/dev/null || echo "No logs yet"; \
-		else \
-			echo "✗ Funding extraction is NOT running (stale PID file)"; \
-			echo ""; \
-			echo "Last log entries (last 10 lines):"; \
-			tail -10 $(LOG_FILE) 2>/dev/null || echo "No logs"; \
-		fi \
-	else \
-		echo "✗ No PID file found at $(PID_FILE)"; \
-		echo ""; \
-		echo "Extraction is not running in background mode."; \
-	fi
-
-# Stop background extraction
-funding-stop:
-	@echo "Stopping funding extraction..."
-	@if [ -f $(PID_FILE) ]; then \
-		PID=$$(cat $(PID_FILE)); \
-		if ps -p $$PID > /dev/null 2>&1; then \
-			kill $$PID && echo "✓ Sent SIGTERM to process $$PID"; \
-			echo "  Waiting for graceful shutdown..."; \
-			sleep 3; \
-			if ps -p $$PID > /dev/null 2>&1; then \
-				echo "⚠ Process still running, sending SIGKILL..."; \
-				kill -9 $$PID; \
-				sleep 1; \
-			fi; \
-			if ! ps -p $$PID > /dev/null 2>&1; then \
-				echo "✓ Process stopped successfully"; \
-			fi; \
-			rm $(PID_FILE); \
-		else \
-			echo "✗ Process not running (stale PID file)"; \
-			rm $(PID_FILE); \
-		fi \
-	else \
-		echo "✗ No PID file found at $(PID_FILE)"; \
-	fi
-
-# Tail logs in real-time
-funding-logs:
-	@echo "Tailing funding extraction logs (Ctrl+C to exit)..."
-	@echo "  Log file: $(LOG_FILE)"
-	@echo ""
-	@tail -f $(LOG_FILE) 2>/dev/null || echo "No log file found at $(LOG_FILE)"
-
-# Clean up temporary files
-funding-clean:
-	@echo "Cleaning up temporary files..."
-	@rm -rf test_* gmx_v2_funding_*.json
-	@echo "✓ Cleaned up temporary test files and JSON outputs"
-	@echo ""
-	@echo "To clean persistent data, run manually:"
-	@echo "  rm -rf $(OUTPUT_DIR)      # Delete all extracted data"
-	@echo "  rm -rf $(CHECKPOINT_DIR)  # Delete checkpoints (forces full re-extraction)"
-	@echo "  rm -rf $(LOG_DIR)         # Delete logs"
+	@echo "Done"
 
 # ==============================================================================
-# Funding Factor Extraction (fundingFactorPerSecond from Funding events)
-# ==============================================================================
-
-# Build the funding factor extraction command
-define FACTOR_CMD
-poetry run python scripts/extract_funding_factor.py \
-	--network $(NETWORK) \
-	--output $(OUTPUT_FORMAT) \
-	--output-dir $(OUTPUT_DIR) \
-	--resume \
-	--checkpoint-dir $(CHECKPOINT_DIR) \
-	$(if $(BACKGROUND),$(BACKGROUND),) \
-	$(if $(BACKGROUND),--log-file $(FUNDING_FACTOR_LOG),) \
-	$(if $(BACKGROUND),--pid-file $(FUNDING_FACTOR_PID),) \
-	$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
-	$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
-	$(if $(MARKET),--market $(MARKET),)
-endef
-
-funding-factor-full:
-	@echo "Starting funding factor extraction (fundingFactorPerSecond)..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(OUTPUT_DIR)"
-	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
-	@echo "  Log file:    $(FUNDING_FACTOR_LOG)"
-	@echo "  Mode:        background"
-	@echo ""
-	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
-	@$(FACTOR_CMD)
-
-funding-factor-foreground:
-	@echo "Starting funding factor extraction in foreground..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(OUTPUT_DIR)"
-	@echo "  Checkpoints: $(CHECKPOINT_DIR)"
-	@echo "  Mode:        foreground (Ctrl+C to stop)"
-	@echo ""
-	@mkdir -p $(OUTPUT_DIR) $(CHECKPOINT_DIR) $(LOG_DIR)
-	@poetry run python scripts/extract_funding_factor.py \
-		--network $(NETWORK) \
-		--output $(OUTPUT_FORMAT) \
-		--output-dir $(OUTPUT_DIR) \
-		--resume \
-		--checkpoint-dir $(CHECKPOINT_DIR) \
-		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
-		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
-		$(if $(MARKET),--market $(MARKET),)
-
-# ==============================================================================
-# Unified Funding Rate Extraction (all sources + merge)
+# Unified Extraction (recommended entry point)
 # ==============================================================================
 
 define UNIFIED_CMD
@@ -300,24 +97,35 @@ poetry run python scripts/extract_unified_funding.py \
 	--output-dir $(UNIFIED_OUTPUT_DIR) \
 	--output $(OUTPUT_FORMAT) \
 	$(if $(INCLUDE_DATASTORE),--include-datastore,) \
+	$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
+	$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
 	$(if $(MARKET),--market $(MARKET),)
 endef
 
-# Full unified extraction (HyperSync phases + merge by default)
+# HyperSync phases only (fast, no archive RPC needed)
 funding-unified:
-	@echo "Starting unified funding rate extraction..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(UNIFIED_OUTPUT_DIR)"
-	@echo "  Datastore:   $(if $(INCLUDE_DATASTORE),included (slow),skipped (use INCLUDE_DATASTORE=1 to enable))"
+	@echo "Starting unified funding rate extraction (HyperSync only)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(UNIFIED_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(UNIFIED_OUTPUT_DIR) $(LOG_DIR)
 	$(UNIFIED_CMD)
 
-# Incremental unified update (resume from checkpoints)
+# Full history including DataStore (slow, requires archive RPC)
+funding-full:
+	@echo "Starting full funding rate extraction (HyperSync + DataStore)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(UNIFIED_OUTPUT_DIR)"
+	@echo "  RPC:        $$JSON_RPC_ARBITRUM"
+	@echo ""
+	@mkdir -p $(UNIFIED_OUTPUT_DIR) $(LOG_DIR) $(CHECKPOINT_DIR)
+	$(UNIFIED_CMD) --include-datastore
+
+# Incremental update (resume from checkpoints, skip already-extracted ranges)
 funding-unified-resume:
 	@echo "Starting incremental unified funding rate extraction..."
-	@echo "  Network:     $(NETWORK)"
-	@echo "  Output dir:  $(UNIFIED_OUTPUT_DIR)"
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(UNIFIED_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(UNIFIED_OUTPUT_DIR) $(LOG_DIR)
 	$(UNIFIED_CMD) --resume
@@ -331,3 +139,44 @@ funding-unified-merge:
 		--output-dir $(UNIFIED_OUTPUT_DIR) \
 		--merge-only \
 		$(if $(MARKET),--market $(MARKET),)
+
+# Export to FreqTrade feather format (run after extraction)
+funding-feather:
+	@echo "Exporting to FreqTrade feather format..."
+	@echo "  Source:     $(UNIFIED_OUTPUT_DIR)"
+	@echo "  Feather:    $(FEATHER_DIR)"
+	@echo ""
+	@mkdir -p $(FEATHER_DIR)
+	poetry run python scripts/extract_unified_funding.py \
+		--network $(NETWORK) \
+		--output-dir $(UNIFIED_OUTPUT_DIR) \
+		--output feather \
+		--feather-dir $(FEATHER_DIR) \
+		--merge-only \
+		$(if $(MARKET),--market $(MARKET),)
+
+# ==============================================================================
+# Utility targets
+# ==============================================================================
+
+# Clean up temporary files
+funding-clean:
+	@echo "Cleaning up temporary files..."
+	@rm -rf test_* gmx_v2_funding_*.json
+	@echo "Done"
+	@echo ""
+	@echo "To clean persistent data, run manually:"
+	@echo "  rm -rf $(UNIFIED_OUTPUT_DIR)   # Delete all extracted data"
+	@echo "  rm -rf $(CHECKPOINT_DIR)       # Delete checkpoints"
+	@echo "  rm -rf $(LOG_DIR)              # Delete logs"
+
+# Status / stop / logs kept for compatibility with background processes
+funding-status:
+	@echo "No background process tracking in unified mode."
+	@echo "Use 'ps aux | grep extract_unified' to check for running processes."
+
+funding-stop:
+	@echo "Use Ctrl+C to stop a foreground process, or 'kill' for background."
+
+funding-logs:
+	@echo "Use 'tail -f $(LOG_DIR)/funding.log' or watch terminal output directly."

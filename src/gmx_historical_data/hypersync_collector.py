@@ -6,14 +6,15 @@ querying blockchain events directly through an optimized indexing system.
 
 import asyncio
 from dataclasses import dataclass
+
 import hypersync
 from hypersync import (
+    BlockField,
     ClientConfig,
-    Query,
-    LogSelection,
     FieldSelection,
     LogField,
-    BlockField,
+    LogSelection,
+    Query,
 )
 
 from gmx_historical_data.config import ANSWER_UPDATED_TOPIC
@@ -118,9 +119,7 @@ class HyperSyncCollector:
         self.current_client_idx = (self.current_client_idx + 1) % len(self.clients)
         return client
 
-    async def _query_single_client(
-        self, client, client_idx: int, query: Query, timeout: float
-    ):
+    async def _query_single_client(self, client, client_idx: int, query: Query, timeout: float):
         """Query a single client with timeout.
 
         :param client: HyperSync client
@@ -134,9 +133,7 @@ class HyperSyncCollector:
             async with self.request_semaphore:
                 response = await asyncio.wait_for(client.get(query), timeout=timeout)
                 config = self.client_configs[client_idx]
-                print(
-                    f"  ✓ Response from {config['endpoint']} (token: {config['token']})"
-                )
+                print(f"  ✓ Response from {config['endpoint']} (token: {config['token']})")
                 return response, client_idx
         except Exception:
             config = self.client_configs[client_idx]
@@ -268,9 +265,7 @@ class HyperSyncCollector:
                 # Simultaneous query mode: race all endpoints
                 if self.use_simultaneous_queries and len(self.clients) > 1:
                     if attempt == 0:
-                        print(
-                            f"  Racing {len(self.clients)} endpoint+token combinations..."
-                        )
+                        print(f"  Racing {len(self.clients)} endpoint+token combinations...")
                     response = await self._execute_simultaneous_query(query, timeout)
                     return response
 
@@ -280,12 +275,10 @@ class HyperSyncCollector:
                 # Use semaphore to limit concurrent requests
                 async with self.request_semaphore:
                     # Add timeout to prevent hanging queries
-                    response = await asyncio.wait_for(
-                        client.get(query), timeout=timeout
-                    )
+                    response = await asyncio.wait_for(client.get(query), timeout=timeout)
                     return response
 
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 last_exception = e
                 if attempt < max_retries:
                     print(
@@ -324,9 +317,7 @@ class HyperSyncCollector:
                         tokens_tried = 0  # Reset for next retry cycle
 
                 if attempt < max_retries:
-                    print(
-                        f"  [Retry {attempt + 1}/{max_retries}] HyperSync query failed: {e}"
-                    )
+                    print(f"  [Retry {attempt + 1}/{max_retries}] HyperSync query failed: {e}")
                     print(f"  Retrying in {backoff:.1f}s...")
                     await asyncio.sleep(backoff)
                     backoff *= 2  # Exponential backoff
@@ -375,9 +366,7 @@ class HyperSyncCollector:
             log_data = {
                 "block_number": log.block_number,
                 "block_timestamp": block_timestamps.get(log.block_number, 0),
-                "transaction_hash": log.transaction_hash
-                if log.transaction_hash
-                else "",
+                "transaction_hash": log.transaction_hash if log.transaction_hash else "",
                 "log_index": log.log_index if log.log_index is not None else 0,
                 "address": log.address if log.address else "",
                 "topics": [topic for topic in (log.topics or []) if topic is not None],
@@ -427,9 +416,7 @@ class HyperSyncCollector:
             )
 
             try:
-                response = await self._execute_query_with_retry(
-                    query, max_retries=max_retries
-                )
+                response = await self._execute_query_with_retry(query, max_retries=max_retries)
 
                 if response.data.logs:
                     # Found events! Return the first one
@@ -475,9 +462,7 @@ class HyperSyncCollector:
         all_events = []
         stats = CollectionStats()
 
-        batches = await self.collect_events(
-            aggregator_addresses, start_block, end_block
-        )
+        batches = await self.collect_events(aggregator_addresses, start_block, end_block)
         for batch in batches:
             all_events.extend(batch)
 

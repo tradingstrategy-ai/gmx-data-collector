@@ -8,12 +8,10 @@ only fetching gaps instead of refetching everything.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
 from gmx_historical_data.block_timestamp_cache import BlockTimestampCache
-from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +45,8 @@ class SymbolCoverage:
 
     symbol: str
     has_data: bool = False
-    earliest_timestamp: Optional[int] = None
-    latest_timestamp: Optional[int] = None
+    earliest_timestamp: int | None = None
+    latest_timestamp: int | None = None
     timeframe_coverage: dict[str, TimeframeCoverage] = field(default_factory=dict)
 
 
@@ -160,7 +158,7 @@ class DataCoverageAnalyzer:
         cache: BlockTimestampCache,
         genesis_block: int,
         safety_margin: int = 1000,
-    ) -> tuple[Optional[int], Optional[int]]:
+    ) -> tuple[int | None, int | None]:
         """Calculate missing block range for incremental collection.
 
         Determines which blocks need to be fetched based on existing data
@@ -174,9 +172,7 @@ class DataCoverageAnalyzer:
         """
         # No data: fetch from genesis to latest
         if not coverage.has_data:
-            logger.info(
-                f"{coverage.symbol}: No existing data, fetch from genesis {genesis_block}"
-            )
+            logger.info(f"{coverage.symbol}: No existing data, fetch from genesis {genesis_block}")
             return (genesis_block, None)
 
         # Convert genesis block to timestamp for comparison

@@ -45,7 +45,7 @@ class LogCapture:
 
         # Open log file
         try:
-            self.log_file = open(self.log_path, 'w', encoding='utf-8')
+            self.log_file = open(self.log_path, "w", encoding="utf-8")
         except OSError as e:
             print(f"Error: Cannot create log file: {e}", file=sys.stderr)
             raise typer.Exit(1)
@@ -133,7 +133,7 @@ class TeeWriter:
 
         :return: True if primary stream is a TTY
         """
-        return self.primary.isatty() if hasattr(self.primary, 'isatty') else False
+        return self.primary.isatty() if hasattr(self.primary, "isatty") else False
 
     def writable(self) -> bool:
         """Check if stream is writable.
@@ -148,8 +148,8 @@ class TeeWriter:
 
         :return: Encoding name
         """
-        enc = getattr(self.primary, 'encoding', None)
-        return enc if enc is not None else 'utf-8'
+        enc = getattr(self.primary, "encoding", None)
+        return enc if enc is not None else "utf-8"
 
     def __getattr__(self, name: str):
         """Delegate unknown attributes to primary stream.
@@ -166,5 +166,5 @@ class TeeWriter:
         :param text: Text potentially containing ANSI codes
         :return: Clean text without ANSI codes
         """
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        return ansi_escape.sub('', text)
+        ansi_escape = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        return ansi_escape.sub("", text)

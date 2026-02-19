@@ -5,14 +5,14 @@ and fast querying.
 """
 
 from pathlib import Path
+
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-import pandas as pd
 
+from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
-from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
-
 
 # Raw events schema
 RAW_EVENTS_SCHEMA = pa.schema(

@@ -5,9 +5,10 @@ PositionDecrease events from GMX EventEmitter contract.
 """
 
 from dataclasses import dataclass
+
+from eth_defi.gmx.events import GMXEventData, decode_gmx_event
 from eth_utils import keccak
 from web3 import Web3
-from eth_defi.gmx.events import decode_gmx_event, GMXEventData
 
 
 @dataclass
@@ -114,8 +115,7 @@ def parse_position_event(
     # Validate event is a position event
     if event_data.event_name not in ["PositionIncrease", "PositionDecrease"]:
         raise ValueError(
-            f"Expected PositionIncrease or PositionDecrease, "
-            f"got {event_data.event_name}"
+            f"Expected PositionIncrease or PositionDecrease, got {event_data.event_name}"
         )
 
     # Extract position-specific fields - trust eth_defi to return correct types

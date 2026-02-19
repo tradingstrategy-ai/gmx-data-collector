@@ -93,8 +93,12 @@ class FreqtradeExporter:
             total_candles = 0
 
             # Determine timeframes from candle + funding data
-            candle_tfs = set(self.storage.list_timeframes(symbol)) if symbol in candle_symbols else set()
-            funding_tfs = set(self.list_funding_timeframes(symbol)) if symbol in funding_symbols else set()
+            candle_tfs = (
+                set(self.storage.list_timeframes(symbol)) if symbol in candle_symbols else set()
+            )
+            funding_tfs = (
+                set(self.list_funding_timeframes(symbol)) if symbol in funding_symbols else set()
+            )
             available_tfs = sorted(candle_tfs | funding_tfs)
 
             if timeframes:
@@ -109,7 +113,11 @@ class FreqtradeExporter:
                     if not df.empty:
                         ft_df = self._transform_dataframe(df)
                         filename = self._get_freqtrade_filename(
-                            symbol, tf, output_format, trading_mode, quote_currency,
+                            symbol,
+                            tf,
+                            output_format,
+                            trading_mode,
+                            quote_currency,
                         )
                         self._write(ft_df, gmx_dir / filename, output_format)
                         ohlcv_files += 1
@@ -118,7 +126,11 @@ class FreqtradeExporter:
                         # --- Mark price (OHLCV proxy) ---
                         mark_df = self._transform_mark_price(df)
                         mark_filename = self._get_freqtrade_filename(
-                            symbol, tf, output_format, trading_mode, quote_currency,
+                            symbol,
+                            tf,
+                            output_format,
+                            trading_mode,
+                            quote_currency,
                             candle_type="mark",
                         )
                         self._write(mark_df, gmx_dir / mark_filename, output_format)
@@ -130,7 +142,11 @@ class FreqtradeExporter:
                     if funding_df is not None and not funding_df.empty:
                         ft_funding = self._transform_funding_rate(funding_df)
                         funding_filename = self._get_freqtrade_filename(
-                            symbol, tf, output_format, trading_mode, quote_currency,
+                            symbol,
+                            tf,
+                            output_format,
+                            trading_mode,
+                            quote_currency,
                             candle_type="funding_rate",
                         )
                         self._write(ft_funding, gmx_dir / funding_filename, output_format)
@@ -158,8 +174,7 @@ class FreqtradeExporter:
         if not self.funding_dir.exists():
             return []
         return sorted(
-            d.name for d in self.funding_dir.iterdir()
-            if d.is_dir() and list(d.glob("*.parquet"))
+            d.name for d in self.funding_dir.iterdir() if d.is_dir() and list(d.glob("*.parquet"))
         )
 
     def list_funding_timeframes(self, symbol: str) -> list[str]:

@@ -25,24 +25,24 @@ import logging
 import random
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Optional
 
-from rich.console import Console
-from web3 import Web3
+from eth_defi.gmx.events import decode_gmx_event
+from eth_utils import keccak
 from hypersync import (
-    HypersyncClient,
-    ClientConfig,
-    Query,
-    LogSelection,
-    FieldSelection,
-    LogField,
     BlockField,
+    ClientConfig,
+    FieldSelection,
+    HypersyncClient,
+    LogField,
+    LogSelection,
+    Query,
     StreamConfig,
 )
-from eth_utils import keccak
-from eth_defi.gmx.events import decode_gmx_event
-
+from rich.console import Console
+from web3 import Web3
 from web3.providers.base import BaseProvider
 from web3.types import RPCEndpoint, RPCResponse
 
@@ -60,9 +60,7 @@ console = Console()
 # EventLog1 signature hash from GMX EventEmitter contract
 # EventLog1(address,string,string,bytes32,EventData)
 # This is topic0 for most GMX events including OraclePriceUpdate
-EVENTLOG1_SIGNATURE = (
-    "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
-)
+EVENTLOG1_SIGNATURE = "0x137a44067c8961cd7e1d876f4754a5a3a75989b4552f1843fc69c3b372def160"
 
 
 class ArbitrumMockProvider(BaseProvider):
@@ -85,9 +83,7 @@ class ArbitrumMockProvider(BaseProvider):
         if method == "eth_chainId":
             return {"jsonrpc": "2.0", "id": 1, "result": hex(self.ARBITRUM_CHAIN_ID)}
         # For any other method, raise an error - we shouldn't need RPC
-        raise ValueError(
-            f"ArbitrumMockProvider only supports eth_chainId, got: {method}"
-        )
+        raise ValueError(f"ArbitrumMockProvider only supports eth_chainId, got: {method}")
 
     def isConnected(self) -> bool:
         """Mock connection check."""
@@ -106,7 +102,7 @@ async def retry_with_backoff(
     base_delay: float = DEFAULT_BASE_DELAY,
     max_delay: float = DEFAULT_MAX_DELAY,
     operation_name: str = "operation",
-    key_rotator: Optional['HyperSyncKeyRotator'] = None,
+    key_rotator: Optional["HyperSyncKeyRotator"] = None,
 ):
     """Execute async function with progressive backoff retry and key rotation.
 
@@ -144,7 +140,7 @@ async def retry_with_backoff(
             error_msg_lower = str(e).lower()
             is_rate_limit = any(
                 keyword in error_msg_lower
-                for keyword in ['rate limit', 'too many requests', '429', 'quota']
+                for keyword in ["rate limit", "too many requests", "429", "quota"]
             )
 
             if is_rate_limit and key_rotator is not None:
@@ -177,9 +173,7 @@ async def retry_with_backoff(
                 await asyncio.sleep(delay)
                 attempt += 1
             else:
-                logger.error(
-                    f"{operation_name} failed after {max_retries + 1} attempts: {e}"
-                )
+                logger.error(f"{operation_name} failed after {max_retries + 1} attempts: {e}")
                 attempt += 1
 
     raise last_exception
@@ -279,7 +273,7 @@ class OraclePriceCollector:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
         retry_max_delay: float = DEFAULT_MAX_DELAY,
-        key_rotator: Optional['HyperSyncKeyRotator'] = None,
+        key_rotator: Optional["HyperSyncKeyRotator"] = None,
     ):
         """Initialize oracle price collector.
 
@@ -431,9 +425,7 @@ class OraclePriceCollector:
         event_data = decode_gmx_event(self._web3, eth_defi_log_dict)
 
         if event_data is None:
-            raise ValueError(
-                f"Failed to decode oracle event from log at block {block_number}"
-            )
+            raise ValueError(f"Failed to decode oracle event from log at block {block_number}")
 
         if event_data.event_name != "OraclePriceUpdate":
             raise ValueError(f"Expected OraclePriceUpdate, got {event_data.event_name}")
@@ -500,9 +492,7 @@ class OraclePriceCollector:
         """
         if not logs:
             return []
-        return await asyncio.to_thread(
-            self._decode_batch_sync, logs, block_timestamps, stats
-        )
+        return await asyncio.to_thread(self._decode_batch_sync, logs, block_timestamps, stats)
 
     async def _collect_chunk_with_retry(
         self,
@@ -528,6 +518,7 @@ class OraclePriceCollector:
         :param stats: Optional CollectionStats for tracking errors
         :return: Tuple of (events list, block_timestamps dict)
         """
+
         async def collect_chunk_operation():
             return await self._collect_chunk(
                 chunk_start,
@@ -702,8 +693,7 @@ class OraclePriceCollector:
             logger.info(stats.summary())
             if stats.failed_events > 0 and stats.first_failures:
                 logger.warning(
-                    f"First {len(stats.first_failures)} decode failures: "
-                    f"{stats.first_failures}"
+                    f"First {len(stats.first_failures)} decode failures: {stats.first_failures}"
                 )
 
             return events
@@ -714,15 +704,11 @@ class OraclePriceCollector:
         for i in range(concurrency):
             chunk_start = start_block + (i * chunk_size)
             chunk_end = (
-                start_block + ((i + 1) * chunk_size) - 1
-                if i < concurrency - 1
-                else end_block
+                start_block + ((i + 1) * chunk_size) - 1 if i < concurrency - 1 else end_block
             )
             chunks.append((chunk_start, chunk_end))
 
-        logger.info(
-            f"Splitting into {len(chunks)} parallel chunks of ~{chunk_size:,} blocks each"
-        )
+        logger.info(f"Splitting into {len(chunks)} parallel chunks of ~{chunk_size:,} blocks each")
 
         # Process chunks in parallel (each chunk gets its own stats instance)
         chunk_stats = [CollectionStats() for _ in chunks]
@@ -746,9 +732,7 @@ class OraclePriceCollector:
 
         # Use merge sort O(n) since chunks are already sorted by block range
         # heapq.merge efficiently merges pre-sorted iterables
-        all_events = list(
-            heapq.merge(*chunk_events, key=lambda e: (e.block_number, e.log_index))
-        )
+        all_events = list(heapq.merge(*chunk_events, key=lambda e: (e.block_number, e.log_index)))
 
         # Aggregate stats from all chunks
         stats.total_events = len(all_events)

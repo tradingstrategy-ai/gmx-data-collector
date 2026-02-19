@@ -1,17 +1,20 @@
 """Multi-provider RPC wrapper with automatic failover and retry logic."""
 
-import time
 import logging
-from typing import Callable, Any, Optional
+import time
+from collections.abc import Callable
+from typing import Any
+
 from web3 import Web3
-from web3.providers import HTTPProvider
 from web3.exceptions import Web3Exception
+from web3.providers import HTTPProvider
 
 logger = logging.getLogger(__name__)
 
 
 class RPCProviderError(Exception):
     """Raised when all RPC providers fail."""
+
     pass
 
 
@@ -71,14 +74,14 @@ class MultiRPCProvider:
             f"Active: {self.get_current_rpc_url()}"
         )
 
-    def _create_web3_instance(self) -> Optional[Web3]:
+    def _create_web3_instance(self) -> Web3 | None:
         """Create Web3 instance with first working provider.
 
         :return: Web3 instance or None if all providers fail
         """
         for idx, url in enumerate(self.rpc_urls):
             try:
-                provider = HTTPProvider(url, request_kwargs={'timeout': 30})
+                provider = HTTPProvider(url, request_kwargs={"timeout": 30})
                 web3 = Web3(provider)
 
                 # Test connection
@@ -89,7 +92,9 @@ class MultiRPCProvider:
                 return web3
 
             except Exception as e:
-                logger.warning(f"Failed to connect to RPC {idx + 1}/{len(self.rpc_urls)} ({url}): {e}")
+                logger.warning(
+                    f"Failed to connect to RPC {idx + 1}/{len(self.rpc_urls)} ({url}): {e}"
+                )
                 self.provider_failure_counts[idx] = self.provider_failure_counts.get(idx, 0) + 1
                 continue
 
@@ -118,7 +123,7 @@ class MultiRPCProvider:
 
             try:
                 url = self.rpc_urls[next_idx]
-                provider = HTTPProvider(url, request_kwargs={'timeout': 30})
+                provider = HTTPProvider(url, request_kwargs={"timeout": 30})
                 web3 = Web3(provider)
 
                 # Test connection
@@ -134,7 +139,9 @@ class MultiRPCProvider:
 
             except Exception as e:
                 logger.warning(f"Fallback provider {next_idx + 1} also failed: {e}")
-                self.provider_failure_counts[next_idx] = self.provider_failure_counts.get(next_idx, 0) + 1
+                self.provider_failure_counts[next_idx] = (
+                    self.provider_failure_counts.get(next_idx, 0) + 1
+                )
                 continue
 
         logger.error("All RPC providers exhausted")
@@ -143,7 +150,7 @@ class MultiRPCProvider:
     def call_with_retry(
         self,
         func: Callable[[], Any],
-        max_retries: Optional[int] = None,
+        max_retries: int | None = None,
         error_msg: str = "RPC call failed",
     ) -> Any:
         """Execute function with retry logic and automatic provider failover.
@@ -178,10 +185,7 @@ class MultiRPCProvider:
 
                 # Calculate backoff with exponential increase
                 if attempt < max_retries - 1:
-                    backoff = min(
-                        self.initial_backoff * (2 ** attempt),
-                        self.max_backoff
-                    )
+                    backoff = min(self.initial_backoff * (2**attempt), self.max_backoff)
                     logger.info(f"Retrying in {backoff:.1f}s...")
                     time.sleep(backoff)
 

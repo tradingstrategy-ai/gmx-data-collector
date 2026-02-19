@@ -12,6 +12,7 @@ Topic layout:
 
 from dataclasses import dataclass
 from typing import Any
+
 from eth_abi import decode
 from web3 import Web3
 
@@ -59,9 +60,7 @@ class AnswerUpdatedEvent:
 class EventDecoder:
     """Decode AnswerUpdated events from HyperSync log data."""
 
-    ANSWER_UPDATED_TOPIC = (
-        "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
-    )
+    ANSWER_UPDATED_TOPIC = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
 
     @staticmethod
     def decode_event(log_data: dict[str, Any]) -> AnswerUpdatedEvent:
@@ -88,9 +87,7 @@ class EventDecoder:
 
         # Decode non-indexed parameters from data
         # data: timestamp (uint256)
-        data_bytes = (
-            bytes.fromhex(log_data["data"][2:]) if log_data.get("data") else b""
-        )
+        data_bytes = bytes.fromhex(log_data["data"][2:]) if log_data.get("data") else b""
         timestamp = decode(["uint256"], data_bytes)[0] if data_bytes else 0
 
         return AnswerUpdatedEvent(

@@ -6,17 +6,17 @@ timestamps and block numbers without excessive RPC calls.
 """
 
 import logging
-import pandas as pd
 from pathlib import Path
-from typing import Optional
-from web3 import Web3
+
+import pandas as pd
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from web3 import Web3
 
 from gmx_historical_data.config import (
-    GMX_V2_GENESIS_BLOCK,
     BLOCK_SAMPLE_INTERVAL,
     CACHE_STALE_THRESHOLD,
+    GMX_V2_GENESIS_BLOCK,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class BlockTimestampCache:
         self.web3 = web3
         self.genesis_block = genesis_block
         self.sample_interval = sample_interval
-        self.cache_df: Optional[pd.DataFrame] = None
+        self.cache_df: pd.DataFrame | None = None
 
         logger.info(
             f"Initialized BlockTimestampCache: path={cache_path}, "
@@ -153,7 +153,7 @@ class BlockTimestampCache:
 
         return estimated_timestamp
 
-    def build_cache(self, end_block: Optional[int] = None) -> None:
+    def build_cache(self, end_block: int | None = None) -> None:
         """Build cache from scratch by sampling blocks.
 
         Samples blocks from genesis_block to end_block at sample_interval intervals.
@@ -165,14 +165,10 @@ class BlockTimestampCache:
             end_block = self.web3.eth.block_number
             logger.info(f"Using current block as end_block: {end_block}")
 
-        logger.info(
-            f"Building block-timestamp cache from {self.genesis_block} to {end_block}"
-        )
+        logger.info(f"Building block-timestamp cache from {self.genesis_block} to {end_block}")
 
         # Calculate sample points
-        sample_blocks = list(
-            range(self.genesis_block, end_block + 1, self.sample_interval)
-        )
+        sample_blocks = list(range(self.genesis_block, end_block + 1, self.sample_interval))
 
         # Ensure end_block is included
         if sample_blocks[-1] != end_block:
@@ -192,21 +188,15 @@ class BlockTimestampCache:
             TaskProgressColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task(
-                "Fetching block timestamps...", total=len(sample_blocks)
-            )
+            task = progress.add_task("Fetching block timestamps...", total=len(sample_blocks))
 
             for block_num in sample_blocks:
                 try:
                     block = self.web3.eth.get_block(block_num)
-                    blocks_data.append(
-                        {"block": block_num, "timestamp": block.timestamp}
-                    )
+                    blocks_data.append({"block": block_num, "timestamp": block.timestamp})
                     progress.update(task, advance=1)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to fetch block {block_num}: {e}. Skipping."
-                    )
+                    logger.warning(f"Failed to fetch block {block_num}: {e}. Skipping.")
                     continue
 
         # Create DataFrame
@@ -222,9 +212,11 @@ class BlockTimestampCache:
         console.print(
             f"[green]✓[/green] Cache built with {len(df)} samples and saved to {self.cache_path}"
         )
-        logger.info(f"Cache built: {len(df)} samples from block {df['block'].iloc[0]} to {df['block'].iloc[-1]}")
+        logger.info(
+            f"Cache built: {len(df)} samples from block {df['block'].iloc[0]} to {df['block'].iloc[-1]}"
+        )
 
-    def update_cache(self, end_block: Optional[int] = None) -> None:
+    def update_cache(self, end_block: int | None = None) -> None:
         """Update cache with new blocks since last sample.
 
         Loads existing cache, appends new samples, and saves.
@@ -245,12 +237,12 @@ class BlockTimestampCache:
         last_cached_block = int(self.cache_df["block"].iloc[-1])
 
         if end_block <= last_cached_block:
-            logger.info(f"Cache is already up to date (cached={last_cached_block}, requested={end_block})")
+            logger.info(
+                f"Cache is already up to date (cached={last_cached_block}, requested={end_block})"
+            )
             return
 
-        logger.info(
-            f"Updating cache from block {last_cached_block} to {end_block}"
-        )
+        logger.info(f"Updating cache from block {last_cached_block} to {end_block}")
 
         # Calculate new sample points
         start_block = last_cached_block + self.sample_interval
@@ -262,9 +254,7 @@ class BlockTimestampCache:
         elif not sample_blocks:
             sample_blocks = [end_block]
 
-        console.print(
-            f"[cyan]Updating cache with {len(sample_blocks)} new samples...[/cyan]"
-        )
+        console.print(f"[cyan]Updating cache with {len(sample_blocks)} new samples...[/cyan]")
 
         # Fetch new timestamps
         new_blocks_data = []
@@ -275,21 +265,15 @@ class BlockTimestampCache:
             TaskProgressColumn(),
             console=console,
         ) as progress:
-            task = progress.add_task(
-                "Fetching new block timestamps...", total=len(sample_blocks)
-            )
+            task = progress.add_task("Fetching new block timestamps...", total=len(sample_blocks))
 
             for block_num in sample_blocks:
                 try:
                     block = self.web3.eth.get_block(block_num)
-                    new_blocks_data.append(
-                        {"block": block_num, "timestamp": block.timestamp}
-                    )
+                    new_blocks_data.append({"block": block_num, "timestamp": block.timestamp})
                     progress.update(task, advance=1)
                 except Exception as e:
-                    logger.warning(
-                        f"Failed to fetch block {block_num}: {e}. Skipping."
-                    )
+                    logger.warning(f"Failed to fetch block {block_num}: {e}. Skipping.")
                     continue
 
         # Append to existing cache
@@ -305,7 +289,9 @@ class BlockTimestampCache:
         console.print(
             f"[green]✓[/green] Cache updated with {len(new_df)} new samples (total: {len(self.cache_df)})"
         )
-        logger.info(f"Cache updated: now contains {len(self.cache_df)} samples up to block {self.cache_df['block'].iloc[-1]}")
+        logger.info(
+            f"Cache updated: now contains {len(self.cache_df)} samples up to block {self.cache_df['block'].iloc[-1]}"
+        )
 
     def _ensure_cache_loaded(self) -> None:
         """Ensure cache is loaded and up to date.

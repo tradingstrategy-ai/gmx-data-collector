@@ -5,10 +5,10 @@ a mapping from index token addresses to symbols, filtered to exclude
 markets that have public Chainlink price feeds.
 """
 
-from web3 import Web3
-from web3.exceptions import Web3Exception
 from eth_defi.gmx.config import GMXConfig
 from eth_defi.gmx.core.markets import Markets
+from web3 import Web3
+from web3.exceptions import Web3Exception
 
 from gmx_historical_data.daemon.config import get_gmx_markets_with_chainlink_feeds
 
@@ -59,9 +59,7 @@ class GMXTokenMapper:
                 # market_symbol may have suffixes like "ETH2", "ARB2" for different markets
                 # but market_metadata.symbol has the base symbol that GMX API accepts
                 metadata = market_data.get("market_metadata", {})
-                symbol = metadata.get("symbol", "") or market_data.get(
-                    "market_symbol", ""
-                )
+                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
                 if symbol:
                     mapping[addr_lower] = symbol
 
@@ -70,8 +68,7 @@ class GMXTokenMapper:
 
         except (Web3Exception, AssertionError) as e:
             raise RuntimeError(
-                f"Failed to fetch GMX markets. "
-                f"Check your Web3 connection and network support: {e}"
+                f"Failed to fetch GMX markets. Check your Web3 connection and network support: {e}"
             ) from e
         except Exception as e:
             raise RuntimeError(f"Unexpected error fetching GMX markets: {e}") from e
@@ -95,9 +92,7 @@ class GMXTokenMapper:
 
         # Filter to non-Chainlink markets
         non_chainlink = {
-            addr: symbol
-            for addr, symbol in all_tokens.items()
-            if symbol not in chainlink_symbols
+            addr: symbol for addr, symbol in all_tokens.items() if symbol not in chainlink_symbols
         }
 
         self._non_chainlink_cache = non_chainlink
@@ -118,9 +113,7 @@ class GMXTokenMapper:
 
         # Filter to Chainlink markets only
         chainlink = {
-            addr: symbol
-            for addr, symbol in all_tokens.items()
-            if symbol in chainlink_symbols
+            addr: symbol for addr, symbol in all_tokens.items() if symbol in chainlink_symbols
         }
 
         return chainlink
@@ -145,11 +138,7 @@ class GMXTokenMapper:
         # Invert the mapping (symbol -> address)
         symbol_to_addr = {symbol: addr for addr, symbol in all_tokens.items()}
 
-        return {
-            symbol: symbol_to_addr[symbol]
-            for symbol in symbols
-            if symbol in symbol_to_addr
-        }
+        return {symbol: symbol_to_addr[symbol] for symbol in symbols if symbol in symbol_to_addr}
 
     def get_token_decimals(self) -> dict[str, int]:
         """Get mapping of token symbols to decimals.
@@ -171,9 +160,7 @@ class GMXTokenMapper:
             for market_data in available_markets.values():
                 # Use base symbol from market_metadata (not market_symbol which may have suffix)
                 metadata = market_data.get("market_metadata", {})
-                symbol = metadata.get("symbol", "") or market_data.get(
-                    "market_symbol", ""
-                )
+                symbol = metadata.get("symbol", "") or market_data.get("market_symbol", "")
                 decimals = metadata.get("decimals")
 
                 if symbol and decimals is not None:

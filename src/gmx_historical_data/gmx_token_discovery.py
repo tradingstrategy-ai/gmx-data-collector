@@ -65,9 +65,7 @@ class GMXTokenDiscovery:
             elif isinstance(data, list):
                 tokens = data
             else:
-                raise ValueError(
-                    f"Expected dict with 'tokens' key or list, got {type(data)}"
-                )
+                raise ValueError(f"Expected dict with 'tokens' key or list, got {type(data)}")
 
             if not isinstance(tokens, list):
                 raise ValueError(f"Expected list of tokens, got {type(tokens)}")

@@ -7,7 +7,7 @@ This module determines what data ranges need to be fetched based on:
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from gmx_historical_data.config import FetchMode
 from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector, GapStatus
@@ -123,7 +123,7 @@ class FetchBoundaryCalculator:
         :param gmx_earliest: Earliest timestamp from GMX API
         :return: FetchBoundaries for full collection
         """
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # GMX API: Always fetch full available window
         gmx_needed = True
@@ -180,9 +180,7 @@ class FetchBoundaryCalculator:
         """
         # Use adaptive gap detector if available
         if self.adaptive_gap_detector:
-            gap_result = self.adaptive_gap_detector.detect_gap_adaptive(
-                symbol, timeframe
-            )
+            gap_result = self.adaptive_gap_detector.detect_gap_adaptive(symbol, timeframe)
 
             if gap_result.status == GapStatus.NO_GAP:
                 # Data is current - skip all fetching
@@ -201,7 +199,7 @@ class FetchBoundaryCalculator:
 
             elif gap_result.status == GapStatus.NORMAL_GAP:
                 # Incremental fetch from our_latest to now
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
 
                 # GMX API: Only fetch recent data
                 gmx_needed = True
@@ -214,7 +212,7 @@ class FetchBoundaryCalculator:
                 if not existing_df.empty:
                     our_earliest = existing_df["timestamp"].min()
                     if our_earliest.tzinfo is None:
-                        our_earliest = our_earliest.replace(tzinfo=timezone.utc)
+                        our_earliest = our_earliest.replace(tzinfo=UTC)
 
                 # Only backfill if we have GMX data but no older Chainlink data
                 chainlink_needed = False
@@ -240,7 +238,7 @@ class FetchBoundaryCalculator:
 
             elif gap_result.status == GapStatus.DATA_LOSS_GAP:
                 # Data loss detected - fetch from API's earliest
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
 
                 return FetchBoundaries(
                     gmx_api_needed=True,
@@ -266,6 +264,4 @@ class FetchBoundaryCalculator:
                 )
 
         # Fallback if no adaptive detector - use full collection
-        return self._calculate_full_boundaries(
-            symbol, timeframe, chainlink_available, gmx_earliest
-        )
+        return self._calculate_full_boundaries(symbol, timeframe, chainlink_available, gmx_earliest)

@@ -54,9 +54,8 @@ import json
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 try:
     import polars as pl
@@ -101,7 +100,7 @@ GMX_V22_CUTOFF_BLOCK = 370_000_000
 # =============================================================================
 
 
-def _read_checkpoint(path: Path) -> Optional[dict]:
+def _read_checkpoint(path: Path) -> dict | None:
     """Read a JSON checkpoint file.
 
     :param path: Path to checkpoint JSON.
@@ -118,7 +117,7 @@ def _read_checkpoint(path: Path) -> Optional[dict]:
 
 def check_phase_status(
     network_dir: Path,
-    checkpoint_dir: Optional[Path] = None,
+    checkpoint_dir: Path | None = None,
 ) -> dict:
     """Check the status of existing data and checkpoints for each phase.
 
@@ -146,8 +145,7 @@ def check_phase_status(
     if rates_dir.exists():
         for sym_dir in rates_dir.iterdir():
             if sym_dir.is_dir() and (
-                (sym_dir / "1h_factor.parquet").exists()
-                or (sym_dir / "1h.parquet").exists()
+                (sym_dir / "1h_factor.parquet").exists() or (sym_dir / "1h.parquet").exists()
             ):
                 factor_symbols.add(sym_dir.name)
 
@@ -171,8 +169,7 @@ def check_phase_status(
             "checkpoint": ds_cp,
             "last_block": ds_cp.get("last_block") if ds_cp else None,
             "symbols": ds_symbols,
-            "complete": ds_cp is not None
-            and ds_cp.get("last_block", 0) >= GMX_V22_CUTOFF_BLOCK,
+            "complete": ds_cp is not None and ds_cp.get("last_block", 0) >= GMX_V22_CUTOFF_BLOCK,
         },
         "factor": {
             "checkpoint": factor_cp,
@@ -237,9 +234,7 @@ def print_resume_status(status: dict) -> None:
     # Unified
     uni = status["unified"]
     if uni["symbols"]:
-        console.print(
-            f"    Unified:    [green]{len(uni['symbols'])} symbols[/green] merged"
-        )
+        console.print(f"    Unified:    [green]{len(uni['symbols'])} symbols[/green] merged")
     else:
         console.print("    Unified:    [dim]not yet merged[/dim]")
 
@@ -274,8 +269,9 @@ def run_phase(phase_name: str, cmd: list[str]) -> None:
     script_name = Path(cmd[1]).name if len(cmd) > 1 else cmd[0]
     short_args = " ".join(cmd[2:])
     console.print(f"  Script: {script_name} {short_args}")
-    console.print(f"  [dim](intermediate output always parquet; "
-                  f"final format applied at merge)[/dim]\n")
+    console.print(
+        "  [dim](intermediate output always parquet; final format applied at merge)[/dim]\n"
+    )
 
     for attempt in range(1, PHASE_MAX_RETRIES + 1):
         t_start = time.monotonic()
@@ -316,8 +312,10 @@ def build_datastore_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "extract_funding_datastore.py"),
-        "--output-dir", args.output_dir,
-        "--output", "parquet",
+        "--output-dir",
+        args.output_dir,
+        "--output",
+        "parquet",
     ]
     if args.market:
         cmd.extend(["--market", args.market])
@@ -337,9 +335,12 @@ def build_factor_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "extract_funding_factor.py"),
-        "--network", args.network,
-        "--output-dir", args.output_dir,
-        "--output", "parquet",
+        "--network",
+        args.network,
+        "--output-dir",
+        args.output_dir,
+        "--output",
+        "parquet",
     ]
     if args.market:
         cmd.extend(["--market", args.market])
@@ -361,9 +362,12 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "extract_funding_fee_per_size.py"),
-        "--network", args.network,
-        "--output-dir", args.output_dir,
-        "--output", "parquet",
+        "--network",
+        args.network,
+        "--output-dir",
+        args.output_dir,
+        "--output",
+        "parquet",
     ]
     if args.market:
         cmd.extend(["--market", args.market])
@@ -429,7 +433,7 @@ def merge_symbol(
     rates_dir: Path,
     direction_dir: Path,
     output_format: str = "parquet",
-) -> Optional[int]:
+) -> int | None:
     """Merge data for a single symbol into unified hourly file.
 
     Combines DataStore (pre-V2.2, signed) and HyperSync Factor (V2.2+, unsigned)
@@ -472,9 +476,7 @@ def merge_symbol(
 
             # Where direction is available, use it; otherwise default True
             hs_df = hs_df.with_columns(
-                pl.col("direction_longs_pay")
-                .fill_null(True)
-                .alias("longs_pay_shorts")
+                pl.col("direction_longs_pay").fill_null(True).alias("longs_pay_shorts")
             ).drop("direction_longs_pay")
 
             # Recompute signed fee columns based on corrected direction
@@ -516,7 +518,7 @@ def merge_symbol(
 
 def merge_unified_rates(
     network_dir: Path,
-    market_filter: Optional[str] = None,
+    market_filter: str | None = None,
     output_format: str = "parquet",
 ) -> None:
     """Merge DataStore, HyperSync Factor, and Direction data into unified rates.
@@ -569,13 +571,10 @@ def merge_unified_rates(
             total_rows += rows
             merged_count += 1
             console.print(
-                f"  [green]{symbol:<12}[/green] {rows:>8,} hours -> "
-                f"rates/{symbol}/1h.{ext}"
+                f"  [green]{symbol:<12}[/green] {rows:>8,} hours -> rates/{symbol}/1h.{ext}"
             )
 
-    console.print(
-        f"\n  Merge complete: {merged_count} symbols, {total_rows:,} total hours"
-    )
+    console.print(f"\n  Merge complete: {merged_count} symbols, {total_rows:,} total hours")
 
 
 # =============================================================================
@@ -586,7 +585,7 @@ def merge_unified_rates(
 def export_feather(
     network_dir: Path,
     feather_dir: Path,
-    market_filter: Optional[str] = None,
+    market_filter: str | None = None,
     quote_currency: str = "USDC",
 ) -> None:
     """Export unified rates as FreqTrade-compatible feather files.
@@ -616,7 +615,7 @@ def export_feather(
         console.print("  [yellow]No rates directory found[/yellow]")
         return
 
-    gmx_dir = feather_dir / "gmx" / "futures"
+    gmx_dir = feather_dir / "data" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
 
     symbols = {}
@@ -661,23 +660,14 @@ def export_feather(
         result["close"] = 0.0
         result["volume"] = 0.0
 
-        result = (
-            result.sort_values("date")
-            .drop_duplicates(subset=["date"])
-            .reset_index(drop=True)
-        )
+        result = result.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
         result = result.dropna(subset=["open"])
 
-        filename = (
-            f"{symbol}_{quote_currency}_{quote_currency}"
-            f"-1h-funding_rate.feather"
-        )
+        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
         pq_feather.write_feather(result, filepath)
         exported += 1
-        console.print(
-            f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}"
-        )
+        console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
 
     console.print(f"\n  Exported {exported} feather file(s) to {gmx_dir}")
 
@@ -784,7 +774,19 @@ Examples:
         default=None,
         help=(
             "Export unified rates as FreqTrade feather files to this directory. "
-            "Creates {dir}/gmx/futures/{SYM}_USDC_USDC-1h-funding_rate.feather"
+            "Creates {dir}/data/gmx/futures/{SYM}_USDC_USDC-1h-funding_rate.feather"
+        ),
+    )
+
+    # Live funding rate fill
+    parser.add_argument(
+        "--fill-live",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Append current live funding rate from GMX API after feather export. "
+            "Auto-enabled when --feather-dir is provided. "
+            "Disable with --no-fill-live."
         ),
     )
 
@@ -814,11 +816,13 @@ def main():
 
     if args.list_markets:
         # Delegate to the datastore script which has the most complete list
-        subprocess.run([
-            sys.executable,
-            str(SCRIPT_DIR / "extract_funding_datastore.py"),
-            "--list-markets",
-        ])
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "extract_funding_datastore.py"),
+                "--list-markets",
+            ]
+        )
         return
 
     network_dir = Path(args.output_dir) / args.network
@@ -876,9 +880,32 @@ def main():
 
     # Phase 5: Feather export (optional)
     if args.feather_dir:
-        export_feather(
-            network_dir, Path(args.feather_dir), args.market
-        )
+        export_feather(network_dir, Path(args.feather_dir), args.market)
+
+    # Phase 5b: Live funding rate appender (auto-enabled with --feather-dir)
+    fill_live = args.fill_live
+    if fill_live is None:
+        fill_live = args.feather_dir is not None
+    if fill_live and args.feather_dir:
+        try:
+            from gmx_historical_data.live_funding import (
+                fetch_live_funding_rates,
+                upsert_live_rates_to_feather,
+            )
+
+            console.print(f"\n{'=' * 70}")
+            console.print("  Phase 5b: Live Funding Rate Appender (GMX API)")
+            console.print(f"{'=' * 70}")
+            rates = fetch_live_funding_rates()
+            updated = upsert_live_rates_to_feather(Path(args.feather_dir), rates, args.market)
+            ts_str = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+            console.print(
+                f"  [green]Live rate appended for {updated} symbols (timestamp: {ts_str})[/green]"
+            )
+        except Exception as exc:
+            console.print(f"  [yellow]WARNING: Live rate append failed: {exc}[/yellow]")
+    elif fill_live and not args.feather_dir:
+        console.print("  [yellow]WARNING: --fill-live has no effect without --feather-dir[/yellow]")
 
     elapsed = time.monotonic() - t_start
     console.print(f"\n{'=' * 70}")

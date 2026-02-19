@@ -19,6 +19,9 @@ ENVIRONMENT VARIABLES (optional):
     OUTPUT_DIR                   Output directory (default: ./data)
     CHAINLINK_ONLY               Only collect Chainlink markets (default: true)
     ENABLE_ADAPTIVE_GAP_DETECTION  Detect API sliding window data loss (default: true)
+    COLLECT_LIVE_FUNDING         Append live GMX funding rate after each cycle (default: false)
+    LIVE_FUNDING_FEATHER_DIR     Directory for funding rate feather files (required when
+                                 COLLECT_LIVE_FUNDING=true)
     TIMEFRAME_CONCURRENCY        Parallel timeframe fetches (default: 6)
     LOG_LEVEL                    Logging level (default: INFO)
     DRY_RUN                      Don't save data, just log (default: false)
@@ -45,51 +48,50 @@ EXAMPLE:
 """
 
 import asyncio
+import logging
 import signal
 import sys
-import logging
 import time
 from collections import defaultdict
-from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import schedule
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
-from rich.table import Table
 from rich.progress import (
+    BarColumn,
     Progress,
     SpinnerColumn,
-    TextColumn,
-    BarColumn,
     TaskProgressColumn,
+    TextColumn,
 )
+from rich.table import Table
 from web3 import Web3
 
 from gmx_historical_data.config import (
-    TIMEFRAMES,
     GMX_V2_GENESIS_BLOCK,
+    TIMEFRAMES,
     is_excluded_symbol,
 )
-from gmx_historical_data.storage import ParquetStorage
+from gmx_historical_data.daemon.config import (
+    DaemonConfig,
+    get_gmx_markets_with_chainlink_feeds,
+)
+from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
+from gmx_historical_data.daemon.gap_detector import (
+    AdaptiveGapDetector,
+    GapDetector,
+)
+from gmx_historical_data.daemon.health_monitor import HealthMonitor
 from gmx_historical_data.gmx_api_integration import (
     GMXDataFetcher,
     map_timeframe_to_gmx_period,
 )
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.daemon.config import (
-    DaemonConfig,
-    get_gmx_markets_with_chainlink_feeds,
-)
-from gmx_historical_data.daemon.gap_detector import (
-    GapDetector,
-    AdaptiveGapDetector,
-)
-from gmx_historical_data.daemon.health_monitor import HealthMonitor
-from gmx_historical_data.daemon.data_loss_handler import DataLossHandler
-
+from gmx_historical_data.storage import ParquetStorage
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -130,8 +132,8 @@ class GMXPeriodicCollector:
         self._last_oracle_block = GMX_V2_GENESIS_BLOCK
 
         if not config.chainlink_only:
-            from gmx_historical_data.oracle_price_collector import OraclePriceCollector
             from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
+            from gmx_historical_data.oracle_price_collector import OraclePriceCollector
 
             self.oracle_collector = OraclePriceCollector(
                 hypersync_endpoint=config.hypersync_endpoint,
@@ -188,9 +190,7 @@ class GMXPeriodicCollector:
         # Use configured symbols if specified
         if self.config.collection_symbols:
             symbols = self.config.collection_symbols
-            console.print(
-                f"[cyan]Using configured symbols: {len(symbols)} tokens[/cyan]"
-            )
+            console.print(f"[cyan]Using configured symbols: {len(symbols)} tokens[/cyan]")
         else:
             # Use only markets with Chainlink feeds (34 markets)
             symbols = get_gmx_markets_with_chainlink_feeds()
@@ -206,9 +206,7 @@ class GMXPeriodicCollector:
             console.print(
                 f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]"
             )
-            console.print(
-                "[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]"
-            )
+            console.print("[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]")
 
         return symbols
 
@@ -229,15 +227,11 @@ class GMXPeriodicCollector:
         try:
             # Use adaptive gap detection if enabled
             if self.config.enable_adaptive_gap_detection:
-                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(
-                    symbol, timeframe
-                )
+                gap_result = self.adaptive_gap_detector.detect_gap_adaptive(symbol, timeframe)
 
                 # Handle data loss scenario
                 if gap_result.has_data_loss:
-                    event = self.data_loss_handler.handle_gap_result(
-                        symbol, timeframe, gap_result
-                    )
+                    event = self.data_loss_handler.handle_gap_result(symbol, timeframe, gap_result)
                     if event:
                         self.health_monitor.record_data_loss(event)
                         logger.critical(
@@ -311,12 +305,9 @@ class GMXPeriodicCollector:
         errors = []
 
         # Collect timeframes concurrently
-        with ThreadPoolExecutor(
-            max_workers=self.config.timeframe_concurrency
-        ) as executor:
+        with ThreadPoolExecutor(max_workers=self.config.timeframe_concurrency) as executor:
             futures = {
-                executor.submit(self._collect_symbol_timeframe, symbol, tf): tf
-                for tf in TIMEFRAMES
+                executor.submit(self._collect_symbol_timeframe, symbol, tf): tf for tf in TIMEFRAMES
             }
 
             for future in as_completed(futures):
@@ -326,9 +317,7 @@ class GMXPeriodicCollector:
 
                     if error:
                         errors.append((timeframe, str(error)))
-                        self.health_monitor.record_symbol_failure(
-                            symbol, str(error), timeframe
-                        )
+                        self.health_monitor.record_symbol_failure(symbol, str(error), timeframe)
                     else:
                         candles_by_timeframe[timeframe] = candles_added
 
@@ -427,9 +416,7 @@ class GMXPeriodicCollector:
                 candles_by_timeframe[timeframe] = len(ohlcv)
 
             except Exception as e:
-                logger.warning(
-                    f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}"
-                )
+                logger.warning(f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}")
 
         return candles_by_timeframe
 
@@ -445,9 +432,7 @@ class GMXPeriodicCollector:
         if not self.oracle_collector or not self.token_mapper:
             return {}
 
-        console.rule(
-            "[bold magenta]Non-Chainlink Markets (Oracle Events)[/bold magenta]"
-        )
+        console.rule("[bold magenta]Non-Chainlink Markets (Oracle Events)[/bold magenta]")
 
         # Get non-Chainlink token mapping
         try:
@@ -482,9 +467,7 @@ class GMXPeriodicCollector:
             console=console,
             transient=True,
         ) as progress:
-            progress.add_task(
-                "[cyan]Fetching oracle events from HyperSync...", total=None
-            )
+            progress.add_task("[cyan]Fetching oracle events from HyperSync...", total=None)
 
             try:
                 events = await self.oracle_collector.collect_oracle_events(
@@ -644,9 +627,7 @@ class GMXPeriodicCollector:
             for symbol in symbols:
                 # Check for shutdown request
                 if self.shutdown_requested:
-                    console.print(
-                        "[yellow]Shutdown requested - stopping collection cycle[/yellow]"
-                    )
+                    console.print("[yellow]Shutdown requested - stopping collection cycle[/yellow]")
                     break
 
                 progress.update(task, description=f"[cyan]Collecting {symbol}...")
@@ -658,9 +639,7 @@ class GMXPeriodicCollector:
 
                     # Record success if any candles were added
                     if symbol_candles > 0:
-                        self.health_monitor.record_symbol_success(
-                            symbol, candles_by_timeframe
-                        )
+                        self.health_monitor.record_symbol_success(symbol, candles_by_timeframe)
                     else:
                         # No candles added (up to date)
                         self.health_monitor.record_symbol_success(symbol, {})
@@ -687,9 +666,7 @@ class GMXPeriodicCollector:
                                     f"  [green]{symbol}[/green]: {fallback_total:,} candles via oracle fallback"
                                 )
                                 total_candles += fallback_total
-                                self.health_monitor.record_symbol_success(
-                                    symbol, fallback_candles
-                                )
+                                self.health_monitor.record_symbol_success(symbol, fallback_candles)
                                 succeeded += 1
                                 fallback_succeeded += 1
                             else:
@@ -697,9 +674,7 @@ class GMXPeriodicCollector:
                                 console.print(
                                     f"  [red]{symbol}[/red]: Oracle fallback returned no data"
                                 )
-                                self.health_monitor.record_symbol_failure(
-                                    symbol, error_msg
-                                )
+                                self.health_monitor.record_symbol_failure(symbol, error_msg)
                                 failed += 1
 
                         except Exception as fallback_error:
@@ -727,9 +702,7 @@ class GMXPeriodicCollector:
 
         summary_table.add_row("Succeeded", f"[green]{succeeded}[/green]")
         if fallback_succeeded > 0:
-            summary_table.add_row(
-                "  via oracle fallback", f"[yellow]{fallback_succeeded}[/yellow]"
-            )
+            summary_table.add_row("  via oracle fallback", f"[yellow]{fallback_succeeded}[/yellow]")
         summary_table.add_row("Failed", f"[red]{failed}[/red]" if failed > 0 else "0")
         summary_table.add_row("Total symbols", str(len(symbols)))
         summary_table.add_row("Candles added", f"{total_candles:,}")
@@ -755,6 +728,24 @@ class GMXPeriodicCollector:
                 logger.error(f"Failed to collect non-Chainlink markets: {e}")
                 console.print(f"[red]Non-Chainlink collection failed: {e}[/red]")
 
+        # Live funding rate appender
+        if (
+            self.config.collect_live_funding
+            and self.config.live_funding_feather_dir
+            and not self.config.dry_run
+        ):
+            try:
+                from gmx_historical_data.live_funding import (
+                    fetch_live_funding_rates,
+                    upsert_live_rates_to_feather,
+                )
+
+                rates = fetch_live_funding_rates()
+                updated = upsert_live_rates_to_feather(self.config.live_funding_feather_dir, rates)
+                console.print(f"[green]  Live funding rates appended for {updated} symbols[/green]")
+            except Exception as exc:
+                logger.warning(f"Live funding rate update failed: {exc}")
+
     def start(self) -> None:
         """Start the periodic collection daemon."""
         # Build configuration table
@@ -776,6 +767,8 @@ class GMXPeriodicCollector:
         if self.config.dry_run:
             mode_parts.append("[yellow]DRY RUN[/yellow]")
         config_table.add_row("Mode", " | ".join(mode_parts))
+        if self.config.collect_live_funding and self.config.live_funding_feather_dir:
+            config_table.add_row("Live funding", str(self.config.live_funding_feather_dir))
 
         # Display startup panel
         console.print(
@@ -799,16 +792,12 @@ class GMXPeriodicCollector:
         self.running = True
 
         # Calculate next collection time
-        next_run = datetime.now(timezone.utc) + timedelta(
-            seconds=schedule.idle_seconds()
-        )
+        next_run = datetime.now(UTC) + timedelta(seconds=schedule.idle_seconds())
 
         status_table = Table(show_header=False, box=None, padding=(0, 2))
         status_table.add_column("Info", style="dim")
         status_table.add_column("Value", style="cyan")
-        status_table.add_row(
-            "Next collection", next_run.strftime("%Y-%m-%d %H:%M:%S %Z")
-        )
+        status_table.add_row("Next collection", next_run.strftime("%Y-%m-%d %H:%M:%S %Z"))
         status_table.add_row("Stop daemon", "Press Ctrl+C")
 
         console.print(

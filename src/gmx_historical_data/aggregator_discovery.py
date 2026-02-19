@@ -7,8 +7,9 @@ discover all historical aggregator addresses for complete data coverage.
 """
 
 import time
+
 from web3 import Web3
-from web3.exceptions import ContractLogicError, BadFunctionCallOutput
+from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 
 
 class AggregatorDiscovery:
@@ -37,9 +38,7 @@ class AggregatorDiscovery:
 
     # Event signature for phase changes
     # event AnswerUpdated(int256 indexed current, uint256 indexed roundId, uint256 timestamp)
-    ANSWER_UPDATED_TOPIC = (
-        "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
-    )
+    ANSWER_UPDATED_TOPIC = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded43186175bf646fc5f"
 
     def __init__(self, web3: Web3):
         """Initialize aggregator discovery.
@@ -48,9 +47,7 @@ class AggregatorDiscovery:
         """
         self.web3 = web3
 
-    def _call_with_retry(
-        self, contract_function, max_retries: int = 3, backoff: float = 1.0
-    ):
+    def _call_with_retry(self, contract_function, max_retries: int = 3, backoff: float = 1.0):
         """Call contract function with retry logic for RPC failures.
 
         :param contract_function: Web3 contract function to call
