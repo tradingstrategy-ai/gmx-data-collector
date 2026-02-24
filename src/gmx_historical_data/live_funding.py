@@ -135,6 +135,7 @@ def upsert_live_rates_to_feather(
         df = df[df["date"] != hour_ts]
         df = pd.concat([df, new_row], ignore_index=True)
         df = df.sort_values("date").reset_index(drop=True)
+        df["date"] = df["date"].dt.as_unit("ns")
 
         feather.write_feather(df, filepath)
         updated += 1

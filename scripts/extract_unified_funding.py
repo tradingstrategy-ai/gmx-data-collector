@@ -645,7 +645,7 @@ def export_feather(
 
         result = pd.DataFrame()
         # Produce datetime64[ns, UTC] to match Binance/FreqTrade feather schema exactly
-        ts = pd.to_datetime(df["timestamp"], utc=True)
+        ts = pd.to_datetime(df["timestamp"], utc=True).as_unit("ns")
         result["date"] = ts
 
         # open = per-settlement funding rate (per 1h for GMX continuous accrual)
