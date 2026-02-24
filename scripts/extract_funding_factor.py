@@ -689,7 +689,7 @@ def aggregate_hourly_rates(
     df = df.with_columns(
         pl.from_epoch(pl.col("block_timestamp"), time_unit="s")
         .alias("timestamp")
-        .cast(pl.Datetime("ms", "UTC")),
+        .cast(pl.Datetime("ns", "UTC")),
     )
 
     # Truncate to hour

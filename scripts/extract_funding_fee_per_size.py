@@ -686,7 +686,7 @@ def aggregate_hourly_direction(
     df = df.with_columns(
         pl.from_epoch(pl.col("block_timestamp"), time_unit="s")
         .alias("timestamp")
-        .cast(pl.Datetime("ms", "UTC")),
+        .cast(pl.Datetime("ns", "UTC")),
     )
 
     # Truncate to hour
@@ -860,7 +860,7 @@ def save_feather_freqtrade(
         pdf = pdf.rename(columns={"timestamp": "date"})
         pdf["open"] = pdf["longs_pay_shorts"].apply(lambda x: 1.0 if x else -1.0)
         pdf = pdf.drop(columns=["longs_pay_shorts"])
-        pdf["date"] = pdf["date"].dt.as_unit("ms")
+        pdf["date"] = pdf["date"].dt.as_unit("ns")
         pdf["high"] = 0.0
         pdf["low"] = 0.0
         pdf["close"] = 0.0
