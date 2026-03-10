@@ -45,7 +45,7 @@ OPTIONS
     --network        Network: "arbitrum" or "avalanche" (default: arbitrum)
     --from-block     Starting block number for backfill mode
     --to-block       Ending block number (default: latest)
-    --output-dir     Base output directory (default: ./data/open_interest)
+    --output-dir     Base output directory (default: ./user_data/data/gmx/open_interest)
     --output         Output format: "json", "csv", or "parquet" (default: parquet)
     --market         Filter by market symbol (e.g., "ETH/USD", "BTC/USD")
     --resume         Enable checkpoint-based incremental mode (for cronjob)
@@ -75,6 +75,7 @@ CRONJOB SETUP
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from collections import defaultdict
@@ -98,6 +99,10 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
+from web3 import Web3
+from eth_defi.gmx.api import GMXAPI
+from eth_defi.gmx.config import GMXConfig
+from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
 
 # Optional imports
 try:
@@ -354,6 +359,34 @@ TOKEN_DECIMALS = {
 }
 
 
+def fetch_markets() -> dict[str, dict]:
+    """Fetch all GMX V2 markets from the API and build a market-address → info map.
+
+    Replaces the hardcoded ``MARKETS`` dict so new listings are picked up
+    automatically without script changes.
+
+    :returns: Mapping of lowercase market token address → ``{"symbol": str}``.
+    """
+    web3 = Web3(ArbitrumMockProvider())
+    config = GMXConfig(web3)
+    api = GMXAPI(config)
+    data = api.get_markets()
+    markets_list = data.get("markets", data) if isinstance(data, dict) else data
+    result: dict[str, dict] = {}
+    for m in markets_list:
+        addr = m.get("marketToken", "").lower()
+        name = m.get("name", addr)
+        if addr:
+            result[addr] = {
+                "symbol": name,
+                "longToken": m.get("longToken", "").lower(),
+                "shortToken": m.get("shortToken", "").lower(),
+                "indexToken": m.get("indexToken", "").lower(),
+                "isListed": m.get("isListed", True),
+            }
+    return result
+
+
 # =============================================================================
 # DATA CLASSES
 # =============================================================================
@@ -563,7 +596,8 @@ async def create_client(network: str) -> HypersyncClient:
     url = HYPERSYNC_URLS.get(network)
     if not url:
         raise ValueError(f"Unsupported network: {network}")
-    return HypersyncClient(ClientConfig(url=url))
+    api_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    return HypersyncClient(ClientConfig(url=url, bearer_token=api_token))
 
 
 async def get_latest_block(client: HypersyncClient) -> int:
@@ -1257,6 +1291,16 @@ async def async_main(args: argparse.Namespace) -> None:
     elif from_block is None:
         from_block = GMX_V2_GENESIS_BLOCK
 
+    # Fetch live market list — replaces hardcoded MARKETS dict
+    global MARKETS
+    with console.status("Fetching market list from GMX API..."):
+        live_markets = fetch_markets()
+    if live_markets:
+        MARKETS = live_markets
+        console.print(f"  Market list: [cyan]{len(MARKETS)}[/cyan] markets loaded from GMX API")
+    else:
+        console.print("  [yellow]WARN: GMX API unavailable — falling back to hardcoded market list[/yellow]")
+
     # Header panel
     header_lines = [
         f"Network:     [cyan]{args.network}[/cyan]",
@@ -1397,8 +1441,8 @@ Examples:
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="./data/open_interest",
-        help="Base output directory (default: ./data/open_interest)",
+        default="./user_data/data/gmx/open_interest",
+        help="Base output directory (default: ./user_data/data/gmx/open_interest)",
     )
     parser.add_argument(
         "--output",
