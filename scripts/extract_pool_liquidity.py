@@ -399,11 +399,16 @@ async def extract_pool_events(
 
                 market_info = markets.get(market_addr.lower() if market_addr else "", {})
 
-                # Skip swap-only markets (indexToken is None in market_registry)
+                # Skip swap-only markets:
+                # 1. Known swap markets: indexToken is None in the market registry
+                # 2. Delisted / unknown swap markets: all perp symbols contain "/"
                 if market_info and market_info.get("indexToken") is None:
                     continue
 
                 symbol = market_info.get("symbol", market_addr[:10] if market_addr else "UNKNOWN")
+
+                if "/" not in symbol:
+                    continue
 
                 timestamp = block_timestamps.get(log.block_number, 0)
                 dt_str = (

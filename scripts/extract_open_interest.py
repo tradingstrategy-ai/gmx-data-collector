@@ -799,11 +799,16 @@ async def extract_oi_events(
                 _markets_dict = markets if markets is not None else MARKETS
                 market_info = _markets_dict.get(market_addr.lower() if market_addr else "", {})
 
-                # Skip swap-only markets (indexToken is None in market_registry)
+                # Skip swap-only markets:
+                # 1. Known swap markets: indexToken is None in the market registry
+                # 2. Delisted / unknown swap markets: all perp symbols contain "/"
                 if market_info and market_info.get("indexToken") is None:
                     continue
 
                 symbol = market_info.get("symbol", market_addr or "UNKNOWN")
+
+                if "/" not in symbol:
+                    continue
 
                 # Apply market filter
                 if market_filter and symbol != market_filter:
