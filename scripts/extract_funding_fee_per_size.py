@@ -141,6 +141,9 @@ PROGRESS_MILESTONES = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
 # Flush records to disk every N events (keeps memory bounded; 500k safe vs ~3.5M OOM)
 FLUSH_EVERY = 500_000
 
+# Output formats that support incremental streaming flush (JSON needs all records at once)
+STREAMABLE_OUTPUTS = frozenset({"parquet", "feather"})
+
 # GMX V2 genesis block on Arbitrum
 GMX_V2_GENESIS_BLOCK = 120_000_000
 
@@ -510,6 +513,7 @@ async def extract_fee_per_size_events(
     block_timestamps: dict[int, int] = {}
     total_logs = 0
     total_flushed = 0
+    flush_count = 0
     decode_errors = 0
     unknown_markets: set[str] = set()
     t_start = time.monotonic()
@@ -611,10 +615,10 @@ async def extract_fee_per_size_events(
 
             # Flush to disk every FLUSH_EVERY events to keep memory bounded
             if flush_callback is not None and len(records) >= FLUSH_EVERY:
-                flush_callback(records[:], highest_block)
+                flush_callback(records, highest_block)
                 total_flushed += len(records)
+                flush_count += 1
                 records.clear()
-                block_timestamps.clear()
 
             # Update progress
             elapsed = time.monotonic() - t_start
@@ -645,8 +649,9 @@ async def extract_fee_per_size_events(
 
     # Final flush for any remaining records
     if flush_callback is not None and records:
-        flush_callback(records[:], highest_block)
+        flush_callback(records, highest_block)
         total_flushed += len(records)
+        flush_count += 1
         records.clear()
 
     elapsed = time.monotonic() - t_start
@@ -654,7 +659,7 @@ async def extract_fee_per_size_events(
     console.print(
         f"\n  Extraction complete in {elapsed:.1f}s: "
         f"{total_events:,} events from {total_logs:,} logs"
-        + (f" (flushed in {total_flushed // FLUSH_EVERY + 1} batches)" if total_flushed else "")
+        + (f" (flushed in {flush_count} batches)" if flush_count else "")
     )
     if decode_errors:
         console.print(f"  [yellow]Decode errors: {decode_errors:,}[/yellow]")
@@ -1040,17 +1045,24 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         return
 
+    # Cache prior total once so on_flush doesn't re-read checkpoint on every flush batch
+    _resume_base_total = 0
+    if args.resume:
+        _prior = load_checkpoint(checkpoint_path)
+        _resume_base_total = _prior["total_events"] if _prior else 0
+
     # Track cumulative state across incremental flushes
-    flush_state: dict = {"total_events": 0, "last_block": from_block, "last_timestamp": 0}
+    flush_state: dict = {"total_events": 0, "last_block": from_block, "last_timestamp": 0, "flush_count": 0}
 
     def on_flush(batch: list, highest_block: int) -> None:
         """Persist a batch of records to disk and save an intermediate checkpoint."""
         if not batch:
             return
+        flush_state["flush_count"] += 1
         console.print(
             f"\n  [dim]Flushing {len(batch):,} events at block {highest_block:,}...[/dim]"
         )
-        if args.output in ("parquet", "feather"):
+        if args.output in STREAMABLE_OUTPUTS:
             save_raw_per_symbol(batch, output_dir)
             with console.status("Aggregating hourly rates..."):
                 hourly = aggregate_hourly_direction(batch)
@@ -1067,18 +1079,15 @@ async def async_main(args: argparse.Namespace) -> None:
         )
 
         if args.resume:
-            prev_checkpoint = load_checkpoint(checkpoint_path)
-            prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
             save_checkpoint(
                 checkpoint_path,
                 last_block=flush_state["last_block"],
                 last_timestamp=flush_state["last_timestamp"],
-                total_events=prev_total + flush_state["total_events"],
+                total_events=_resume_base_total + flush_state["total_events"],
                 markets_seen=len(set(r.symbol for r in batch)),
             )
 
-    # Only use streaming flush for parquet/feather (JSON needs all records at once)
-    use_flush = args.output in ("parquet", "feather")
+    use_flush = args.output in STREAMABLE_OUTPUTS
 
     console.print()
     records = await extract_fee_per_size_events(
@@ -1131,13 +1140,11 @@ async def async_main(args: argparse.Namespace) -> None:
             last_block = max(r.block_number for r in records)
             last_timestamp = max(r.block_timestamp for r in records if r.block_timestamp)
             unique_markets = len(set(r.symbol for r in records))
-            prev_checkpoint = load_checkpoint(checkpoint_path)
-            prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
             save_checkpoint(
                 checkpoint_path,
                 last_block=last_block,
                 last_timestamp=last_timestamp,
-                total_events=prev_total + len(records),
+                total_events=_resume_base_total + len(records),
                 markets_seen=unique_markets,
             )
         print_summary(records)
@@ -1145,7 +1152,7 @@ async def async_main(args: argparse.Namespace) -> None:
         total = flush_state["total_events"]
         console.print(
             f"\n[green]  Extraction complete: {total:,} events saved across "
-            f"{total // FLUSH_EVERY + 1} flush batches.[/green]"
+            f"{flush_state['flush_count']} flush batches.[/green]"
         )
 
 

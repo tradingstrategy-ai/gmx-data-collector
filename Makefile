@@ -105,24 +105,23 @@ install:
 # Full Collection (candles + oracle events)
 # ==============================================================================
 
+define COLLECT_CMD
+	@echo "Starting $(1) candle collection..."
+	@echo "  Output:     $(DATA_DIR)"
+	@echo "  Concurrency: $(CONCURRENCY)"
+	@echo ""
+	@mkdir -p $(DATA_DIR) $(LOG_DIR)
+	poetry run python -m gmx_historical_data.cli collect --$(2) --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+endef
+
 # Incremental candle collection (GMX API + Chainlink + oracle events)
 # Uses smart gap detection; only fetches missing data
 collect-update:
-	@echo "Starting incremental candle collection..."
-	@echo "  Output:     $(DATA_DIR)"
-	@echo "  Concurrency: $(CONCURRENCY)"
-	@echo ""
-	@mkdir -p $(DATA_DIR) $(LOG_DIR)
-	poetry run python -m gmx_historical_data.cli collect --update --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+	$(call COLLECT_CMD,incremental,update)
 
 # Full historical candle collection from genesis
 collect-full:
-	@echo "Starting full candle collection from genesis..."
-	@echo "  Output:     $(DATA_DIR)"
-	@echo "  Concurrency: $(CONCURRENCY)"
-	@echo ""
-	@mkdir -p $(DATA_DIR) $(LOG_DIR)
-	poetry run python -m gmx_historical_data.cli collect --full --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+	$(call COLLECT_CMD,full historical,full)
 
 # Full incremental update: candles + funding (run this for daily updates)
 update-gmx-data: collect-update funding-unified-resume
