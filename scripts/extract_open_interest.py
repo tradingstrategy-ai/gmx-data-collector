@@ -99,10 +99,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
-from web3 import Web3
-from eth_defi.gmx.api import GMXAPI
-from eth_defi.gmx.config import GMXConfig
-from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
+from gmx_historical_data.market_registry import fetch_markets as _fetch_markets_cached
 
 # Optional imports
 try:
@@ -115,8 +112,12 @@ except ImportError:
 console = Console()
 
 # Retry settings
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 2.0  # seconds
+MAX_RETRIES = 15
+RETRY_BASE_DELAY = 2.0
+RETRY_MAX_DELAY = 120.0  # Cap exponential backoff at 2 minutes
+
+FLUSH_EVERY = 500_000
+STREAMABLE_OUTPUTS = frozenset({"parquet"})
 
 # Progress milestones for log-friendly output (percentage thresholds)
 PROGRESS_MILESTONES = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
@@ -358,33 +359,6 @@ TOKEN_DECIMALS = {
     "GMX": 18,
 }
 
-
-def fetch_markets() -> dict[str, dict]:
-    """Fetch all GMX V2 markets from the API and build a market-address → info map.
-
-    Replaces the hardcoded ``MARKETS`` dict so new listings are picked up
-    automatically without script changes.
-
-    :returns: Mapping of lowercase market token address → ``{"symbol": str}``.
-    """
-    web3 = Web3(ArbitrumMockProvider())
-    config = GMXConfig(web3)
-    api = GMXAPI(config)
-    data = api.get_markets()
-    markets_list = data.get("markets", data) if isinstance(data, dict) else data
-    result: dict[str, dict] = {}
-    for m in markets_list:
-        addr = m.get("marketToken", "").lower()
-        name = m.get("name", addr)
-        if addr:
-            result[addr] = {
-                "symbol": name,
-                "longToken": m.get("longToken", "").lower(),
-                "shortToken": m.get("shortToken", "").lower(),
-                "indexToken": m.get("indexToken", "").lower(),
-                "isListed": m.get("isListed", True),
-            }
-    return result
 
 
 # =============================================================================
@@ -651,7 +625,7 @@ async def _stream_with_retry(
                 console.print(f"[red]Failed after {max_retries} retries: {e}[/red]")
                 raise
 
-            delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+            delay = min(RETRY_BASE_DELAY * (2 ** (attempt - 1)), RETRY_MAX_DELAY)
             console.print(
                 f"[yellow]Error (attempt {attempt}/{max_retries}): {e}\n"
                 f"Retrying from block {current_from_block:,} in {delay:.0f}s...[/yellow]"
@@ -665,6 +639,8 @@ async def extract_oi_events(
     from_block: int,
     to_block: int | None,
     market_filter: str | None = None,
+    markets: dict | None = None,
+    flush_callback=None,
 ) -> list[OpenInterestRecord]:
     """Extract open interest events from GMX V2 EventEmitter.
 
@@ -729,6 +705,8 @@ async def extract_oi_events(
     pairing_by_key: dict[tuple, list[tuple[int, OpenInterestRecord]]] = defaultdict(list)
     records: list[OpenInterestRecord] = []
     total_logs = 0
+    total_flushed = 0
+    flush_count = 0
     decode_errors = 0
     oi_event_counts = {name: 0 for name in OI_EVENT_NAMES}
     t_start = time.monotonic()
@@ -818,7 +796,13 @@ async def extract_oi_events(
                 next_value = uints.get("nextValue", 0)
 
                 # Market symbol lookup
-                market_info = MARKETS.get(market_addr.lower() if market_addr else "", {})
+                _markets_dict = markets if markets is not None else MARKETS
+                market_info = _markets_dict.get(market_addr.lower() if market_addr else "", {})
+
+                # Skip swap-only markets (indexToken is None in market_registry)
+                if market_info and market_info.get("indexToken") is None:
+                    continue
+
                 symbol = market_info.get("symbol", market_addr or "UNKNOWN")
 
                 # Apply market filter
@@ -947,6 +931,20 @@ async def extract_oi_events(
                         f"{milestone_elapsed:.0f}s elapsed"
                     )
 
+            # Flush completed records to disk every FLUSH_EVERY events to bound memory
+            if flush_callback is not None and len(records) >= FLUSH_EVERY:
+                flush_callback(records, highest_block)
+                total_flushed += len(records)
+                flush_count += 1
+                records = []  # clear list; keep pairing_by_key alive for cross-batch pairing
+
+    # Final flush for any remaining records
+    if flush_callback is not None and records:
+        flush_callback(records, highest_block)
+        total_flushed += len(records)
+        flush_count += 1
+        records = []
+
     elapsed = time.monotonic() - t_start
     rate = total_logs / elapsed if elapsed > 0 else 0
 
@@ -955,9 +953,11 @@ async def extract_oi_events(
         f"\n  Processed [cyan]{total_logs:,}[/cyan] logs in [cyan]{elapsed:.1f}s[/cyan] "
         f"([cyan]{rate:.0f}[/cyan] logs/sec)"
     )
+    total_events_found = total_flushed + len(records)
     console.print(
-        f"  Found [green]{len(records):,}[/green] OI events "
+        f"  Found [green]{total_events_found:,}[/green] OI events "
         f"([red]{decode_errors}[/red] decode errors)"
+        + (f" (flushed in {flush_count} batches)" if flush_count else "")
     )
 
     # Event breakdown table
@@ -1291,15 +1291,9 @@ async def async_main(args: argparse.Namespace) -> None:
     elif from_block is None:
         from_block = GMX_V2_GENESIS_BLOCK
 
-    # Fetch live market list — replaces hardcoded MARKETS dict
-    global MARKETS
-    with console.status("Fetching market list from GMX API..."):
-        live_markets = fetch_markets()
-    if live_markets:
-        MARKETS = live_markets
-        console.print(f"  Market list: [cyan]{len(MARKETS)}[/cyan] markets loaded from GMX API")
-    else:
-        console.print("  [yellow]WARN: GMX API unavailable — falling back to hardcoded market list[/yellow]")
+    with console.status("Fetching GMX market registry..."):
+        markets = _fetch_markets_cached(args.network, force_refresh=args.refresh_markets)
+    console.print(f"  Markets loaded: [cyan]{len(markets):,}[/cyan]")
 
     # Header panel
     header_lines = [
@@ -1342,6 +1336,49 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         return
 
+    _resume_base_total = 0
+    if args.resume:
+        _prior = load_checkpoint(checkpoint_path)
+        _resume_base_total = _prior["total_events"] if _prior else 0
+
+    flush_state: dict = {
+        "total_events": 0,
+        "last_block": from_block,
+        "last_timestamp": 0,
+        "flush_count": 0,
+    }
+
+    def on_flush(batch: list, highest_block: int) -> None:
+        """Persist a batch of records to disk and save an intermediate checkpoint."""
+        if not batch:
+            return
+        flush_state["flush_count"] += 1
+        console.print(
+            f"\n  [dim]Flushing {len(batch):,} events at block {highest_block:,}...[/dim]"
+        )
+        save_raw_per_symbol(batch, output_dir)
+        with console.status("Computing daily snapshots..."):
+            batch_snapshots = compute_daily_snapshots(batch)
+        save_snapshots_per_symbol(batch_snapshots, output_dir)
+
+        flush_state["total_events"] += len(batch)
+        flush_state["last_block"] = max(highest_block, flush_state["last_block"])
+        flush_state["last_timestamp"] = max(
+            (r.blockTimestamp for r in batch if r.blockTimestamp),
+            default=flush_state["last_timestamp"],
+        )
+
+        if args.resume:
+            save_checkpoint(
+                checkpoint_path,
+                last_block=flush_state["last_block"],
+                last_timestamp=flush_state["last_timestamp"],
+                total_events=_resume_base_total + flush_state["total_events"],
+                markets_seen=len({r.symbol for r in batch}),
+            )
+
+    use_flush = args.output in STREAMABLE_OUTPUTS
+
     # Extract events
     console.print()
     records = await extract_oi_events(
@@ -1350,12 +1387,15 @@ async def async_main(args: argparse.Namespace) -> None:
         from_block=from_block,
         to_block=to_block,
         market_filter=args.market,
+        markets=markets,
+        flush_callback=on_flush if use_flush else None,
     )
 
-    if not records:
+    has_data = bool(records) or flush_state["total_events"] > 0
+
+    if not has_data:
         console.print("\n[yellow]No OI events found.[/yellow]")
         if args.resume:
-            # Still save checkpoint so we don't re-scan empty range
             save_checkpoint(
                 checkpoint_path,
                 last_block=to_block,
@@ -1365,46 +1405,45 @@ async def async_main(args: argparse.Namespace) -> None:
             )
         return
 
-    # Aggregate to daily snapshots
-    with console.status("Computing daily snapshots..."):
-        snapshots = compute_daily_snapshots(records)
+    if records:
+        # Aggregate and save any remaining in-memory records
+        with console.status("Computing daily snapshots..."):
+            snapshots = compute_daily_snapshots(records)
 
-    # Save outputs
-    console.print()
-    if args.output == "parquet":
-        save_raw_per_symbol(records, output_dir)
-        save_snapshots_per_symbol(snapshots, output_dir)
-    elif args.output == "json":
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = f"gmx_v2_oi_{args.network}_{from_block}_{to_block}_{ts}"
-        save_json(records, f"{base}_events.json")
-        save_json(snapshots, f"{base}_snapshots.json")
-    elif args.output == "csv":
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = f"gmx_v2_oi_{args.network}_{from_block}_{to_block}_{ts}"
-        save_csv(records, f"{base}_events.csv")
-        save_csv(snapshots, f"{base}_snapshots.csv")
+        console.print()
+        if args.output == "parquet":
+            save_raw_per_symbol(records, output_dir)
+            save_snapshots_per_symbol(snapshots, output_dir)
+        elif args.output == "json":
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = f"gmx_v2_oi_{args.network}_{from_block}_{to_block}_{ts}"
+            save_json(records, f"{base}_events.json")
+            save_json(snapshots, f"{base}_snapshots.json")
+        elif args.output == "csv":
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = f"gmx_v2_oi_{args.network}_{from_block}_{to_block}_{ts}"
+            save_csv(records, f"{base}_events.csv")
+            save_csv(snapshots, f"{base}_snapshots.csv")
 
-    # Save checkpoint
-    if args.resume:
-        last_block = max(r.blockNumber for r in records)
-        last_timestamp = max(r.blockTimestamp for r in records if r.blockTimestamp)
-        unique_markets = len(set(r.symbol for r in records))
+        if args.resume:
+            last_block = max(r.blockNumber for r in records)
+            last_timestamp = max(r.blockTimestamp for r in records if r.blockTimestamp)
+            unique_markets = len({r.symbol for r in records})
+            save_checkpoint(
+                checkpoint_path,
+                last_block=last_block,
+                last_timestamp=last_timestamp,
+                total_events=_resume_base_total + flush_state["total_events"] + len(records),
+                markets_seen=unique_markets,
+            )
 
-        # Accumulate total events from previous checkpoint
-        prev_checkpoint = load_checkpoint(checkpoint_path)
-        prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
-
-        save_checkpoint(
-            checkpoint_path,
-            last_block=last_block,
-            last_timestamp=last_timestamp,
-            total_events=prev_total + len(records),
-            markets_seen=unique_markets,
+        print_summary(records, snapshots)
+    else:
+        total = flush_state["total_events"]
+        console.print(
+            f"\n[green]  Extraction complete: {total:,} events saved across "
+            f"{flush_state['flush_count']} flush batches.[/green]"
         )
-
-    # Print summary
-    print_summary(records, snapshots)
 
 
 def main():
@@ -1458,6 +1497,11 @@ Examples:
     )
     parser.add_argument(
         "--checkpoint-dir", type=str, default=None, help="Override checkpoint directory"
+    )
+    parser.add_argument(
+        "--refresh-markets",
+        action="store_true",
+        help="Force re-fetch of GMX market registry (ignores 24h disk cache)",
     )
 
     args = parser.parse_args()

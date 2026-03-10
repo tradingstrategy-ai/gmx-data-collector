@@ -12,6 +12,8 @@ NETWORK ?= arbitrum
 # Directory paths
 DATA_DIR ?= ./data
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
+OI_OUTPUT_DIR ?= ./user_data/data/gmx/open_interest
+POOL_LIQUIDITY_OUTPUT_DIR ?= ./user_data/data/gmx/pool_liquidity
 FEATHER_DIR ?= ./user_data
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
@@ -36,26 +38,42 @@ INCLUDE_DATASTORE ?=
         funding-unified funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         funding-status funding-stop funding-logs funding-clean \
-        collect-update collect-full update-gmx-data export-freqtrade
+        collect-update collect-full update-gmx-data export-freqtrade \
+        oi oi-resume oi-full \
+        pool-liquidity pool-liquidity-resume \
+        extract-all extract-all-resume
 
 # Default target
 help:
 	@echo "GMX Historical Data Makefile"
 	@echo ""
 	@echo "Configuration (current values):"
-	@echo "  DATA_DIR            = $(DATA_DIR)"
-	@echo "  NETWORK             = $(NETWORK)"
-	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
-	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
-	@echo "  LOG_DIR             = $(LOG_DIR)"
-	@echo "  CONCURRENCY         = $(CONCURRENCY)"
-	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
-	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes (archive RPC required),no)"
+	@echo "  DATA_DIR                  = $(DATA_DIR)"
+	@echo "  NETWORK                   = $(NETWORK)"
+	@echo "  UNIFIED_OUTPUT_DIR        = $(UNIFIED_OUTPUT_DIR)"
+	@echo "  OI_OUTPUT_DIR             = $(OI_OUTPUT_DIR)"
+	@echo "  POOL_LIQUIDITY_OUTPUT_DIR = $(POOL_LIQUIDITY_OUTPUT_DIR)"
+	@echo "  FEATHER_DIR               = $(FEATHER_DIR)"
+	@echo "  LOG_DIR                   = $(LOG_DIR)"
+	@echo "  CONCURRENCY               = $(CONCURRENCY)"
+	@echo "  OUTPUT_FORMAT             = $(OUTPUT_FORMAT)"
+	@echo "  INCLUDE_DATASTORE         = $(if $(INCLUDE_DATASTORE),yes (archive RPC required),no)"
 	@echo ""
-	@echo "Full collection targets (candles + funding):"
-	@echo "  update-gmx-data     - Incremental update: candles + funding (recommended for daily runs)"
-	@echo "  collect-update      - Candles only: incremental (GMX API + Chainlink + oracle)"
-	@echo "  collect-full        - Candles only: full historical from genesis"
+	@echo "Full collection targets (candles + funding + OI + liquidity):"
+	@echo "  extract-all          - Full historical backfill: OI + pool liquidity (genesis)"
+	@echo "  extract-all-resume   - Incremental update: OI + pool liquidity (resume from checkpoints)"
+	@echo "  update-gmx-data      - Incremental update: candles + funding (recommended for daily runs)"
+	@echo "  collect-update       - Candles only: incremental (GMX API + Chainlink + oracle)"
+	@echo "  collect-full         - Candles only: full historical from genesis"
+	@echo ""
+	@echo "Open Interest targets:"
+	@echo "  oi                   - Full historical OI extraction from genesis"
+	@echo "  oi-resume            - Incremental OI update (resume from checkpoint)"
+	@echo "  oi-full              - Full OI backfill with explicit from-block"
+	@echo ""
+	@echo "Pool Liquidity targets:"
+	@echo "  pool-liquidity       - Full historical pool liquidity extraction from genesis"
+	@echo "  pool-liquidity-resume - Incremental pool liquidity update (resume from checkpoint)"
 	@echo ""
 	@echo "Funding-only targets:"
 	@echo "  funding-unified      - Extract all phases + merge (HyperSync only, fast)"
@@ -71,29 +89,113 @@ help:
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  source .env && make update-gmx-data          # Full incremental update (candles + funding)"
-	@echo "  make collect-update CONCURRENCY=10             # Candles only, 10 parallel workers"
+	@echo "  source .env && make extract-all-resume        # Incremental OI + liquidity update"
+	@echo "  source .env && make oi FROM_BLOCK=120000000   # Full OI backfill from genesis"
+	@echo "  make pool-liquidity NETWORK=arbitrum           # Full liquidity backfill"
+	@echo "  source .env && make update-gmx-data           # Candles + funding incremental"
 	@echo "  make funding-unified-resume                   # Funding only, incremental"
-	@echo "  make funding-full MARKET=ETH/USD              # Single market, full history"
 	@echo ""
 	@echo "Tip: source .env before make (for HYPERSYNC_API_TOKEN, JSON_RPC_ARBITRUM)"
 	@echo "  export JSON_RPC_ARBITRUM=https://...  # Required for funding-full (DataStore phase)"
 
+# ==============================================================================
+# Open Interest Extraction
+# ==============================================================================
+
+# Full historical OI backfill from genesis
+oi:
+	@echo "Starting GMX V2 Open Interest extraction (full history)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(OI_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p $(OI_OUTPUT_DIR) $(LOG_DIR)
+	poetry run python scripts/extract_open_interest.py \
+		--network $(NETWORK) \
+		--output-dir $(OI_OUTPUT_DIR) \
+		--output parquet \
+		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),--from-block 120000000) \
+		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
+		$(if $(MARKET),--market $(MARKET),)
+
+# Full OI backfill (alias for oi, kept for explicit from-block invocations)
+oi-full: oi
+
+# Incremental OI update (resume from checkpoint)
+oi-resume:
+	@echo "Starting incremental OI extraction (resume from checkpoint)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(OI_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p $(OI_OUTPUT_DIR) $(LOG_DIR)
+	poetry run python scripts/extract_open_interest.py \
+		--network $(NETWORK) \
+		--output-dir $(OI_OUTPUT_DIR) \
+		--output parquet \
+		--resume \
+		$(if $(MARKET),--market $(MARKET),)
+
+# ==============================================================================
+# Pool Liquidity Extraction
+# ==============================================================================
+
+# Full historical pool liquidity backfill from genesis
+pool-liquidity:
+	@echo "Starting GMX V2 Pool Liquidity extraction (full history)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(POOL_LIQUIDITY_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p $(POOL_LIQUIDITY_OUTPUT_DIR) $(LOG_DIR)
+	poetry run python scripts/extract_pool_liquidity.py \
+		--network $(NETWORK) \
+		--output-dir $(POOL_LIQUIDITY_OUTPUT_DIR) \
+		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),--from-block 120000000) \
+		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
+		$(if $(MARKET),--market $(MARKET),)
+
+# Incremental pool liquidity update (resume from checkpoint)
+pool-liquidity-resume:
+	@echo "Starting incremental Pool Liquidity extraction (resume from checkpoint)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(POOL_LIQUIDITY_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p $(POOL_LIQUIDITY_OUTPUT_DIR) $(LOG_DIR)
+	poetry run python scripts/extract_pool_liquidity.py \
+		--network $(NETWORK) \
+		--output-dir $(POOL_LIQUIDITY_OUTPUT_DIR) \
+		--resume \
+		$(if $(MARKET),--market $(MARKET),)
+
+# ==============================================================================
+# Combined Extraction
+# ==============================================================================
+
+# Full historical backfill: OI + pool liquidity (runs sequentially)
+extract-all: oi pool-liquidity
+	@echo ""
+	@echo "Full extraction complete: OI + pool liquidity"
+
+# Incremental update: OI + pool liquidity (runs sequentially, resume from checkpoints)
+extract-all-resume: oi-resume pool-liquidity-resume
+	@echo ""
+	@echo "Incremental extraction complete: OI + pool liquidity"
+
 # Show current configuration
 show-config:
 	@echo "Current Configuration:"
-	@echo "  DATA_DIR            = $(DATA_DIR)"
-	@echo "  NETWORK             = $(NETWORK)"
-	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
-	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
-	@echo "  CHECKPOINT_DIR      = $(CHECKPOINT_DIR)"
-	@echo "  LOG_DIR             = $(LOG_DIR)"
-	@echo "  CONCURRENCY         = $(CONCURRENCY)"
-	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
-	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes,no)"
-	@echo "  FROM_BLOCK          = $(FROM_BLOCK)"
-	@echo "  TO_BLOCK            = $(TO_BLOCK)"
-	@echo "  MARKET              = $(MARKET)"
+	@echo "  DATA_DIR                  = $(DATA_DIR)"
+	@echo "  NETWORK                   = $(NETWORK)"
+	@echo "  UNIFIED_OUTPUT_DIR        = $(UNIFIED_OUTPUT_DIR)"
+	@echo "  OI_OUTPUT_DIR             = $(OI_OUTPUT_DIR)"
+	@echo "  POOL_LIQUIDITY_OUTPUT_DIR = $(POOL_LIQUIDITY_OUTPUT_DIR)"
+	@echo "  FEATHER_DIR               = $(FEATHER_DIR)"
+	@echo "  CHECKPOINT_DIR            = $(CHECKPOINT_DIR)"
+	@echo "  LOG_DIR                   = $(LOG_DIR)"
+	@echo "  CONCURRENCY               = $(CONCURRENCY)"
+	@echo "  OUTPUT_FORMAT             = $(OUTPUT_FORMAT)"
+	@echo "  INCLUDE_DATASTORE         = $(if $(INCLUDE_DATASTORE),yes,no)"
+	@echo "  FROM_BLOCK                = $(FROM_BLOCK)"
+	@echo "  TO_BLOCK                  = $(TO_BLOCK)"
+	@echo "  MARKET                    = $(MARKET)"
 
 # Install dependencies
 install:
