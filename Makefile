@@ -10,10 +10,14 @@
 NETWORK ?= arbitrum
 
 # Directory paths
-UNIFIED_OUTPUT_DIR ?= ./data/funding
+DATA_DIR ?= ./data
+UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
 FEATHER_DIR ?= ./user_data
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
+
+# Collection options (for collect targets)
+CONCURRENCY ?= 5
 
 # Extraction options
 OUTPUT_FORMAT ?= parquet
@@ -31,21 +35,29 @@ INCLUDE_DATASTORE ?=
 .PHONY: help install show-config \
         funding-unified funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
-        funding-status funding-stop funding-logs funding-clean
+        funding-status funding-stop funding-logs funding-clean \
+        collect-update collect-full update-gmx-data export-freqtrade
 
 # Default target
 help:
 	@echo "GMX Historical Data Makefile"
 	@echo ""
 	@echo "Configuration (current values):"
+	@echo "  DATA_DIR            = $(DATA_DIR)"
 	@echo "  NETWORK             = $(NETWORK)"
 	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
 	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
 	@echo "  LOG_DIR             = $(LOG_DIR)"
+	@echo "  CONCURRENCY         = $(CONCURRENCY)"
 	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
 	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes (archive RPC required),no)"
 	@echo ""
-	@echo "Main targets:"
+	@echo "Full collection targets (candles + funding):"
+	@echo "  update-gmx-data     - Incremental update: candles + funding (recommended for daily runs)"
+	@echo "  collect-update      - Candles only: incremental (GMX API + Chainlink + oracle)"
+	@echo "  collect-full        - Candles only: full historical from genesis"
+	@echo ""
+	@echo "Funding-only targets:"
 	@echo "  funding-unified      - Extract all phases + merge (HyperSync only, fast)"
 	@echo "  funding-full         - Extract all phases including DataStore (slow, archive RPC)"
 	@echo "  funding-feather      - Export to FreqTrade feather format (run after extraction)"
@@ -54,27 +66,29 @@ help:
 	@echo ""
 	@echo "Utility targets:"
 	@echo "  install              - Install dependencies with Poetry"
+	@echo "  export-freqtrade     - Export candles + funding to FreqTrade format"
 	@echo "  funding-clean        - Clean up temporary files"
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  make funding-unified                           # Fast: HyperSync phases only"
-	@echo "  make funding-full                              # Full history including DataStore"
-	@echo "  make funding-feather                           # Export to feather after extraction"
-	@echo "  make funding-full MARKET=ETH/USD               # Single market"
-	@echo "  make funding-unified-resume                    # Top up stale markets"
+	@echo "  source .env && make update-gmx-data          # Full incremental update (candles + funding)"
+	@echo "  make collect-update CONCURRENCY=10             # Candles only, 10 parallel workers"
+	@echo "  make funding-unified-resume                   # Funding only, incremental"
+	@echo "  make funding-full MARKET=ETH/USD              # Single market, full history"
 	@echo ""
-	@echo "Tip: set JSON_RPC_ARBITRUM before funding-full"
-	@echo "  export JSON_RPC_ARBITRUM=https://your-archive-node"
+	@echo "Tip: source .env before make (for HYPERSYNC_API_TOKEN, JSON_RPC_ARBITRUM)"
+	@echo "  export JSON_RPC_ARBITRUM=https://...  # Required for funding-full (DataStore phase)"
 
 # Show current configuration
 show-config:
 	@echo "Current Configuration:"
+	@echo "  DATA_DIR            = $(DATA_DIR)"
 	@echo "  NETWORK             = $(NETWORK)"
 	@echo "  UNIFIED_OUTPUT_DIR  = $(UNIFIED_OUTPUT_DIR)"
 	@echo "  FEATHER_DIR         = $(FEATHER_DIR)"
 	@echo "  CHECKPOINT_DIR      = $(CHECKPOINT_DIR)"
 	@echo "  LOG_DIR             = $(LOG_DIR)"
+	@echo "  CONCURRENCY         = $(CONCURRENCY)"
 	@echo "  OUTPUT_FORMAT       = $(OUTPUT_FORMAT)"
 	@echo "  INCLUDE_DATASTORE   = $(if $(INCLUDE_DATASTORE),yes,no)"
 	@echo "  FROM_BLOCK          = $(FROM_BLOCK)"
@@ -88,7 +102,44 @@ install:
 	@echo "Done"
 
 # ==============================================================================
-# Unified Extraction (recommended entry point)
+# Full Collection (candles + oracle events)
+# ==============================================================================
+
+# Incremental candle collection (GMX API + Chainlink + oracle events)
+# Uses smart gap detection; only fetches missing data
+collect-update:
+	@echo "Starting incremental candle collection..."
+	@echo "  Output:     $(DATA_DIR)"
+	@echo "  Concurrency: $(CONCURRENCY)"
+	@echo ""
+	@mkdir -p $(DATA_DIR) $(LOG_DIR)
+	poetry run python -m gmx_historical_data.cli collect --update --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+
+# Full historical candle collection from genesis
+collect-full:
+	@echo "Starting full candle collection from genesis..."
+	@echo "  Output:     $(DATA_DIR)"
+	@echo "  Concurrency: $(CONCURRENCY)"
+	@echo ""
+	@mkdir -p $(DATA_DIR) $(LOG_DIR)
+	poetry run python -m gmx_historical_data.cli collect --full --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+
+# Full incremental update: candles + funding (run this for daily updates)
+update-gmx-data: collect-update funding-unified-resume
+	@echo ""
+	@echo "Update complete: candles + funding"
+
+# Export candles + funding to FreqTrade feather format
+export-freqtrade:
+	@echo "Exporting to FreqTrade format..."
+	@echo "  Data:       $(DATA_DIR)"
+	@echo "  Output:     $(FEATHER_DIR)"
+	@echo ""
+	@mkdir -p $(FEATHER_DIR)
+	poetry run python -m gmx_historical_data.cli export-freqtrade --data-dir $(DATA_DIR) --output-dir $(FEATHER_DIR)
+
+# ==============================================================================
+# Unified Funding Extraction
 # ==============================================================================
 
 define UNIFIED_CMD

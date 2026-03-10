@@ -138,8 +138,8 @@ RETRY_MAX_DELAY = 120.0  # Cap backoff at 2 minutes
 # Progress milestones
 PROGRESS_MILESTONES = [1, 5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100]
 
-# Flush records to disk every N events
-FLUSH_EVERY = 50_000
+# Flush records to disk every N events (keeps memory bounded; 500k safe vs ~3.5M OOM)
+FLUSH_EVERY = 500_000
 
 # GMX V2 genesis block on Arbitrum
 GMX_V2_GENESIS_BLOCK = 120_000_000
@@ -449,6 +449,7 @@ async def extract_fee_per_size_events(
     to_block: int | None,
     market_filter: str | None = None,
     markets: dict | None = None,
+    flush_callback=None,
 ) -> list[FundingFeePerSizeRecord]:
     """Extract FundingFeeAmountPerSizeUpdated events from GMX V2 EventEmitter.
 
@@ -459,7 +460,11 @@ async def extract_fee_per_size_events(
     :param market_filter: Optional market symbol filter (e.g., ``'ETH/USD'``).
     :param markets: Market registry from :func:`fetch_markets`. Defaults to
         an empty dict (all unknown markets get truncated-address names).
-    :returns: List of :class:`FundingFeePerSizeRecord` objects.
+    :param flush_callback: Optional callable ``(batch, highest_block)`` invoked
+        every ``FLUSH_EVERY`` events to persist records incrementally and bound
+        memory usage. When provided the returned list will be empty.
+    :returns: List of :class:`FundingFeePerSizeRecord` objects (empty when
+        *flush_callback* is supplied).
     """
     if markets is None:
         markets = {}
@@ -504,6 +509,7 @@ async def extract_fee_per_size_events(
     records: list[FundingFeePerSizeRecord] = []
     block_timestamps: dict[int, int] = {}
     total_logs = 0
+    total_flushed = 0
     decode_errors = 0
     unknown_markets: set[str] = set()
     t_start = time.monotonic()
@@ -603,6 +609,13 @@ async def extract_fee_per_size_events(
                 if block_num > highest_block:
                     highest_block = block_num
 
+            # Flush to disk every FLUSH_EVERY events to keep memory bounded
+            if flush_callback is not None and len(records) >= FLUSH_EVERY:
+                flush_callback(records[:], highest_block)
+                total_flushed += len(records)
+                records.clear()
+                block_timestamps.clear()
+
             # Update progress
             elapsed = time.monotonic() - t_start
             rate = total_logs / elapsed if elapsed > 0 else 0
@@ -630,10 +643,18 @@ async def extract_fee_per_size_events(
                     )
                     next_milestone_idx += 1
 
+    # Final flush for any remaining records
+    if flush_callback is not None and records:
+        flush_callback(records[:], highest_block)
+        total_flushed += len(records)
+        records.clear()
+
     elapsed = time.monotonic() - t_start
+    total_events = total_flushed + len(records)
     console.print(
         f"\n  Extraction complete in {elapsed:.1f}s: "
-        f"{len(records):,} events from {total_logs:,} logs"
+        f"{total_events:,} events from {total_logs:,} logs"
+        + (f" (flushed in {total_flushed // FLUSH_EVERY + 1} batches)" if total_flushed else "")
     )
     if decode_errors:
         console.print(f"  [yellow]Decode errors: {decode_errors:,}[/yellow]")
@@ -1019,6 +1040,46 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         return
 
+    # Track cumulative state across incremental flushes
+    flush_state: dict = {"total_events": 0, "last_block": from_block, "last_timestamp": 0}
+
+    def on_flush(batch: list, highest_block: int) -> None:
+        """Persist a batch of records to disk and save an intermediate checkpoint."""
+        if not batch:
+            return
+        console.print(
+            f"\n  [dim]Flushing {len(batch):,} events at block {highest_block:,}...[/dim]"
+        )
+        if args.output in ("parquet", "feather"):
+            save_raw_per_symbol(batch, output_dir)
+            with console.status("Aggregating hourly rates..."):
+                hourly = aggregate_hourly_direction(batch)
+            save_direction_per_symbol(hourly, output_dir)
+            if args.feather_dir or args.output == "feather":
+                feather_out = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
+                save_feather_freqtrade(hourly, feather_out)
+
+        flush_state["total_events"] += len(batch)
+        flush_state["last_block"] = max(highest_block, flush_state["last_block"])
+        flush_state["last_timestamp"] = max(
+            (r.block_timestamp for r in batch if r.block_timestamp),
+            default=flush_state["last_timestamp"],
+        )
+
+        if args.resume:
+            prev_checkpoint = load_checkpoint(checkpoint_path)
+            prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
+            save_checkpoint(
+                checkpoint_path,
+                last_block=flush_state["last_block"],
+                last_timestamp=flush_state["last_timestamp"],
+                total_events=prev_total + flush_state["total_events"],
+                markets_seen=len(set(r.symbol for r in batch)),
+            )
+
+    # Only use streaming flush for parquet/feather (JSON needs all records at once)
+    use_flush = args.output in ("parquet", "feather")
+
     console.print()
     records = await extract_fee_per_size_events(
         client=client,
@@ -1027,9 +1088,13 @@ async def async_main(args: argparse.Namespace) -> None:
         to_block=to_block,
         market_filter=args.market,
         markets=markets,
+        flush_callback=on_flush if use_flush else None,
     )
 
-    if not records:
+    # After streaming flush, records will be empty; check flush_state instead
+    has_data = bool(records) or flush_state["total_events"] > 0
+
+    if not has_data:
         console.print("\n[yellow]No FundingFeeAmountPerSizeUpdated events found.[/yellow]")
         if args.resume:
             save_checkpoint(
@@ -1041,51 +1106,47 @@ async def async_main(args: argparse.Namespace) -> None:
             )
         return
 
-    # Save outputs
-    console.print()
-    if args.output == "parquet":
-        save_raw_per_symbol(records, output_dir)
+    # Handle any remaining in-memory records (non-flush path, or JSON mode)
+    if records:
+        console.print()
+        if args.output == "parquet":
+            save_raw_per_symbol(records, output_dir)
+            with console.status("Aggregating hourly rates..."):
+                hourly = aggregate_hourly_direction(records)
+            save_direction_per_symbol(hourly, output_dir)
+            if args.feather_dir:
+                save_feather_freqtrade(hourly, Path(args.feather_dir))
+        elif args.output == "feather":
+            with console.status("Aggregating hourly rates..."):
+                hourly = aggregate_hourly_direction(records)
+            save_direction_per_symbol(hourly, output_dir)
+            feather_dir = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
+            save_feather_freqtrade(hourly, feather_dir)
+        elif args.output == "json":
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = f"gmx_v2_fee_per_size_{args.network}_{from_block}_{to_block}_{ts}"
+            save_json(records, f"{base}.json")
 
-        with console.status("Aggregating hourly rates..."):
-            hourly = aggregate_hourly_direction(records)
-
-        save_direction_per_symbol(hourly, output_dir)
-
-        # Optional feather export
-        if args.feather_dir:
-            save_feather_freqtrade(hourly, Path(args.feather_dir))
-
-    elif args.output == "feather":
-        with console.status("Aggregating hourly rates..."):
-            hourly = aggregate_hourly_direction(records)
-
-        save_direction_per_symbol(hourly, output_dir)
-        feather_dir = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
-        save_feather_freqtrade(hourly, feather_dir)
-
-    elif args.output == "json":
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base = f"gmx_v2_fee_per_size_{args.network}_{from_block}_{to_block}_{ts}"
-        save_json(records, f"{base}.json")
-
-    # Save checkpoint
-    if args.resume:
-        last_block = max(r.block_number for r in records)
-        last_timestamp = max(r.block_timestamp for r in records if r.block_timestamp)
-        unique_markets = len(set(r.symbol for r in records))
-
-        prev_checkpoint = load_checkpoint(checkpoint_path)
-        prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
-
-        save_checkpoint(
-            checkpoint_path,
-            last_block=last_block,
-            last_timestamp=last_timestamp,
-            total_events=prev_total + len(records),
-            markets_seen=unique_markets,
+        if args.resume:
+            last_block = max(r.block_number for r in records)
+            last_timestamp = max(r.block_timestamp for r in records if r.block_timestamp)
+            unique_markets = len(set(r.symbol for r in records))
+            prev_checkpoint = load_checkpoint(checkpoint_path)
+            prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
+            save_checkpoint(
+                checkpoint_path,
+                last_block=last_block,
+                last_timestamp=last_timestamp,
+                total_events=prev_total + len(records),
+                markets_seen=unique_markets,
+            )
+        print_summary(records)
+    else:
+        total = flush_state["total_events"]
+        console.print(
+            f"\n[green]  Extraction complete: {total:,} events saved across "
+            f"{total // FLUSH_EVERY + 1} flush batches.[/green]"
         )
-
-    print_summary(records)
 
 
 def main():
