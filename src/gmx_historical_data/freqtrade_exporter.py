@@ -9,6 +9,8 @@ Exported file types:
   (``open`` = hourly funding rate, other OHLCV columns = 0)
 - **Mark price**: ``{SYMBOL}_USDC_USDC-{tf}-mark.feather``
   (OHLCV data used as mark price proxy)
+- **Index price**: ``{SYMBOL}_USDC_USDC-{tf}-index.feather``
+  (same as mark — GMX uses Chainlink oracle as index price)
 
 Funding rate parquet files are read from
 ``{data_dir}/funding/arbitrum/rates/{SYMBOL}/{tf}.parquet``.
@@ -90,6 +92,7 @@ class FreqtradeExporter:
             ohlcv_files = 0
             funding_files = 0
             mark_files = 0
+            index_files = 0
             total_candles = 0
 
             # Determine timeframes from candle + funding data
@@ -136,6 +139,18 @@ class FreqtradeExporter:
                         self._write(mark_df, gmx_dir / mark_filename, output_format)
                         mark_files += 1
 
+                        # --- Index price (same as mark for GMX/Chainlink) ---
+                        index_filename = self._get_freqtrade_filename(
+                            symbol,
+                            tf,
+                            output_format,
+                            trading_mode,
+                            quote_currency,
+                            candle_type="index",
+                        )
+                        self._write(mark_df, gmx_dir / index_filename, output_format)
+                        index_files += 1
+
                 # --- Funding rate ---
                 if tf in funding_tfs:
                     funding_df = self._read_funding_rate(symbol, tf)
@@ -153,11 +168,12 @@ class FreqtradeExporter:
                         funding_files += 1
 
             results[symbol] = {
-                "files": ohlcv_files + funding_files + mark_files,
+                "files": ohlcv_files + funding_files + mark_files + index_files,
                 "candles": total_candles,
                 "ohlcv_files": ohlcv_files,
                 "funding_files": funding_files,
                 "mark_files": mark_files,
+                "index_files": index_files,
             }
 
         return results
