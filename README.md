@@ -10,6 +10,8 @@ Collect historical price data for all 118 GMX V2 tokens with smart incremental u
 - **6 Timeframes** — 1min, 5min, 15min, 1h, 4h, 1d
 - **Freqtrade Compatible** — Direct export to Feather format (OHLCV + funding rate + mark price)
 - **Concurrent Collection** — Parallel symbol processing and RPC batch requests
+- **Historical OI & Pool Liquidity** — Full on-chain history of open interest and LP pool depth via HyperSync
+- **Analysis Notebooks** — Interactive Plotly notebooks for OI trends, pool utilisation, and cross-exchange validation
 
 ## Quick Start
 
@@ -154,6 +156,14 @@ data/
 │   ├── 1m.parquet
 │   ├── 1h.parquet
 │   └── 1d.parquet
+├── open_interest/arbitrum/
+│   ├── raw/{SYMBOL}/data.parquet         # Raw OI events (every position change)
+│   ├── snapshots/{SYMBOL}/daily.parquet  # End-of-day OI snapshots
+│   └── checkpoints/
+├── pool_liquidity/arbitrum/
+│   ├── raw/{SYMBOL}/data.parquet         # Raw PoolAmountUpdated events
+│   ├── snapshots/{SYMBOL}/daily.parquet  # Daily pool depth snapshots
+│   └── checkpoints/pool_liquidity_checkpoint.json
 ├── funding/arbitrum/
 │   ├── raw/
 │   │   ├── funding/{SYMBOL}/partition=0/data.parquet
@@ -286,6 +296,106 @@ poetry run python scripts/extract_borrowing_factor.py --resume --market "ETH/USD
 | `market` | string | Market contract address |
 
 To compute net position cost: `net_rate = funding_rate + borrowing_rate`. Both outputs use the same hourly format and can be joined on `(timestamp, symbol)`.
+
+## Open Interest Extraction
+
+Extract full historical `OpenInterestUpdated` and `OpenInterestInTokensUpdated` events from GMX V2 via HyperSync. Records every position change with USD and token-denominated OI.
+
+```bash
+# Full historical backfill (from GMX V2 launch, ~20 min)
+poetry run python scripts/extract_open_interest.py --from-block 120000000
+
+# Incremental update (resumes from checkpoint)
+poetry run python scripts/extract_open_interest.py --resume
+
+# Filter to a single market
+poetry run python scripts/extract_open_interest.py --resume --market "ETH/USD"
+
+# Quick test on a small block range
+poetry run python scripts/extract_open_interest.py --from-block 290000000 --to-block 290100000
+```
+
+**Output structure:**
+
+```
+data/open_interest/arbitrum/
+├── raw/{SYMBOL}/data.parquet          — raw events (every position change)
+├── snapshots/{SYMBOL}/daily.parquet   — end-of-day OI snapshots
+└── checkpoints/
+```
+
+**Daily snapshot schema** (`snapshots/{SYMBOL}/daily.parquet`):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `symbol` | string | Market symbol (e.g. `ETH/USD`) |
+| `date` | string | UTC date |
+| `longOiUsd` | string | Long OI in USD (30-decimal string) |
+| `shortOiUsd` | string | Short OI in USD (30-decimal string) |
+| `totalOiUsd` | string | Total OI in USD |
+| `longShortRatio` | string | Long/short ratio |
+| `eventCount` | int | Position changes that day |
+
+## Pool Liquidity Extraction
+
+Extract full historical `PoolAmountUpdated` events — LP pool token changes on every deposit, withdrawal, and position-triggered rebalance.
+
+```bash
+# Full historical backfill (~20 min via HyperSync)
+poetry run python scripts/extract_pool_liquidity.py --from-block 120000000
+
+# Incremental update
+poetry run python scripts/extract_pool_liquidity.py --resume
+
+# Filter to a single market
+poetry run python scripts/extract_pool_liquidity.py --resume --market "ETH/USD"
+```
+
+**Output structure:**
+
+```
+data/pool_liquidity/arbitrum/
+├── raw/{SYMBOL}/data.parquet          — raw events (delta + nextValue per token)
+├── snapshots/{SYMBOL}/daily.parquet   — daily pool depth snapshots
+└── checkpoints/pool_liquidity_checkpoint.json
+```
+
+**Daily snapshot schema** (`snapshots/{SYMBOL}/daily.parquet`):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `symbol` | string | Market symbol |
+| `date` | datetime[UTC] | UTC date |
+| `token` | string | Pool token address |
+| `pool_tokens` | float64 | End-of-day pool token amount (raw units) |
+
+## Analysis Notebooks
+
+Interactive Plotly notebooks for exploring OI and liquidity. Launch with:
+
+```bash
+poetry run jupyter lab notebooks/
+```
+
+| Notebook | Description |
+|----------|-------------|
+| `notebooks/01_oi_analysis.ipynb` | OI time series, long/short breakdown, market rankings, monthly heatmap |
+| `notebooks/02_liquidity_analysis.ipynb` | Pool depth over time, OI vs pool dual-axis, utilisation scatter, trading universe filter |
+| `notebooks/03_cross_exchange_validation.ipynb` | GMX OI vs Binance/Hyperliquid volume correlation, cross-exchange funding rate comparison |
+
+**Usage example:**
+
+```python
+# Load OI snapshots for all markets
+import pandas as pd
+from pathlib import Path
+
+SCALE_30 = 10 ** 30
+snapshots_dir = Path("data/open_interest/arbitrum/snapshots")
+frames = [pd.read_parquet(f) for f in snapshots_dir.rglob("daily.parquet")]
+oi = pd.concat(frames)
+oi["total_oi_usd"] = oi["totalOiUsd"].astype(float) / SCALE_30
+```
 
 ## Troubleshooting
 
