@@ -22,6 +22,7 @@ aiohttp = ">=3.9.0"
 polars = "^1.38.1"
 plotly = "^6.6.0"
 jupyterlab = "^4.5.5"
+statsmodels = "^0.14.6"
 
 [tool.poetry.scripts]
 gmx_historical_data = "gmx_historical_data.cli:main"
