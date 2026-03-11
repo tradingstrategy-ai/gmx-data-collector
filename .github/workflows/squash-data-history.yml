@@ -40,7 +40,7 @@ jobs:
           git commit -m "data: squashed history as of $(date -u '+%Y-%m-%d')
 
           Previous ${COMMIT_COUNT} commits squashed to reduce repository size.
-          Data includes: daily market snapshots (OI, liquidity, rates, OHLCV)."
+          Data includes: OHLCV feather files + daily market snapshots (OI, liquidity, rates)."
 
           # Replace the data branch
           git branch -D data/daily-collection

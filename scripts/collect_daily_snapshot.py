@@ -3,16 +3,16 @@
 Fetches a point-in-time snapshot of all listed GMX V2 markets via the
 public REST API (no HyperSync, no RPC, no API keys required). Captures:
 
+- Daily OHLCV candles per symbol → CCXT feather format
 - Open Interest (long/short per market)
 - Pool Liquidity (pool amounts, available liquidity)
 - Funding & Borrowing rates
-- Daily OHLCV candles per unique symbol
 
-Output is date-partitioned parquet files under ``--output-dir``::
+Output follows the existing ``user_data/`` layout::
 
-    data/snapshots/
-    ├── markets_info/2026-03-11.parquet
-    └── ohlcv_daily/2026-03-11.parquet
+    user_data/data/gmx/
+    ├── futures/{SYM}_USDC_USDC-1d-futures.feather   # OHLCV (appended)
+    └── snapshots/{date}.parquet                      # OI + liquidity + rates
 
 Usage::
 
@@ -22,7 +22,7 @@ Usage::
     # Specific date
     poetry run python scripts/collect_daily_snapshot.py --date 2026-03-10
 
-    # Custom output
+    # Custom output root
     poetry run python scripts/collect_daily_snapshot.py --output-dir ./my_data
 """
 
@@ -33,14 +33,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import pyarrow.feather as feather
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
 console = Console()
-
-# GMX API returns rates as annualized 1e30 fixed-point strings.
-_GMX_PRECISION = 1e30
-_HOURS_PER_YEAR = 365.25 * 24
 
 
 def collect_markets_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
@@ -100,17 +97,12 @@ def collect_markets_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
     return df
 
 
-def collect_ohlcv_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
-    """Fetch the latest daily OHLCV candle for each unique symbol.
-
-    For symbols that appear in multiple markets (e.g. ETH has 2-3 markets
-    with different collateral), only one candle call is made per symbol.
+def _get_unique_symbols(api: GMXAPI) -> list[str]:
+    """Extract sorted unique base symbols from listed GMX markets.
 
     :param api: Initialised GMXAPI client.
-    :param date_str: ISO date string to tag the snapshot.
-    :returns: DataFrame with one row per symbol (OHLCV + date).
+    :returns: Sorted list of unique symbol strings.
     """
-    # Discover unique symbols from markets_info
     data = api.get_markets_info()
     markets = data.get("markets", [])
 
@@ -125,11 +117,33 @@ def collect_ohlcv_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
         if symbol:
             symbols.add(symbol)
 
-    symbols = sorted(symbols)
+    return sorted(symbols)
+
+
+def collect_and_save_ohlcv(
+    api: GMXAPI,
+    date_str: str,
+    futures_dir: Path,
+) -> int:
+    """Fetch daily OHLCV candles and append to per-symbol CCXT feather files.
+
+    For each symbol, fetches the latest daily candle and appends it to
+    ``{futures_dir}/{SYM}_USDC_USDC-1d-futures.feather``. Existing rows
+    at the same date are replaced (idempotent on re-run).
+
+    :param api: Initialised GMXAPI client.
+    :param date_str: ISO date string for the snapshot.
+    :param futures_dir: Directory for CCXT feather files
+        (e.g. ``user_data/data/gmx/futures/``).
+    :returns: Number of symbols successfully saved.
+    """
+    symbols = _get_unique_symbols(api)
     console.print(f"  Fetching daily candles for {len(symbols)} unique symbols...")
 
-    rows = []
+    futures_dir.mkdir(parents=True, exist_ok=True)
+    saved = 0
     failed = []
+
     for symbol in symbols:
         try:
             df = api.get_candlesticks_dataframe(symbol, period="1d", limit=2)
@@ -137,19 +151,42 @@ def collect_ohlcv_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
                 failed.append(symbol)
                 continue
 
-            # Take the latest candle row
+            # Take the latest candle and build CCXT-format row
             latest = df.iloc[-1]
-            rows.append(
-                {
-                    "date": date_str,
-                    "symbol": symbol,
-                    "timestamp": latest["timestamp"],
-                    "open": float(latest["open"]),
-                    "high": float(latest["high"]),
-                    "low": float(latest["low"]),
-                    "close": float(latest["close"]),
-                }
+            ts = latest["timestamp"]
+            if hasattr(ts, "tzinfo") and ts.tzinfo is None:
+                ts = pd.Timestamp(ts, tz="UTC")
+
+            new_row = pd.DataFrame(
+                [
+                    {
+                        "date": ts,
+                        "open": float(latest["open"]),
+                        "high": float(latest["high"]),
+                        "low": float(latest["low"]),
+                        "close": float(latest["close"]),
+                        "volume": 0.0,
+                    }
+                ]
             )
+
+            # Append to existing feather file or create new one
+            filepath = futures_dir / f"{symbol}_USDC_USDC-1d-futures.feather"
+            if filepath.exists():
+                existing = pd.read_feather(filepath)
+                if existing["date"].dt.tz is None:
+                    existing["date"] = existing["date"].dt.tz_localize("UTC")
+                # Drop any existing row at the same timestamp (idempotent)
+                existing = existing[existing["date"] != ts]
+                combined = pd.concat([existing, new_row], ignore_index=True)
+            else:
+                combined = new_row
+
+            combined = combined.sort_values("date").reset_index(drop=True)
+            combined["date"] = combined["date"].dt.as_unit("ns")
+            feather.write_feather(combined, filepath)
+            saved += 1
+
         except Exception as e:
             failed.append(symbol)
             console.print(f"    [yellow]Warning: {symbol} — {e}[/yellow]")
@@ -158,10 +195,15 @@ def collect_ohlcv_snapshot(api: GMXAPI, date_str: str) -> pd.DataFrame:
         time.sleep(0.1)
 
     console.print(
-        f"  [green]Collected {len(rows)} candles[/green]"
-        + (f" [yellow]({len(failed)} failed: {', '.join(failed[:5])}{'...' if len(failed) > 5 else ''})[/yellow]" if failed else "")
+        f"  [green]Saved {saved} candle files[/green]"
+        + (
+            f" [yellow]({len(failed)} failed: {', '.join(failed[:5])}"
+            f"{'...' if len(failed) > 5 else ''})[/yellow]"
+            if failed
+            else ""
+        )
     )
-    return pd.DataFrame(rows)
+    return saved
 
 
 def main() -> None:
@@ -177,15 +219,15 @@ Examples:
   # Specific date
   poetry run python scripts/collect_daily_snapshot.py --date 2026-03-10
 
-  # Custom output directory
+  # Custom output root
   poetry run python scripts/collect_daily_snapshot.py --output-dir ./my_data
         """,
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("./data/snapshots"),
-        help="Base output directory (default: ./data/snapshots)",
+        default=Path("./user_data"),
+        help="Root output directory (default: ./user_data)",
     )
     parser.add_argument(
         "--date",
@@ -203,9 +245,13 @@ Examples:
     args = parser.parse_args()
     date_str = args.date or datetime.now(UTC).strftime("%Y-%m-%d")
 
+    futures_dir = args.output_dir / "data" / "gmx" / "futures"
+    snapshots_dir = args.output_dir / "data" / "gmx" / "snapshots"
+
     console.print(f"\n[bold]GMX Daily Snapshot — {date_str}[/bold]")
-    console.print(f"  Network: {args.network}")
-    console.print(f"  Output:  {args.output_dir}\n")
+    console.print(f"  Network:   {args.network}")
+    console.print(f"  Futures:   {futures_dir}")
+    console.print(f"  Snapshots: {snapshots_dir}\n")
 
     api = GMXAPI(chain=args.network)
 
@@ -217,28 +263,21 @@ Examples:
         console.print("[red]Error: No market data returned from GMX API[/red]")
         sys.exit(1)
 
-    markets_path = args.output_dir / "markets_info" / f"{date_str}.parquet"
+    markets_path = snapshots_dir / f"{date_str}.parquet"
     markets_path.parent.mkdir(parents=True, exist_ok=True)
     markets_df.to_parquet(markets_path, index=False)
     console.print(f"  Saved → {markets_path}\n")
 
-    # --- 2. OHLCV daily candles ---
-    console.print("[bold]Phase 2: Daily OHLCV candles[/bold]")
-    ohlcv_df = collect_ohlcv_snapshot(api, date_str)
-
-    if not ohlcv_df.empty:
-        ohlcv_path = args.output_dir / "ohlcv_daily" / f"{date_str}.parquet"
-        ohlcv_path.parent.mkdir(parents=True, exist_ok=True)
-        ohlcv_df.to_parquet(ohlcv_path, index=False)
-        console.print(f"  Saved → {ohlcv_path}\n")
-    else:
-        console.print("  [yellow]No OHLCV data collected[/yellow]\n")
+    # --- 2. OHLCV daily candles (CCXT feather format) ---
+    console.print("[bold]Phase 2: Daily OHLCV candles (CCXT feather)[/bold]")
+    candle_count = collect_and_save_ohlcv(api, date_str, futures_dir)
+    console.print()
 
     # --- Summary ---
     console.print("[bold]Summary[/bold]")
-    console.print(f"  Date:    {date_str}")
-    console.print(f"  Markets: {len(markets_df)}")
-    console.print(f"  Candles: {len(ohlcv_df)}")
+    console.print(f"  Date:      {date_str}")
+    console.print(f"  Markets:   {len(markets_df)}")
+    console.print(f"  Candles:   {candle_count}")
     console.print("[green]Done.[/green]")
 
 

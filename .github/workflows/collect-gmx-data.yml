@@ -32,7 +32,7 @@ jobs:
 
       - name: Collect daily snapshot
         id: collect
-        run: python scripts/collect_daily_snapshot.py --output-dir ./data/snapshots
+        run: python scripts/collect_daily_snapshot.py --output-dir ./user_data
 
       - name: Generate data report
         if: always()
@@ -40,36 +40,30 @@ jobs:
           echo "## GMX Daily Snapshot — $(date -u '+%Y-%m-%d')" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "### Markets Info" >> $GITHUB_STEP_SUMMARY
+          echo "### Market Snapshots" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -lh data/snapshots/markets_info/ 2>/dev/null | tail -5 || echo "No files"
+          ls -lh user_data/data/gmx/snapshots/ 2>/dev/null | tail -5 || echo "No files"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "### OHLCV Daily" >> $GITHUB_STEP_SUMMARY
+          echo "### OHLCV Feather Files" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          ls -lh data/snapshots/ohlcv_daily/ 2>/dev/null | tail -5 || echo "No files"
+          FUTURES=$(find user_data/data/gmx/futures -name "*-1d-futures.feather" 2>/dev/null | wc -l | tr -d ' ')
+          echo "${FUTURES} symbol files"
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           echo "### Total Size" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          du -sh data/snapshots/ 2>/dev/null || echo "No data"
+          du -sh user_data/data/gmx/futures/ user_data/data/gmx/snapshots/ 2>/dev/null || echo "No data"
           echo '```' >> $GITHUB_STEP_SUMMARY
-
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### File Counts" >> $GITHUB_STEP_SUMMARY
-          MARKETS=$(find data/snapshots/markets_info -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
-          OHLCV=$(find data/snapshots/ohlcv_daily -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
-          echo "- Markets info snapshots: ${MARKETS}" >> $GITHUB_STEP_SUMMARY
-          echo "- OHLCV daily snapshots: ${OHLCV}" >> $GITHUB_STEP_SUMMARY
 
       - name: Commit and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add --force data/snapshots/
+          git add --force user_data/data/gmx/futures/ user_data/data/gmx/snapshots/
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
