@@ -1,0 +1,59 @@
+name: Daily GMX Data Collection
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 02:00 UTC daily (after GMX daily candle close)
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: data/daily-collection
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Install Python dependencies
+        run: pip install -e .
+
+      - name: Collect daily snapshot
+        id: collect
+        run: python scripts/collect_daily_snapshot.py --output-dir ./user_data
+
+      - name: Show report in job summary
+        if: always()
+        run: |
+          if [ -f user_data/data_report.txt ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat user_data/data_report.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No report generated" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add --force user_data/data/gmx/futures/ user_data/data/gmx/snapshots/ user_data/data_report.txt
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "data: daily GMX snapshot $(date -u '+%Y-%m-%d')"
+            git push
+          fi
