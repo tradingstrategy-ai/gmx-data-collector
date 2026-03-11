@@ -6,6 +6,11 @@
 #   2. Pass on command line: make funding-unified INCLUDE_DATASTORE=1
 # ==============================================================================
 
+# Auto-load .env variables if .env exists (strips leading 'export' and quotes)
+ifneq (,$(wildcard .env))
+$(foreach line,$(shell grep -v '^\s*\#' .env | grep -v '^\s*$$' | sed 's/^export //' | sed 's/"//g'),$(eval export $(line)))
+endif
+
 # Network configuration
 NETWORK ?= arbitrum
 
@@ -89,14 +94,14 @@ help:
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  source .env && make extract-all-resume        # Incremental OI + liquidity update"
-	@echo "  source .env && make oi FROM_BLOCK=120000000   # Full OI backfill from genesis"
-	@echo "  make pool-liquidity NETWORK=arbitrum           # Full liquidity backfill"
-	@echo "  source .env && make update-gmx-data           # Candles + funding incremental"
+	@echo "  make extract-all-resume                       # Incremental OI + liquidity update"
+	@echo "  make oi FROM_BLOCK=120000000                  # Full OI backfill from genesis"
+	@echo "  make pool-liquidity NETWORK=arbitrum          # Full liquidity backfill"
+	@echo "  make update-gmx-data                          # Candles + funding incremental"
 	@echo "  make funding-unified-resume                   # Funding only, incremental"
 	@echo ""
-	@echo "Tip: source .env before make (for HYPERSYNC_API_TOKEN, JSON_RPC_ARBITRUM)"
-	@echo "  export JSON_RPC_ARBITRUM=https://...  # Required for funding-full (DataStore phase)"
+	@echo "Tip: .env is auto-loaded (HYPERSYNC_API_TOKEN, JSON_RPC_ARBITRUM, etc.)"
+	@echo "  Override: export JSON_RPC_ARBITRUM=https://...  # or set in .env"
 
 # ==============================================================================
 # Open Interest Extraction
