@@ -2029,6 +2029,7 @@ def export_freqtrade_command(
     - OHLCV candles (``*-futures.feather``)
     - Funding rate  (``*-funding_rate.feather``) — rate in ``open`` column
     - Mark price    (``*-mark.feather``)         — OHLCV used as proxy
+    - Index price   (``*-index.feather``)        — same as mark (GMX uses Chainlink as index)
 
     OUTPUT STRUCTURE:
       freqtrade_data/
@@ -2037,6 +2038,7 @@ def export_freqtrade_command(
               ├── ETH_USDC_USDC-1h-futures.feather
               ├── ETH_USDC_USDC-1h-funding_rate.feather
               ├── ETH_USDC_USDC-1h-mark.feather
+              ├── ETH_USDC_USDC-1h-index.feather
               ├── BTC_USDC_USDC-1h-futures.feather
               └── ...
 
@@ -2132,12 +2134,14 @@ def export_freqtrade_command(
     total_ohlcv = sum(r.get("ohlcv_files", r["files"]) for r in results.values())
     total_funding = sum(r.get("funding_files", 0) for r in results.values())
     total_mark = sum(r.get("mark_files", 0) for r in results.values())
+    total_index = sum(r.get("index_files", 0) for r in results.values())
 
     summary_table = Table(title="Export Summary", box=box.ROUNDED)
     summary_table.add_column("Symbol", style="cyan")
     summary_table.add_column("OHLCV", justify="right")
     summary_table.add_column("Funding", justify="right")
     summary_table.add_column("Mark", justify="right")
+    summary_table.add_column("Index", justify="right")
     summary_table.add_column("Candles", justify="right")
 
     for sym, stats in sorted(results.items()):
@@ -2146,6 +2150,7 @@ def export_freqtrade_command(
             str(stats.get("ohlcv_files", stats["files"])),
             str(stats.get("funding_files", 0)),
             str(stats.get("mark_files", 0)),
+            str(stats.get("index_files", 0)),
             f"{stats['candles']:,}",
         )
 
@@ -2154,6 +2159,7 @@ def export_freqtrade_command(
         f"[bold]{total_ohlcv}[/bold]",
         f"[bold]{total_funding}[/bold]",
         f"[bold]{total_mark}[/bold]",
+        f"[bold]{total_index}[/bold]",
         f"[bold]{total_candles:,}[/bold]",
     )
 

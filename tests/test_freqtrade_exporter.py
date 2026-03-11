@@ -102,8 +102,33 @@ def test_export_returns_stats(sample_storage):
 
         assert "ETH" in result
         assert "BTC" in result
-        assert result["ETH"]["files"] == 2  # 1h and 4h
-        assert result["BTC"]["files"] == 1  # only 1h
+        # ETH: 1h + 4h = 2 ohlcv + 2 mark + 2 index = 6
+        assert result["ETH"]["ohlcv_files"] == 2
+        assert result["ETH"]["mark_files"] == 2
+        assert result["ETH"]["index_files"] == 2
+        assert result["ETH"]["files"] == 6
+        # BTC: 1h = 1 ohlcv + 1 mark + 1 index = 3
+        assert result["BTC"]["ohlcv_files"] == 1
+        assert result["BTC"]["mark_files"] == 1
+        assert result["BTC"]["index_files"] == 1
+        assert result["BTC"]["files"] == 3
+
+
+def test_export_creates_index_files(sample_storage):
+    """Test export creates index price files matching mark price data."""
+    with tempfile.TemporaryDirectory() as output_dir:
+        exporter = FreqtradeExporter(sample_storage, Path(output_dir))
+        exporter.export()
+
+        futures_dir = Path(output_dir) / "gmx" / "futures"
+        index_file = futures_dir / "ETH_USDC_USDC-1h-index.feather"
+        mark_file = futures_dir / "ETH_USDC_USDC-1h-mark.feather"
+
+        assert index_file.exists()
+
+        df_index = pd.read_feather(index_file)
+        df_mark = pd.read_feather(mark_file)
+        pd.testing.assert_frame_equal(df_index, df_mark)
 
 
 def test_date_column_is_datetime(sample_storage):
