@@ -1,0 +1,78 @@
+name: Daily GMX Data Collection
+
+on:
+  schedule:
+    - cron: '0 2 * * *'  # 02:00 UTC daily (after GMX daily candle close)
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: data/daily-collection
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Install Python dependencies
+        run: pip install -e .
+
+      - name: Collect daily snapshot
+        id: collect
+        run: python scripts/collect_daily_snapshot.py --output-dir ./data/snapshots
+
+      - name: Generate data report
+        if: always()
+        run: |
+          echo "## GMX Daily Snapshot — $(date -u '+%Y-%m-%d')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Markets Info" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh data/snapshots/markets_info/ 2>/dev/null | tail -5 || echo "No files"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### OHLCV Daily" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          ls -lh data/snapshots/ohlcv_daily/ 2>/dev/null | tail -5 || echo "No files"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### Total Size" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          du -sh data/snapshots/ 2>/dev/null || echo "No data"
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### File Counts" >> $GITHUB_STEP_SUMMARY
+          MARKETS=$(find data/snapshots/markets_info -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
+          OHLCV=$(find data/snapshots/ohlcv_daily -name "*.parquet" 2>/dev/null | wc -l | tr -d ' ')
+          echo "- Markets info snapshots: ${MARKETS}" >> $GITHUB_STEP_SUMMARY
+          echo "- OHLCV daily snapshots: ${OHLCV}" >> $GITHUB_STEP_SUMMARY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add --force data/snapshots/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "data: daily GMX snapshot $(date -u '+%Y-%m-%d')"
+            git push
+          fi

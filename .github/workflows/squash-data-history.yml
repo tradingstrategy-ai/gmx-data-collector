@@ -1,0 +1,50 @@
+name: Monthly Data History Squash
+
+on:
+  schedule:
+    - cron: '0 4 1 * *'  # 1st of each month at 04:00 UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  squash:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout data branch (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: data/daily-collection
+          fetch-depth: 0
+
+      - name: Squash to single commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          COMMIT_COUNT=$(git rev-list --count HEAD)
+          echo "Current commit count: ${COMMIT_COUNT}"
+
+          # Only squash if there are multiple commits
+          if [ "$COMMIT_COUNT" -le 1 ]; then
+            echo "Only ${COMMIT_COUNT} commit(s) — nothing to squash"
+            exit 0
+          fi
+
+          # Create orphan branch with current file state
+          git checkout --orphan squashed
+          git add -A
+          git commit -m "data: squashed history as of $(date -u '+%Y-%m-%d')
+
+          Previous ${COMMIT_COUNT} commits squashed to reduce repository size.
+          Data includes: daily market snapshots (OI, liquidity, rates, OHLCV)."
+
+          # Replace the data branch
+          git branch -D data/daily-collection
+          git branch -m data/daily-collection
+          git push --force origin data/daily-collection
+
+          echo "Squashed ${COMMIT_COUNT} commits into 1"
