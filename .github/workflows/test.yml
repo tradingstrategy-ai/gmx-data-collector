@@ -1,0 +1,99 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check src/ tests/
+
+      - name: Format check
+        run: ruff format --check src/ tests/
+
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run unit tests
+        env:
+          JSON_RPC_ARBITRUM: "https://arb1.arbitrum.io/rpc"
+        run: |
+          poetry run python -m pytest tests/ -v \
+            --ignore=tests/test_hybrid_collection.py \
+            --ignore=tests/test_gmx_event_collector.py \
+            --ignore=tests/test_integration_event_based.py \
+            --ignore=tests/test_integration_gmx_first.py \
+            --ignore=tests/test_gmx_market_mapper.py \
+            --ignore=tests/test_gmx_token_discovery.py \
+            --ignore=tests/test_live_funding.py \
+            -x
+
+  integration-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y capnproto
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run integration tests
+        env:
+          JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
+          HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+        run: |
+          poetry run python -m pytest tests/ -v \
+            --ignore=tests/test_gmx_market_mapper.py \
+            --ignore=tests/test_integration_event_based.py

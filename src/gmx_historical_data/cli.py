@@ -20,7 +20,7 @@ from gmx_historical_data.chainlink_feeds_complete import (
     get_feed_address_for_gmx_symbol,
 )
 from gmx_historical_data.chainlink_rpc_collector import ChainlinkRPCCollector
-from gmx_historical_data.checkpoint import CheckpointManager
+from gmx_historical_data.checkpoint import Checkpoint, CheckpointManager
 from gmx_historical_data.config import (
     GMX_V2_GENESIS_BLOCK,
     TIMEFRAMES,
@@ -53,6 +53,34 @@ from gmx_historical_data.storage import ParquetStorage
 logger = logging.getLogger(__name__)
 
 console = Console()
+
+
+def _filter_and_categorize_symbols(
+    symbols: list[str],
+    chainlink_only: bool = False,
+) -> tuple[list[str], list[str], int]:
+    """Filter excluded symbols and categorize into Chainlink vs non-Chainlink.
+
+    :param symbols: Raw symbol list to filter.
+    :param chainlink_only: If True, non-Chainlink list is returned empty.
+    :returns: Tuple of (chainlink_symbols, non_chainlink_symbols, excluded_count).
+    """
+    non_chainlink_set = set(get_gmx_markets_without_chainlink_feeds())
+    chainlink = []
+    non_chainlink = []
+    excluded = 0
+
+    for s in symbols:
+        if is_excluded_symbol(s):
+            excluded += 1
+            continue
+        if s in non_chainlink_set:
+            if not chainlink_only:
+                non_chainlink.append(s)
+        else:
+            chainlink.append(s)
+
+    return chainlink, non_chainlink, excluded
 
 
 class DataCollector:
@@ -190,6 +218,146 @@ class DataCollector:
 
         return results
 
+    async def _fetch_gmx_candles_for_timeframes(
+        self,
+        symbol: str,
+        timeframes: list[str] | None = None,
+        boundaries_by_tf: dict | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, pd.DataFrame]:
+        """Fetch GMX API candles for multiple timeframes in parallel.
+
+        :param symbol: Token symbol (e.g., 'ETH')
+        :param timeframes: List of timeframe strings (default: all TIMEFRAMES)
+        :param boundaries_by_tf: Optional boundary dict; if a timeframe's
+            ``gmx_api_needed`` is False, it is skipped. If the boundary mode
+            is INCREMENTAL, results are filtered to ``gmx_api_start``.
+        :param timeout: Per-timeframe timeout in seconds.
+        :returns: Dict mapping timeframe -> DataFrame of candles.
+        """
+        if not self.gmx_fetcher:
+            return {}
+
+        tfs = timeframes or TIMEFRAMES
+
+        async def _fetch_one(tf: str) -> tuple[str, pd.DataFrame]:
+            # Skip if boundary says not needed
+            if boundaries_by_tf:
+                bounds = boundaries_by_tf.get(tf)
+                if bounds and not bounds.gmx_api_needed:
+                    return tf, pd.DataFrame()
+
+            gmx_period = map_timeframe_to_gmx_period(tf)
+            try:
+                df = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
+                    ),
+                    timeout=timeout,
+                )
+
+                # Apply boundary filter for incremental mode
+                if boundaries_by_tf:
+                    bounds = boundaries_by_tf.get(tf)
+                    if (
+                        bounds
+                        and bounds.mode == FetchMode.INCREMENTAL
+                        and bounds.gmx_api_start
+                    ):
+                        df = df[df["timestamp"] >= bounds.gmx_api_start]
+
+                return tf, df
+            except TimeoutError:
+                console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
+                return tf, pd.DataFrame()
+            except Exception as e:
+                console.print(f"  [yellow]⚠ {tf}: {e}[/yellow]")
+                return tf, pd.DataFrame()
+
+        tasks = [_fetch_one(tf) for tf in tfs]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        candles: dict[str, pd.DataFrame] = {}
+        for result in results:
+            if isinstance(result, Exception):
+                console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
+                continue
+            tf, df = result
+            if not df.empty:
+                candles[tf] = df
+        return candles
+
+    def _merge_and_save_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        *dataframes: pd.DataFrame | None,
+        merge_with_existing: bool = False,
+    ) -> int:
+        """Combine, deduplicate, and save candle DataFrames for one timeframe.
+
+        :param symbol: Token symbol.
+        :param timeframe: Timeframe string (e.g., '1h').
+        :param dataframes: One or more DataFrames to combine (None values ignored).
+        :param merge_with_existing: If True, load existing candles from storage
+            and merge with them (for incremental mode).
+        :returns: Number of candles saved, or 0 if nothing to save.
+        """
+        # Collect non-empty DataFrames
+        dfs = [df for df in dataframes if df is not None and not df.empty]
+        if not dfs:
+            return 0
+
+        if len(dfs) == 1:
+            combined = dfs[0]
+        else:
+            combined = pd.concat(dfs, ignore_index=True)
+
+        # Merge with existing storage if incremental
+        if merge_with_existing:
+            existing = self.storage.read_candles(timeframe, symbol)
+            if not existing.empty:
+                combined = pd.concat([existing, combined], ignore_index=True)
+
+        # Deduplicate and sort
+        combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
+        combined = combined.sort_values("timestamp").reset_index(drop=True)
+
+        self.storage.save_candles(combined, timeframe, symbol)
+        return len(combined)
+
+    def _save_symbol_checkpoint(self, symbol: str) -> None:
+        """Save a completion checkpoint for a symbol after successful collection.
+
+        :param symbol: Token symbol that was collected.
+        """
+        try:
+            latest_timestamp = 0
+            total_candles = 0
+            for tf in TIMEFRAMES:
+                stored_df = self.storage.read_candles(tf, symbol)
+                if not stored_df.empty:
+                    total_candles += len(stored_df)
+                    ts_max = stored_df["timestamp"].max()
+                    if hasattr(ts_max, "timestamp"):
+                        ts_val = int(ts_max.timestamp())
+                    else:
+                        ts_val = int(ts_max)
+                    latest_timestamp = max(latest_timestamp, ts_val)
+            self.checkpoint_mgr.save_checkpoint(
+                Checkpoint(
+                    symbol=symbol,
+                    last_block=0,
+                    last_timestamp=latest_timestamp,
+                    total_events=total_candles,
+                    last_updated=datetime.utcnow().isoformat(),
+                )
+            )
+        except Exception as e:
+            console.print(
+                f"  [yellow]Warning: Could not save checkpoint for {symbol}: {e}[/yellow]"
+            )
+
     async def collect_symbol(
         self,
         symbol: str,
@@ -263,83 +431,19 @@ class DataCollector:
                     mode_label = "full" if boundaries.mode == FetchMode.FULL else "incremental"
                     console.print(f"  [cyan]→[/cyan] {tf}: Fetching from GMX API ({mode_label})")
 
-            # Fetch only timeframes that need updates
-            async def fetch_timeframe(tf: str, timeout: float = 120.0):
-                """Fetch GMX data for a single timeframe with timeout.
-
-                :param tf: Timeframe string
-                :param timeout: Timeout in seconds (default: 120s = 2min)
-                """
-                boundaries = fetch_boundaries_by_tf[tf]
-                if not boundaries.gmx_api_needed:
-                    return tf, None  # Skip
-
-                gmx_period = map_timeframe_to_gmx_period(tf)
-                try:
-                    df = await asyncio.wait_for(
-                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
-                        timeout=timeout,
-                    )
-
-                    # Filter to boundary range if incremental
-                    if boundaries.mode == FetchMode.INCREMENTAL and boundaries.gmx_api_start:
-                        df = df[df["timestamp"] >= boundaries.gmx_api_start]
-
-                    return tf, df
-                except TimeoutError:
-                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
-                    return tf, pd.DataFrame()  # Return empty DataFrame on timeout
-
-            # Execute fetches in parallel (only for timeframes that need updates)
-            timeframe_tasks = [
-                fetch_timeframe(tf)
-                for tf in TIMEFRAMES
-                if fetch_boundaries_by_tf[tf].gmx_api_needed
-            ]
-
-            if timeframe_tasks:
-                results = await asyncio.gather(*timeframe_tasks, return_exceptions=True)
-
-                for result in results:
-                    if isinstance(result, Exception):
-                        console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
-                        continue
-
-                    timeframe, gmx_df = result
-                    if gmx_df is not None and not gmx_df.empty:
-                        earliest, latest = (
-                            gmx_df["timestamp"].min(),
-                            gmx_df["timestamp"].max(),
-                        )
-                        console.print(
-                            f"  [green]✓[/green] {timeframe}: [cyan]{len(gmx_df):,}[/cyan] candles from GMX [dim]({earliest} to {latest})[/dim]"
-                        )
-                        gmx_candles[timeframe] = gmx_df
-        elif self.use_gmx_api and self.gmx_fetcher:
-            # Fallback to old behavior if boundary calculator not available
-            async def fetch_timeframe(tf: str, timeout: float = 120.0):
-                gmx_period = map_timeframe_to_gmx_period(tf)
-                try:
-                    df = await asyncio.wait_for(
-                        asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
-                        timeout=timeout,
-                    )
-                    return tf, df
-                except TimeoutError:
-                    console.print(f"  [yellow]⏱ {tf}: Timeout after {timeout}s[/yellow]")
-                    return tf, pd.DataFrame()
-
-            timeframe_tasks = [fetch_timeframe(tf) for tf in TIMEFRAMES]
-            results = await asyncio.gather(*timeframe_tasks, return_exceptions=True)
-
-            for result in results:
-                if isinstance(result, Exception):
-                    console.print(f"  [red]✗ Error fetching timeframe: {result}[/red]")
-                    continue
-
-                timeframe, gmx_df = result
-                if not gmx_df.empty:
-                    gmx_candles[timeframe] = gmx_df
+        if self.use_gmx_api and self.gmx_fetcher:
+            gmx_candles_fetched = await self._fetch_gmx_candles_for_timeframes(
+                symbol,
+                boundaries_by_tf=fetch_boundaries_by_tf or None,
+            )
+            # Log fetched timeframes
+            for tf, df in gmx_candles_fetched.items():
+                earliest, latest = df["timestamp"].min(), df["timestamp"].max()
+                console.print(
+                    f"  [green]✓[/green] {tf}: [cyan]{len(df):,}[/cyan] candles "
+                    f"from GMX [dim]({earliest} to {latest})[/dim]"
+                )
+            gmx_candles.update(gmx_candles_fetched)
 
         if not gmx_candles:
             console.print(f"[yellow]No GMX data available for {symbol}[/yellow]")
@@ -495,40 +599,28 @@ class DataCollector:
             chainlink_df = chainlink_candles.get(timeframe)
             gmx_df = gmx_candles.get(timeframe)
 
-            # Combine sources
+            # If both sources exist, combine them using the dedicated combiner
             if chainlink_df is not None and gmx_df is not None and not gmx_df.empty:
-                new_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
-            elif chainlink_df is not None:
-                new_df = chainlink_df
-            elif gmx_df is not None and not gmx_df.empty:
-                new_df = gmx_df
+                merged_df = combine_gmx_and_chainlink_data(gmx_df, chainlink_df)
             else:
-                continue
+                merged_df = chainlink_df if chainlink_df is not None else gmx_df
 
-            # Merge with existing data if incremental mode
-            if boundaries and boundaries.mode == FetchMode.INCREMENTAL:
-                existing_df = self.storage.read_candles(timeframe, symbol)
-                if not existing_df.empty:
-                    # Concatenate and deduplicate
-                    combined = pd.concat([existing_df, new_df], ignore_index=True)
-                    combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
-                    combined = combined.sort_values("timestamp").reset_index(drop=True)
-                    added_count = len(combined) - len(existing_df)
-                    new_df = combined
-                    console.print(
-                        f"  [cyan]→[/cyan] {timeframe}: Merged {len(new_df):,} total candles "
-                        f"(added {added_count} new)"
-                    )
+            is_incremental = boundaries and boundaries.mode == FetchMode.INCREMENTAL
+            count = self._merge_and_save_candles(
+                symbol, timeframe, merged_df,
+                merge_with_existing=is_incremental,
+            )
 
-            # Save to storage
-            self.storage.save_candles(new_df, timeframe, symbol)
-            earliest, latest = new_df["timestamp"].min(), new_df["timestamp"].max()
-
-            if not boundaries or boundaries.mode != FetchMode.INCREMENTAL:
+            if count > 0:
+                stored = self.storage.read_candles(timeframe, symbol)
+                earliest, latest = stored["timestamp"].min(), stored["timestamp"].max()
                 console.print(
-                    f"  [green]✓[/green] {timeframe}: {len(new_df):,} candles saved "
+                    f"  [green]✓[/green] {timeframe}: {count:,} candles saved "
                     f"[dim]({earliest} to {latest})[/dim]"
                 )
+
+        # Save checkpoint for this symbol so we can skip it on re-run
+        self._save_symbol_checkpoint(symbol)
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
@@ -642,6 +734,7 @@ class DataCollector:
         concurrency: int = 1,
         use_events: bool = False,
         chainlink_only: bool = False,
+        force: bool = False,
     ) -> None:
         """Collect data for all supported symbols with parallel processing.
 
@@ -649,6 +742,7 @@ class DataCollector:
         :param concurrency: Number of symbols to process concurrently (default: 1, use --concurrency for parallel). Note: Ignored in event mode.
         :param use_events: Use event-based collection (batch all markets) instead of oracle-based
         :param chainlink_only: If True, only collect markets with Chainlink feeds
+        :param force: If True, ignore checkpoints and re-collect all symbols
         """
         if use_events:
             # Event-based collection mode requires HyperSync
@@ -787,39 +881,68 @@ class DataCollector:
                 console.print("\n[bold]Discovering GMX tokens...[/bold]")
                 all_symbols = self.gmx_discovery.get_supported_symbols()
 
-            # Filter out excluded symbols (case-insensitive)
-            symbols = [s for s in all_symbols if not is_excluded_symbol(s)]
-            excluded_count = len(all_symbols) - len(symbols)
+            chainlink_syms, non_chainlink_syms, excluded_count = (
+                _filter_and_categorize_symbols(all_symbols, chainlink_only)
+            )
+            # For collect_all_symbols we process all non-excluded together
+            symbols = chainlink_syms + non_chainlink_syms
 
-            if chainlink_only:
-                console.print(
-                    f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] Chainlink-feed markets"
-                )
-            else:
-                console.print(
-                    f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] GMX-supported tokens"
-                )
+            console.print(
+                f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] markets"
+            )
             if excluded_count > 0:
                 console.print(
                     f"  [dim]Excluded {excluded_count} deprecated/problematic symbol(s)[/dim]"
                 )
 
+            # Check existing checkpoints to skip already-completed symbols.
+            # A checkpoint with total_events > 0 means the symbol was successfully
+            # collected in a prior run. Skip it to enable resuming interrupted runs.
+            # Use --force to ignore checkpoints and re-collect everything.
+            skipped_symbols = []
+            pending_symbols = []
+            if force:
+                pending_symbols = list(symbols)
+            else:
+                for s in symbols:
+                    checkpoint = self.checkpoint_mgr.load_checkpoint(s)
+                    if checkpoint and checkpoint.total_events > 0:
+                        skipped_symbols.append(s)
+                    else:
+                        pending_symbols.append(s)
+
+            if skipped_symbols:
+                console.print(
+                    f"  [green]✓[/green] Skipping [cyan]{len(skipped_symbols)}[/cyan] already-collected symbols "
+                    f"(checkpoint exists)"
+                )
+                console.print(f"  [dim]Skipped: {', '.join(skipped_symbols[:10])}"
+                              + (f"... (+{len(skipped_symbols) - 10} more)" if len(skipped_symbols) > 10 else "")
+                              + "[/dim]")
+
             total = len(symbols)
-            successful = 0
+            successful = len(skipped_symbols)
             failed = 0
             failed_symbols = []
 
-            console.print(
-                f"\n[bold]Collecting data for [cyan]{total}[/cyan] symbols (concurrency: {concurrency})...[/bold]"
-            )
+            if not pending_symbols:
+                console.print(
+                    f"\n[bold green]All {total} symbols already collected. "
+                    f"Use --full to force re-collection.[/bold green]"
+                )
+            else:
+                console.print(
+                    f"\n[bold]Collecting data for [cyan]{len(pending_symbols)}[/cyan] symbols "
+                    f"({len(skipped_symbols)} skipped, concurrency: {concurrency})...[/bold]"
+                )
 
-            # Process symbols in batches for controlled parallelism
-            for batch_start in range(0, len(symbols), concurrency):
-                batch_end = min(batch_start + concurrency, len(symbols))
-                batch = symbols[batch_start:batch_end]
+            # Process pending symbols in batches for controlled parallelism
+            for batch_start in range(0, len(pending_symbols), concurrency):
+                batch_end = min(batch_start + concurrency, len(pending_symbols))
+                batch = pending_symbols[batch_start:batch_end]
 
                 console.print(
-                    f"\n[bold cyan]Batch {batch_start // concurrency + 1}: Processing {len(batch)} symbols ({batch_start + 1}-{batch_end}/{total})[/bold cyan]"
+                    f"\n[bold cyan]Batch {batch_start // concurrency + 1}: Processing {len(batch)} symbols ({batch_start + 1}-{batch_end}/{len(pending_symbols)})[/bold cyan]"
                 )
 
                 # Create tasks for parallel execution
@@ -973,6 +1096,23 @@ class DataCollector:
                 f"[green]✓[/green] Found [cyan]{len(symbols_to_collect)}[/cyan] non-Chainlink markets"
             )
 
+        # Skip already-checkpointed symbols for resume
+        if symbols_to_collect:
+            pending = []
+            skipped = []
+            for s in symbols_to_collect:
+                cp = self.checkpoint_mgr.load_checkpoint(s)
+                if cp and cp.total_events > 0:
+                    skipped.append(s)
+                else:
+                    pending.append(s)
+            if skipped:
+                console.print(
+                    f"  [green]✓[/green] Skipping [cyan]{len(skipped)}[/cyan] "
+                    f"already-collected non-Chainlink symbols"
+                )
+            symbols_to_collect = pending
+
         # Get token decimals for price conversion
         try:
             token_decimals_map = token_mapper.get_token_decimals()
@@ -989,38 +1129,14 @@ class DataCollector:
         if self.use_gmx_api and self.gmx_fetcher:
             for symbol in symbols_to_collect:
                 console.print(f"\n[cyan]{symbol}[/cyan]")
-                gmx_candles = {}
 
-                async def fetch_timeframe(tf: str, sym: str, timeout: float = 120.0):
-                    """Fetch GMX data for a single timeframe."""
-                    gmx_period = map_timeframe_to_gmx_period(tf)
-                    try:
-                        df = await asyncio.wait_for(
-                            asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, sym, gmx_period),
-                            timeout=timeout,
-                        )
-                        return tf, df
-                    except TimeoutError:
-                        return tf, pd.DataFrame()
-                    except Exception:
-                        return tf, pd.DataFrame()
-
-                # Fetch all timeframes in parallel
-                tasks = [fetch_timeframe(tf, symbol) for tf in TIMEFRAMES]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-
-                for result in results:
-                    if isinstance(result, Exception):
-                        continue
-                    timeframe, gmx_df = result
-                    if not gmx_df.empty:
-                        gmx_candles[timeframe] = gmx_df
-                        console.print(
-                            f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles from GMX API"
-                        )
-
+                gmx_candles = await self._fetch_gmx_candles_for_timeframes(symbol)
                 if gmx_candles:
                     gmx_data_by_symbol[symbol] = gmx_candles
+                    for tf, df in gmx_candles.items():
+                        console.print(
+                            f"  [green]✓[/green] {tf}: {len(df):,} candles from GMX API"
+                        )
                 else:
                     console.print("  [yellow]○[/yellow] No GMX API data available")
 
@@ -1146,7 +1262,6 @@ class DataCollector:
                     gmx_df = gmx_candles.get(timeframe)
                     oracle_df = None
 
-                    # Aggregate oracle events to OHLCV
                     if token_events:
                         oracle_df = aggregate_oracle_events_to_ohlcv(
                             token_events, timeframe, symbol, token_decimals=decimals
@@ -1154,41 +1269,29 @@ class DataCollector:
                         if oracle_df.empty:
                             oracle_df = None
 
-                    # Combine: Oracle (historical) + GMX (recent)
+                    # Filter oracle to before GMX coverage to avoid overlap
                     if gmx_df is not None and oracle_df is not None:
-                        # Filter oracle data to only before GMX coverage
                         gmx_earliest = gmx_df["timestamp"].min()
-                        oracle_df_filtered = oracle_df[oracle_df["timestamp"] < gmx_earliest]
+                        oracle_df = oracle_df[oracle_df["timestamp"] < gmx_earliest]
+                        if oracle_df.empty:
+                            oracle_df = None
 
-                        if not oracle_df_filtered.empty:
-                            combined = pd.concat([oracle_df_filtered, gmx_df], ignore_index=True)
-                            combined = combined.sort_values("timestamp").drop_duplicates(
-                                subset=["timestamp"], keep="last"
-                            )
-                            self.storage.save_candles(combined, timeframe, symbol)
-                            console.print(
-                                f"  [green]✓[/green] {timeframe}: {len(combined):,} candles "
-                                f"(oracle: {len(oracle_df_filtered):,} + GMX: {len(gmx_df):,})"
-                            )
-                        else:
-                            # GMX covers everything
-                            self.storage.save_candles(gmx_df, timeframe, symbol)
-                            console.print(
-                                f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles (GMX API)"
-                            )
-                    elif gmx_df is not None:
-                        # Only GMX data
-                        self.storage.save_candles(gmx_df, timeframe, symbol)
+                    count = self._merge_and_save_candles(
+                        symbol, timeframe, oracle_df, gmx_df,
+                    )
+                    if count > 0:
+                        sources = []
+                        if oracle_df is not None:
+                            sources.append(f"oracle: {len(oracle_df):,}")
+                        if gmx_df is not None:
+                            sources.append(f"GMX: {len(gmx_df):,}")
                         console.print(
-                            f"  [green]✓[/green] {timeframe}: {len(gmx_df):,} candles (GMX API)"
-                        )
-                    elif oracle_df is not None:
-                        # Only oracle data
-                        self.storage.save_candles(oracle_df, timeframe, symbol)
-                        console.print(
-                            f"  [green]✓[/green] {timeframe}: {len(oracle_df):,} candles (oracle events)"
+                            f"  [green]✓[/green] {timeframe}: {count:,} candles "
+                            f"({' + '.join(sources) if sources else 'saved'})"
                         )
 
+                # Save checkpoint for resume
+                self._save_symbol_checkpoint(symbol)
                 successful += 1
 
             except Exception as e:
@@ -1295,6 +1398,11 @@ def cli(
         "--quiet",
         help="Suppress console output when logging to file (file-only mode)",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Ignore checkpoints and re-collect all symbols from scratch",
+    ),
 ) -> None:
     """Collect GMX historical price data.
 
@@ -1389,6 +1497,7 @@ def cli(
             chainlink_only=chainlink_only,
             concurrency=concurrency,
             default_mode=default_mode,
+            force=force,
         )
 
 
@@ -1406,6 +1515,7 @@ def _cli_impl(
     chainlink_only: bool,
     concurrency: int,
     default_mode: bool,
+    force: bool = False,
 ) -> None:
     """Internal implementation of CLI logic."""
     # Validate --default flag
@@ -1487,29 +1597,21 @@ def _cli_impl(
     # Run collection
     try:
         if symbol:
-            # Parse comma-separated symbols
+            # Parse comma-separated symbols and categorize
             symbols_list = [s.strip().upper() for s in symbol.split(",") if s.strip()]
-
-            # Filter out excluded symbols
-            valid_symbols = []
-            for sym in symbols_list:
-                if is_excluded_symbol(sym):
-                    console.print(
-                        f"[yellow]Warning: {sym} is excluded (deprecated/problematic) - skipping[/yellow]"
-                    )
-                else:
-                    valid_symbols.append(sym)
-
-            if not valid_symbols:
+            chainlink_symbols, non_chainlink_symbols, excluded_count = (
+                _filter_and_categorize_symbols(symbols_list, chainlink_only)
+            )
+            if excluded_count > 0:
+                console.print(
+                    f"[yellow]Warning: {excluded_count} symbol(s) excluded "
+                    f"(deprecated/problematic)[/yellow]"
+                )
+            if not chainlink_symbols and not non_chainlink_symbols:
                 console.print("[red]No valid symbols to collect[/red]")
                 raise typer.Exit(0)
 
-            # Separate Chainlink and non-Chainlink symbols
-            non_chainlink_set = get_gmx_markets_without_chainlink_feeds()
-            chainlink_symbols = [s for s in valid_symbols if s not in non_chainlink_set]
-            non_chainlink_symbols = [s for s in valid_symbols if s in non_chainlink_set]
-
-            # Collect Chainlink symbols
+            # Collect Chainlink symbols (skip already-checkpointed unless --full)
             for sym in chainlink_symbols:
                 if use_events:
                     console.print(
@@ -1517,6 +1619,14 @@ def _cli_impl(
                         "Use collect_all_symbols instead.[/red]"
                     )
                     raise typer.Exit(1)
+                if not force:
+                    checkpoint = collector.checkpoint_mgr.load_checkpoint(sym)
+                    if checkpoint and checkpoint.total_events > 0:
+                        console.print(
+                            f"  [green]✓[/green] {sym}: Already collected "
+                            f"({checkpoint.total_events:,} candles) — skipping"
+                        )
+                        continue
                 asyncio.run(collector.collect_symbol(sym, full=full))
 
             # Collect non-Chainlink symbols (if not --chainlink-only)
@@ -1545,6 +1655,7 @@ def _cli_impl(
                     concurrency=concurrency,
                     use_events=use_events,
                     chainlink_only=chainlink_only,
+                    force=force,
                 )
             )
 

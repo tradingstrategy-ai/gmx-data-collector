@@ -14,10 +14,43 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout data branch
+      - name: Checkout code from master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Check if data branch exists
+        id: check-branch
+        run: |
+          if git ls-remote --exit-code --heads \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+            data/daily-collection > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout existing data branch
+        if: steps.check-branch.outputs.exists == 'true'
         uses: actions/checkout@v4
         with:
           ref: data/daily-collection
+          path: data
+          fetch-depth: 1
+
+      - name: Create data branch if missing
+        if: steps.check-branch.outputs.exists == 'false'
+        run: |
+          git clone --no-checkout \
+            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+          cd data
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan data/daily-collection
+          git rm -rf . 2>/dev/null || true
+          git commit --allow-empty -m "data: initialize daily collection branch"
+          git push origin data/daily-collection
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -28,24 +61,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y capnproto
 
       - name: Install Python dependencies
-        run: pip install -e .
+        run: pip install -e ./code
 
       - name: Collect daily snapshot
-        id: collect
-        run: python scripts/collect_daily_snapshot.py --output-dir ./user_data
+        run: python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
 
       - name: Show report in job summary
         if: always()
         run: |
-          if [ -f user_data/data_report.txt ]; then
+          if [ -f data/user_data/data_report.txt ]; then
             echo '```' >> $GITHUB_STEP_SUMMARY
-            cat user_data/data_report.txt >> $GITHUB_STEP_SUMMARY
+            cat data/user_data/data_report.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "No report generated" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Commit and push
+      - name: Commit and push data
+        working-directory: data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -55,5 +88,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "data: daily GMX snapshot $(date -u '+%Y-%m-%d')"
-            git push
+            git push origin data/daily-collection
           fi

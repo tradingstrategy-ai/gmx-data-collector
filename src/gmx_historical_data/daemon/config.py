@@ -11,10 +11,13 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
     This function filters the GMX markets to only those with available Chainlink
     oracle data, ensuring we can collect reliable OHLCV candles.
 
-    Markets WITH Chainlink feeds (33 total):
-        AAVE, APE, ARB, ATOM, AVAX, BNB, BTC, CRV, DAI, DOGE, ETH, GMX,
+    Markets WITH Chainlink feeds (27 perpetual markets):
+        AAVE, APE, ARB, ATOM, AVAX, BNB, BTC, CRV, DOGE, ETH, GMX,
         LDO, LINK, LTC, MKR, NEAR, OP, PENDLE, PEPE, POL, SEI, SHIB, SOL,
-        STETH, TAO, UNI, USDC, USDC.e, USDT, WBTC.b, WIF, XRP
+        TAO, UNI, WIF, XRP
+
+    Excluded from Chainlink list (collateral/swap-only tokens, not perp markets):
+        DAI, STETH, USDC, USDC.e, USDT, WBTC.b
 
     Markets WITHOUT Chainlink feeds (86 total - not collected by default):
         0G, ADA, AERO, AI16Z, AIXBT, ALGO, ANIME, APE_deprecated, APT, AR,
@@ -27,9 +30,6 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         TRX, USDe, VIRTUAL, VVV, WELL, WLD, WLFI, XAUT, XAUT.v2, XLM, XMR,
         XPL, ZEC, ZORA, ZRO, tBTC, wstETH, rETH, cbETH
 
-    NOTE: wstETH, rETH, and cbETH only have ETH-denominated feeds (not USD) on Arbitrum.
-          STETH has a USD feed, so it's included in the Chainlink list.
-
     :return: List of GMX market symbols with Chainlink feeds
     """
     return [
@@ -41,7 +41,6 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         "BNB",
         "BTC",
         "CRV",
-        "DAI",
         "DOGE",
         "ETH",
         "GMX",
@@ -57,13 +56,8 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
         "SEI",
         "SHIB",
         "SOL",
-        "STETH",
         "TAO",
         "UNI",
-        "USDC",
-        "USDC.e",
-        "USDT",
-        "WBTC.b",
         "WIF",
         "XRP",
     ]
