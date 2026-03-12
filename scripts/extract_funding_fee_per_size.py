@@ -1052,7 +1052,12 @@ async def async_main(args: argparse.Namespace) -> None:
         _resume_base_total = _prior["total_events"] if _prior else 0
 
     # Track cumulative state across incremental flushes
-    flush_state: dict = {"total_events": 0, "last_block": from_block, "last_timestamp": 0, "flush_count": 0}
+    flush_state: dict = {
+        "total_events": 0,
+        "last_block": from_block,
+        "last_timestamp": 0,
+        "flush_count": 0,
+    }
 
     def on_flush(batch: list, highest_block: int) -> None:
         """Persist a batch of records to disk and save an intermediate checkpoint."""

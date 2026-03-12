@@ -250,20 +250,14 @@ class DataCollector:
             gmx_period = map_timeframe_to_gmx_period(tf)
             try:
                 df = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period
-                    ),
+                    asyncio.to_thread(self.gmx_fetcher.fetch_gmx_candles, symbol, gmx_period),
                     timeout=timeout,
                 )
 
                 # Apply boundary filter for incremental mode
                 if boundaries_by_tf:
                     bounds = boundaries_by_tf.get(tf)
-                    if (
-                        bounds
-                        and bounds.mode == FetchMode.INCREMENTAL
-                        and bounds.gmx_api_start
-                    ):
+                    if bounds and bounds.mode == FetchMode.INCREMENTAL and bounds.gmx_api_start:
                         df = df[df["timestamp"] >= bounds.gmx_api_start]
 
                 return tf, df
@@ -607,7 +601,9 @@ class DataCollector:
 
             is_incremental = boundaries and boundaries.mode == FetchMode.INCREMENTAL
             count = self._merge_and_save_candles(
-                symbol, timeframe, merged_df,
+                symbol,
+                timeframe,
+                merged_df,
                 merge_with_existing=is_incremental,
             )
 
@@ -881,15 +877,13 @@ class DataCollector:
                 console.print("\n[bold]Discovering GMX tokens...[/bold]")
                 all_symbols = self.gmx_discovery.get_supported_symbols()
 
-            chainlink_syms, non_chainlink_syms, excluded_count = (
-                _filter_and_categorize_symbols(all_symbols, chainlink_only)
+            chainlink_syms, non_chainlink_syms, excluded_count = _filter_and_categorize_symbols(
+                all_symbols, chainlink_only
             )
             # For collect_all_symbols we process all non-excluded together
             symbols = chainlink_syms + non_chainlink_syms
 
-            console.print(
-                f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] markets"
-            )
+            console.print(f"  [green]✓[/green] Found [cyan]{len(symbols)}[/cyan] markets")
             if excluded_count > 0:
                 console.print(
                     f"  [dim]Excluded {excluded_count} deprecated/problematic symbol(s)[/dim]"
@@ -916,9 +910,15 @@ class DataCollector:
                     f"  [green]✓[/green] Skipping [cyan]{len(skipped_symbols)}[/cyan] already-collected symbols "
                     f"(checkpoint exists)"
                 )
-                console.print(f"  [dim]Skipped: {', '.join(skipped_symbols[:10])}"
-                              + (f"... (+{len(skipped_symbols) - 10} more)" if len(skipped_symbols) > 10 else "")
-                              + "[/dim]")
+                console.print(
+                    f"  [dim]Skipped: {', '.join(skipped_symbols[:10])}"
+                    + (
+                        f"... (+{len(skipped_symbols) - 10} more)"
+                        if len(skipped_symbols) > 10
+                        else ""
+                    )
+                    + "[/dim]"
+                )
 
             total = len(symbols)
             successful = len(skipped_symbols)
@@ -1134,9 +1134,7 @@ class DataCollector:
                 if gmx_candles:
                     gmx_data_by_symbol[symbol] = gmx_candles
                     for tf, df in gmx_candles.items():
-                        console.print(
-                            f"  [green]✓[/green] {tf}: {len(df):,} candles from GMX API"
-                        )
+                        console.print(f"  [green]✓[/green] {tf}: {len(df):,} candles from GMX API")
                 else:
                     console.print("  [yellow]○[/yellow] No GMX API data available")
 
@@ -1277,7 +1275,10 @@ class DataCollector:
                             oracle_df = None
 
                     count = self._merge_and_save_candles(
-                        symbol, timeframe, oracle_df, gmx_df,
+                        symbol,
+                        timeframe,
+                        oracle_df,
+                        gmx_df,
                     )
                     if count > 0:
                         sources = []

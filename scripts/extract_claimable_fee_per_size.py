@@ -668,7 +668,6 @@ def save_raw_per_symbol(records: list[ClaimableFeePerSizeRecord], output_dir: Pa
         )
 
 
-
 def save_json(data: list, filename: str) -> None:
     """Save to JSON.
 

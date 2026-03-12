@@ -17,9 +17,7 @@ def test_calculate_gap_with_chainlink_available():
     )
 
     analyzer = DataGapAnalyzer()
-    backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df, chainlink_available=True
-    )
+    backfill_start, backfill_end = analyzer.calculate_gap(gmx_df=gmx_df, chainlink_available=True)
 
     # Should backfill from beginning to just before GMX start
     # backfill_start is None to indicate "fetch all available"
@@ -42,9 +40,7 @@ def test_calculate_gap_no_chainlink():
     )
 
     analyzer = DataGapAnalyzer()
-    backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df, chainlink_available=False
-    )
+    backfill_start, backfill_end = analyzer.calculate_gap(gmx_df=gmx_df, chainlink_available=False)
 
     # No backfill needed
     assert backfill_start is None
@@ -56,9 +52,7 @@ def test_calculate_gap_empty_gmx_data():
     gmx_df = pd.DataFrame()
 
     analyzer = DataGapAnalyzer()
-    backfill_start, backfill_end = analyzer.calculate_gap(
-        gmx_df=gmx_df, chainlink_available=True
-    )
+    backfill_start, backfill_end = analyzer.calculate_gap(gmx_df=gmx_df, chainlink_available=True)
 
     # With empty GMX data, no backfill needed (nothing to backfill before)
     assert backfill_start is None

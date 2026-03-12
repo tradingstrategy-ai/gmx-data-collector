@@ -72,17 +72,18 @@ def test_single_timeframe_coverage(storage_dir, storage):
     """
     # Create test data for single timeframe (1h)
     timestamps = pd.to_datetime(
-        ["2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 02:00:00"],
-        utc=True
+        ["2024-01-01 00:00:00", "2024-01-01 01:00:00", "2024-01-01 02:00:00"], utc=True
     )
-    df = pd.DataFrame({
-        "timestamp": timestamps,
-        "open": [100.0, 101.0, 102.0],
-        "high": [105.0, 106.0, 107.0],
-        "low": [99.0, 100.0, 101.0],
-        "close": [104.0, 105.0, 106.0],
-        "symbol": ["ETH", "ETH", "ETH"],
-    })
+    df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [104.0, 105.0, 106.0],
+            "symbol": ["ETH", "ETH", "ETH"],
+        }
+    )
     storage.save_candles(df, "1h", "ETH")
 
     # Analyze coverage
@@ -110,48 +111,45 @@ def test_multiple_timeframe_coverage(storage_dir, storage):
     :param storage: ParquetStorage fixture
     """
     # Create data for 1h timeframe
-    timestamps_1h = pd.to_datetime(
-        ["2024-01-01 00:00:00", "2024-01-01 01:00:00"],
-        utc=True
+    timestamps_1h = pd.to_datetime(["2024-01-01 00:00:00", "2024-01-01 01:00:00"], utc=True)
+    df_1h = pd.DataFrame(
+        {
+            "timestamp": timestamps_1h,
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["BTC", "BTC"],
+        }
     )
-    df_1h = pd.DataFrame({
-        "timestamp": timestamps_1h,
-        "open": [100.0, 101.0],
-        "high": [105.0, 106.0],
-        "low": [99.0, 100.0],
-        "close": [104.0, 105.0],
-        "symbol": ["BTC", "BTC"],
-    })
     storage.save_candles(df_1h, "1h", "BTC")
 
     # Create data for 4h timeframe (starts earlier)
-    timestamps_4h = pd.to_datetime(
-        ["2023-12-31 20:00:00", "2024-01-01 00:00:00"],
-        utc=True
+    timestamps_4h = pd.to_datetime(["2023-12-31 20:00:00", "2024-01-01 00:00:00"], utc=True)
+    df_4h = pd.DataFrame(
+        {
+            "timestamp": timestamps_4h,
+            "open": [99.0, 100.0],
+            "high": [103.0, 105.0],
+            "low": [98.0, 99.0],
+            "close": [102.0, 104.0],
+            "symbol": ["BTC", "BTC"],
+        }
     )
-    df_4h = pd.DataFrame({
-        "timestamp": timestamps_4h,
-        "open": [99.0, 100.0],
-        "high": [103.0, 105.0],
-        "low": [98.0, 99.0],
-        "close": [102.0, 104.0],
-        "symbol": ["BTC", "BTC"],
-    })
     storage.save_candles(df_4h, "4h", "BTC")
 
     # Create data for 1d timeframe (ends later)
-    timestamps_1d = pd.to_datetime(
-        ["2024-01-01 00:00:00", "2024-01-02 00:00:00"],
-        utc=True
+    timestamps_1d = pd.to_datetime(["2024-01-01 00:00:00", "2024-01-02 00:00:00"], utc=True)
+    df_1d = pd.DataFrame(
+        {
+            "timestamp": timestamps_1d,
+            "open": [100.0, 110.0],
+            "high": [120.0, 125.0],
+            "low": [95.0, 105.0],
+            "close": [115.0, 120.0],
+            "symbol": ["BTC", "BTC"],
+        }
     )
-    df_1d = pd.DataFrame({
-        "timestamp": timestamps_1d,
-        "open": [100.0, 110.0],
-        "high": [120.0, 125.0],
-        "low": [95.0, 105.0],
-        "close": [115.0, 120.0],
-        "symbol": ["BTC", "BTC"],
-    })
     storage.save_candles(df_1d, "1d", "BTC")
 
     # Analyze coverage
@@ -180,33 +178,31 @@ def test_earliest_gap_across_timeframes(storage_dir, storage):
     """
     # Create data starting at different times for different timeframes
     # 1m: starts at 2024-01-02
-    timestamps_1m = pd.to_datetime(
-        ["2024-01-02 00:00:00", "2024-01-02 00:01:00"],
-        utc=True
+    timestamps_1m = pd.to_datetime(["2024-01-02 00:00:00", "2024-01-02 00:01:00"], utc=True)
+    df_1m = pd.DataFrame(
+        {
+            "timestamp": timestamps_1m,
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["ETH", "ETH"],
+        }
     )
-    df_1m = pd.DataFrame({
-        "timestamp": timestamps_1m,
-        "open": [100.0, 101.0],
-        "high": [105.0, 106.0],
-        "low": [99.0, 100.0],
-        "close": [104.0, 105.0],
-        "symbol": ["ETH", "ETH"],
-    })
     storage.save_candles(df_1m, "1min", "ETH")
 
     # 1h: starts at 2024-01-01 (earlier - this is the gap we want to find)
-    timestamps_1h = pd.to_datetime(
-        ["2024-01-01 00:00:00", "2024-01-01 01:00:00"],
-        utc=True
+    timestamps_1h = pd.to_datetime(["2024-01-01 00:00:00", "2024-01-01 01:00:00"], utc=True)
+    df_1h = pd.DataFrame(
+        {
+            "timestamp": timestamps_1h,
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["ETH", "ETH"],
+        }
     )
-    df_1h = pd.DataFrame({
-        "timestamp": timestamps_1h,
-        "open": [100.0, 101.0],
-        "high": [105.0, 106.0],
-        "low": [99.0, 100.0],
-        "close": [104.0, 105.0],
-        "symbol": ["ETH", "ETH"],
-    })
     storage.save_candles(df_1h, "1h", "ETH")
 
     # Analyze coverage
@@ -225,18 +221,17 @@ def test_get_missing_block_range(storage_dir, storage, mock_cache):
     :param mock_cache: Mock cache fixture
     """
     # Create data starting at 2024-01-10
-    timestamps = pd.to_datetime(
-        ["2024-01-10 00:00:00", "2024-01-10 01:00:00"],
-        utc=True
+    timestamps = pd.to_datetime(["2024-01-10 00:00:00", "2024-01-10 01:00:00"], utc=True)
+    df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["LINK", "LINK"],
+        }
     )
-    df = pd.DataFrame({
-        "timestamp": timestamps,
-        "open": [100.0, 101.0],
-        "high": [105.0, 106.0],
-        "low": [99.0, 100.0],
-        "close": [104.0, 105.0],
-        "symbol": ["LINK", "LINK"],
-    })
     storage.save_candles(df, "1h", "LINK")
 
     analyzer = DataCoverageAnalyzer(storage_dir)
@@ -266,18 +261,17 @@ def test_no_missing_range_when_genesis_covered(storage_dir, storage, mock_cache)
     :param mock_cache: Mock cache fixture
     """
     # Create data starting very early (before typical genesis)
-    timestamps = pd.to_datetime(
-        ["2023-01-01 00:00:00", "2023-01-01 01:00:00"],
-        utc=True
+    timestamps = pd.to_datetime(["2023-01-01 00:00:00", "2023-01-01 01:00:00"], utc=True)
+    df = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["BTC", "BTC"],
+        }
     )
-    df = pd.DataFrame({
-        "timestamp": timestamps,
-        "open": [100.0, 101.0],
-        "high": [105.0, 106.0],
-        "low": [99.0, 100.0],
-        "close": [104.0, 105.0],
-        "symbol": ["BTC", "BTC"],
-    })
     storage.save_candles(df, "1h", "BTC")
 
     analyzer = DataCoverageAnalyzer(storage_dir)
@@ -289,9 +283,7 @@ def test_no_missing_range_when_genesis_covered(storage_dir, storage, mock_cache)
     # genesis_block > 518M, so use 520M
     genesis_block = 520_000_000  # Corresponds to timestamp ~2053 (far in the future)
 
-    start_block, end_block = analyzer.get_missing_block_range(
-        coverage, mock_cache, genesis_block
-    )
+    start_block, end_block = analyzer.get_missing_block_range(coverage, mock_cache, genesis_block)
 
     # Should return (None, None) when data exists before genesis
     assert start_block is None
@@ -309,9 +301,7 @@ def test_get_missing_range_no_data(storage_dir, mock_cache):
 
     genesis_block = 120_000_000
 
-    start_block, end_block = analyzer.get_missing_block_range(
-        coverage, mock_cache, genesis_block
-    )
+    start_block, end_block = analyzer.get_missing_block_range(coverage, mock_cache, genesis_block)
 
     # Should return (genesis_block, None) when no data exists
     assert start_block == genesis_block

@@ -360,7 +360,6 @@ TOKEN_DECIMALS = {
 }
 
 
-
 # =============================================================================
 # DATA CLASSES
 # =============================================================================
@@ -885,9 +884,7 @@ async def extract_oi_events(
                             nextValueUsdFormatted="0",
                             blockNumber=log.block_number,
                             blockTimestamp=timestamp,
-                            blockDatetime=datetime.fromtimestamp(
-                                timestamp, tz=UTC
-                            ).isoformat()
+                            blockDatetime=datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
                             if timestamp
                             else "",
                             transactionHash=tx_hash,
@@ -998,9 +995,7 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
     by_symbol_date: dict[tuple[str, str], list[OpenInterestRecord]] = defaultdict(list)
     for r in records:
         if r.blockTimestamp:
-            date_str = datetime.fromtimestamp(r.blockTimestamp, tz=UTC).strftime(
-                "%Y-%m-%d"
-            )
+            date_str = datetime.fromtimestamp(r.blockTimestamp, tz=UTC).strftime("%Y-%m-%d")
         else:
             continue
         by_symbol_date[(r.symbol, date_str)].append(r)

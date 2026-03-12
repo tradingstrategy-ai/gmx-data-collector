@@ -41,9 +41,7 @@ async def test_collect_events_small_range():
 
     # Collect from a small recent range (last 1000 blocks)
     # This should complete quickly
-    end_block = (
-        180_000_000  # Recent block on Arbitrum (as of Jan 2025 - may need updating)
-    )
+    end_block = 180_000_000  # Recent block on Arbitrum (as of Jan 2025 - may need updating)
     start_block = end_block - 1000
 
     try:

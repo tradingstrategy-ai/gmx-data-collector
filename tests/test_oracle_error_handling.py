@@ -47,9 +47,9 @@ async def test_retry_with_progressive_delays():
 
     for i, (actual, expected) in enumerate(zip(sleep_durations, expected_delays)):
         # Allow 10% jitter tolerance
-        assert (
-            expected <= actual <= expected * 1.1
-        ), f"Delay {i+1}: expected ~{expected}s, got {actual}s"
+        assert expected <= actual <= expected * 1.1, (
+            f"Delay {i + 1}: expected ~{expected}s, got {actual}s"
+        )
 
 
 @pytest.mark.asyncio
@@ -193,9 +193,7 @@ async def test_rate_limit_detection_variations():
             )
 
         assert result == "success", f"Failed for message: {msg}"
-        assert (
-            mock_rotator.rotate.called
-        ), f"Key rotation not triggered for message: {msg}"
+        assert mock_rotator.rotate.called, f"Key rotation not triggered for message: {msg}"
 
 
 @pytest.mark.asyncio
@@ -246,9 +244,7 @@ async def test_traceback_logging_on_error():
     # Capture log output
     with patch("asyncio.sleep", new_callable=AsyncMock):
         with patch("gmx_historical_data.oracle_price_collector.console") as mock_console:
-            with patch(
-                "gmx_historical_data.oracle_price_collector.logger"
-            ) as mock_logger:
+            with patch("gmx_historical_data.oracle_price_collector.logger") as mock_logger:
                 result = await retry_with_backoff(
                     failing_operation,
                     max_retries=5,

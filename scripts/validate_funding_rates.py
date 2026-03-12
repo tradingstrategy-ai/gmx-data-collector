@@ -65,9 +65,7 @@ def hourly_aggregate_usd_flows(flows: pl.DataFrame) -> pl.DataFrame:
     if flows.is_empty():
         return pl.DataFrame()
 
-    flows = flows.with_columns(
-        (pl.col("block_timestamp") // 3600 * 3600).alias("hour_ts")
-    )
+    flows = flows.with_columns((pl.col("block_timestamp") // 3600 * 3600).alias("hour_ts"))
 
     hourly = flows.group_by("hour_ts").agg(
         [
@@ -102,13 +100,9 @@ def compare_rates(
 
     # Align timestamp types — direct may be Datetime, implied is Int64
     if direct["timestamp"].dtype != pl.Int64:
-        direct = direct.with_columns(
-            pl.col("timestamp").dt.epoch("s").alias("ts_epoch")
-        )
+        direct = direct.with_columns(pl.col("timestamp").dt.epoch("s").alias("ts_epoch"))
     else:
-        direct = direct.with_columns(
-            pl.col("timestamp").alias("ts_epoch")
-        )
+        direct = direct.with_columns(pl.col("timestamp").alias("ts_epoch"))
 
     joined = direct.join(implied, left_on="ts_epoch", right_on="timestamp", how="left")
 
@@ -128,9 +122,7 @@ def compare_rates(
     # implied_long_annual.is_not_null() excludes these rows from summaries.
     joined = joined.with_columns(
         [
-            (pl.col("direct_long_annual") - pl.col("implied_long_annual"))
-            .abs()
-            .alias("rate_diff"),
+            (pl.col("direct_long_annual") - pl.col("implied_long_annual")).abs().alias("rate_diff"),
             (
                 pl.when(pl.col("direct_long_annual") == 0)
                 .then(True)

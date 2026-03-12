@@ -246,9 +246,7 @@ def save_checkpoint(
     }
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
-    console.print(
-        f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]"
-    )
+    console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
 
 
 # =============================================================================
@@ -411,9 +409,7 @@ async def extract_pool_events(
                     continue
 
                 timestamp = block_timestamps.get(log.block_number, 0)
-                dt_str = (
-                    datetime.fromtimestamp(timestamp, tz=UTC).isoformat() if timestamp else ""
-                )
+                dt_str = datetime.fromtimestamp(timestamp, tz=UTC).isoformat() if timestamp else ""
 
                 tx_hash = log.transaction_hash or ""
                 if isinstance(tx_hash, bytes):
@@ -526,7 +522,9 @@ def save_raw_per_symbol(records: list[PoolAmountRecord], output_dir: Path) -> No
         (e.g. ``./user_data/data/gmx/pool_liquidity/arbitrum``).
     """
     if not HAS_POLARS:
-        console.print("[red]polars required for Parquet output — install with: pip install polars[/red]")
+        console.print(
+            "[red]polars required for Parquet output — install with: pip install polars[/red]"
+        )
         return
 
     by_symbol: dict[str, list[PoolAmountRecord]] = defaultdict(list)
@@ -627,9 +625,7 @@ def save_daily_per_symbol(
         else:
             pl_df.sort(["date", "token"]).write_parquet(filepath)
 
-        console.print(
-            f"  Snapshots: [cyan]{len(daily):,}[/cyan] days -> [green]{filepath}[/green]"
-        )
+        console.print(f"  Snapshots: [cyan]{len(daily):,}[/cyan] days -> [green]{filepath}[/green]")
 
 
 def build_daily_snapshot(df: pd.DataFrame, token_decimals: dict[str, int]) -> pd.DataFrame:

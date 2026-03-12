@@ -191,7 +191,9 @@ def test_upsert_appends_new_row():
             count = upsert_live_rates_to_feather(tmppath, {"ETH": 1.1e-5})
 
         assert count == 1
-        df = pd.read_feather(tmppath / "data" / "gmx" / "futures" / "ETH_USDC_USDC-1h-funding_rate.feather")
+        df = pd.read_feather(
+            tmppath / "data" / "gmx" / "futures" / "ETH_USDC_USDC-1h-funding_rate.feather"
+        )
         assert len(df) == 3
         assert df["date"].iloc[-1] == pd.Timestamp("2026-02-19 08:00:00", tz="UTC")
         assert abs(df["open"].iloc[-1] - 1.1e-5) < 1e-12
@@ -220,7 +222,9 @@ def test_upsert_overwrites_same_hour():
             mock_now.return_value = datetime(2026, 2, 19, 8, 45, 0, tzinfo=UTC)
             upsert_live_rates_to_feather(tmppath, {"ETH": 1.2e-5})
 
-        df = pd.read_feather(tmppath / "data" / "gmx" / "futures" / "ETH_USDC_USDC-1h-funding_rate.feather")
+        df = pd.read_feather(
+            tmppath / "data" / "gmx" / "futures" / "ETH_USDC_USDC-1h-funding_rate.feather"
+        )
         assert len(df) == 1
         assert abs(df["open"].iloc[0] - 1.2e-5) < 1e-12
 

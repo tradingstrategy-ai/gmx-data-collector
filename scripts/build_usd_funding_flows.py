@@ -240,8 +240,7 @@ def compute_annual_rates(
 
     # Annualise: (delta_usd / seconds_diff) * 86400 * 365
     df = df.with_columns(
-        (pl.col("delta_usd") / pl.col("seconds_diff") * 86400 * 365)
-        .alias("annual_rate_usd_raw")
+        (pl.col("delta_usd") / pl.col("seconds_diff") * 86400 * 365).alias("annual_rate_usd_raw")
     )
 
     # Single-token market multiplier
@@ -494,9 +493,7 @@ Examples:
         flows_by_symbol[symbol] = sym_df
 
     print_summary(flows_by_symbol)
-    console.print(
-        f"\n  [green]USD flows saved for {len(flows_by_symbol)} symbols[/green]"
-    )
+    console.print(f"\n  [green]USD flows saved for {len(flows_by_symbol)} symbols[/green]")
 
 
 if __name__ == "__main__":

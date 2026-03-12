@@ -46,7 +46,9 @@ def test_fallback_on_provider_failure():
             failing_web3 = Mock()
             failing_eth = Mock()
             # Make block_number raise when accessed
-            type(failing_eth).block_number = property(lambda self: (_ for _ in ()).throw(Exception("Connection failed")))
+            type(failing_eth).block_number = property(
+                lambda self: (_ for _ in ()).throw(Exception("Connection failed"))
+            )
             failing_web3.eth = failing_eth
 
             working_web3 = Mock()

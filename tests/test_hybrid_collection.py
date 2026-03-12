@@ -7,9 +7,7 @@ from gmx_historical_data.cli import DataCollector
 from gmx_historical_data.config import CollectionConfig
 
 
-@pytest.mark.skipif(
-    not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var"
-)
+@pytest.mark.skipif(not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var")
 @pytest.mark.asyncio
 async def test_hybrid_collection_eth():
     """Test hybrid collection for ETH (has Chainlink feed)."""
@@ -49,9 +47,7 @@ async def test_hybrid_collection_eth():
     print(f"  1h candles: {len(df_1h):,}")
 
 
-@pytest.mark.skipif(
-    not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var"
-)
+@pytest.mark.skipif(not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var")
 def test_gmx_v2_genesis_constant():
     """Test GMX V2 genesis constant is defined."""
     from gmx_historical_data.config import (
@@ -66,8 +62,6 @@ def test_gmx_v2_genesis_constant():
     # Verify timestamp corresponds to Aug 2023
     import datetime
 
-    dt = datetime.datetime.fromtimestamp(
-        GMX_V2_GENESIS_TIMESTAMP, tz=datetime.timezone.utc
-    )
+    dt = datetime.datetime.fromtimestamp(GMX_V2_GENESIS_TIMESTAMP, tz=datetime.timezone.utc)
     assert dt.year == 2023
     assert dt.month == 8

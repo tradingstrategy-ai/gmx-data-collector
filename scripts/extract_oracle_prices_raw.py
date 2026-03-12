@@ -549,9 +549,7 @@ def save_raw_oracle(records: list[OraclePriceRecord], output_dir: Path) -> None:
     filepath = output_dir / "raw" / "oracle_prices" / "data.parquet"
     df = pl.DataFrame([asdict(r) for r in records])
     append_parquet(df, filepath)
-    console.print(
-        f"  Oracle: [cyan]{len(records):,}[/cyan] events -> [green]{filepath}[/green]"
-    )
+    console.print(f"  Oracle: [cyan]{len(records):,}[/cyan] events -> [green]{filepath}[/green]")
 
 
 # =============================================================================

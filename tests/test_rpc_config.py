@@ -45,7 +45,7 @@ class TestCollectionConfigRPCUrls:
         """Test configuration with explicit fallback URLs."""
         config = CollectionConfig(
             rpc_url="https://arb1.arbitrum.io/rpc",
-            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"]
+            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"],
         )
         urls = config.get_all_rpc_urls()
 
@@ -58,7 +58,10 @@ class TestCollectionConfigRPCUrls:
         """Test combining comma-separated primary with explicit fallbacks."""
         config = CollectionConfig(
             rpc_url="https://arb1.arbitrum.io/rpc,https://arbitrum.llamarpc.com",
-            fallback_rpc_urls=["https://rpc.ankr.com/arbitrum", "https://arbitrum.blockpi.network/v1/rpc/public"]
+            fallback_rpc_urls=[
+                "https://rpc.ankr.com/arbitrum",
+                "https://arbitrum.blockpi.network/v1/rpc/public",
+            ],
         )
         urls = config.get_all_rpc_urls()
 
@@ -72,7 +75,7 @@ class TestCollectionConfigRPCUrls:
         """Test that duplicate URLs are removed while preserving order."""
         config = CollectionConfig(
             rpc_url="https://arb1.arbitrum.io/rpc,https://arbitrum.llamarpc.com,https://arb1.arbitrum.io/rpc",
-            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"]
+            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"],
         )
         urls = config.get_all_rpc_urls()
 
@@ -92,7 +95,7 @@ class TestCollectionConfigRPCUrls:
         """Test handling of empty primary with fallbacks."""
         config = CollectionConfig(
             rpc_url="",
-            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"]
+            fallback_rpc_urls=["https://arbitrum.llamarpc.com", "https://rpc.ankr.com/arbitrum"],
         )
         urls = config.get_all_rpc_urls()
 
@@ -135,7 +138,7 @@ class TestDaemonConfigRPCUrls:
         """Test explicit fallback URLs in DaemonConfig."""
         config = DaemonConfig(
             rpc_url="https://arb1.arbitrum.io/rpc",
-            fallback_rpc_urls=["https://arbitrum.llamarpc.com"]
+            fallback_rpc_urls=["https://arbitrum.llamarpc.com"],
         )
 
         assert len(config.fallback_rpc_urls) == 1
@@ -152,7 +155,9 @@ class TestDaemonConfigRPCUrls:
     def test_from_env_with_fallbacks(self, monkeypatch):
         """Test from_env with fallback RPC URLs."""
         monkeypatch.setenv("JSON_RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc")
-        monkeypatch.setenv("FALLBACK_RPC_URLS", "https://arbitrum.llamarpc.com,https://rpc.ankr.com/arbitrum")
+        monkeypatch.setenv(
+            "FALLBACK_RPC_URLS", "https://arbitrum.llamarpc.com,https://rpc.ankr.com/arbitrum"
+        )
         config = DaemonConfig.from_env()
 
         assert config.rpc_url == "https://arb1.arbitrum.io/rpc"
@@ -162,7 +167,9 @@ class TestDaemonConfigRPCUrls:
 
     def test_from_env_comma_separated_primary(self, monkeypatch):
         """Test from_env with comma-separated primary RPC URLs."""
-        monkeypatch.setenv("JSON_RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc,https://arbitrum.llamarpc.com")
+        monkeypatch.setenv(
+            "JSON_RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc,https://arbitrum.llamarpc.com"
+        )
         config = DaemonConfig.from_env()
 
         assert config.rpc_url == "https://arb1.arbitrum.io/rpc,https://arbitrum.llamarpc.com"
@@ -180,7 +187,9 @@ class TestDaemonConfigRPCUrls:
     def test_from_env_fallbacks_with_spaces(self, monkeypatch):
         """Test from_env parsing fallbacks with whitespace."""
         monkeypatch.setenv("JSON_RPC_ARBITRUM", "https://arb1.arbitrum.io/rpc")
-        monkeypatch.setenv("FALLBACK_RPC_URLS", " https://arbitrum.llamarpc.com , https://rpc.ankr.com/arbitrum ")
+        monkeypatch.setenv(
+            "FALLBACK_RPC_URLS", " https://arbitrum.llamarpc.com , https://rpc.ankr.com/arbitrum "
+        )
         config = DaemonConfig.from_env()
 
         assert len(config.fallback_rpc_urls) == 2
