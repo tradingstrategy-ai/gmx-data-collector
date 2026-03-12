@@ -1,5 +1,5 @@
 # GMX Data Report — 2026-03-12
-Generated: 2026-03-12 08:13:10 UTC
+Generated: 2026-03-12 08:26:24 UTC
 
 ## Collection Summary
 - Snapshot date: 2026-03-12
@@ -8,130 +8,130 @@ Generated: 2026-03-12 08:13:10 UTC
   - Swap-only pools: 5
   - Listed: 127, Unlisted: 2
 - Unique symbols (OHLCV): 108 saved
-- Total OI (all markets): $79,430,692
+- Total OI (all markets): $79,811,851
 
 ## Data Files
 - OHLCV feather files: 108
 - Snapshot parquet files: 1 days
 
 ## Top 10 Markets by Open Interest
-   1. ETH/USD [ETH-USDC]                       $    32,635,585
-   2. BTC/USD [WBTC.b-USDC]                    $    23,884,179
-   3. ETH/USD [ETH-ETH]                        $     5,582,327
-   4. XRP/USD [ETH-USDC]                       $     4,262,573
-   5. LINK/USD [LINK-USDC]                     $     3,068,774
-   6. BTC/USD [WBTC.b-WBTC.b]                  $     1,859,530
-   7. SOL/USD [SOL-USDC]                       $     1,566,690
-   8. HYPE/USD [WBTC.b-USDC]                   $       795,473
-   9. GMX/USD [GMX-USDC]                       $       499,619
-  10. SUI/USD [ETH-USDC]                       $       421,354
+   1. ETH/USD [ETH-USDC]                       $    32,766,689
+   2. BTC/USD [WBTC.b-USDC]                    $    23,958,874
+   3. ETH/USD [ETH-ETH]                        $     5,623,062
+   4. XRP/USD [ETH-USDC]                       $     4,275,357
+   5. LINK/USD [LINK-USDC]                     $     3,082,930
+   6. BTC/USD [WBTC.b-WBTC.b]                  $     1,864,980
+   7. SOL/USD [SOL-USDC]                       $     1,583,567
+   8. HYPE/USD [WBTC.b-USDC]                   $       813,065
+   9. GMX/USD [GMX-USDC]                       $       503,937
+  10. SUI/USD [ETH-USDC]                       $       422,987
 
 ## OHLCV Coverage (rows per symbol)
-  0G: 1 days
-  AAVE: 1 days
-  ADA: 1 days
-  AERO: 1 days
-  AI16Z: 1 days
-  AIXBT: 1 days
-  ALGO: 1 days
-  ANIME: 1 days
-  APE: 1 days
-  APT: 1 days
-  AR: 1 days
-  ARB: 1 days
-  ASTER: 1 days
-  ATOM: 1 days
-  AVAX: 1 days
-  AVNT: 1 days
-  BCH: 1 days
-  BERA: 1 days
-  BNB: 1 days
-  BOME: 1 days
-  BONK: 1 days
-  BRETT: 1 days
-  BTC: 1 days
-  CAKE: 1 days
-  CC: 1 days
-  CHZ: 1 days
-  CRO: 1 days
-  CRV: 1 days
-  CVX: 1 days
-  DASH: 1 days
-  DOGE: 1 days
-  DOLO: 1 days
-  DOT: 1 days
-  DYDX: 1 days
-  EIGEN: 1 days
-  ENA: 1 days
-  ETH: 1 days
-  FARTCOIN: 1 days
-  FET: 1 days
-  FIL: 1 days
-  FLOKI: 1 days
-  GMX: 1 days
-  HBAR: 1 days
-  HYPE: 1 days
-  ICP: 1 days
-  INJ: 1 days
-  IP: 1 days
-  JTO: 1 days
-  JUP: 1 days
-  KAS: 1 days
-  KTA: 1 days
-  LDO: 1 days
-  LINEA: 1 days
-  LINK: 1 days
-  LIT: 1 days
-  LTC: 1 days
-  MELANIA: 1 days
-  MEME: 1 days
-  MET: 1 days
-  MEW: 1 days
-  MKR: 1 days
-  MNT: 1 days
-  MON: 1 days
-  MOODENG: 1 days
-  MORPHO: 1 days
-  NEAR: 1 days
-  OKB: 1 days
-  OM: 1 days
-  ONDO: 1 days
-  OP: 1 days
-  ORDI: 1 days
-  PENDLE: 1 days
-  PENGU: 1 days
-  PEPE: 1 days
-  PI: 1 days
-  POL: 1 days
-  PUMP: 1 days
-  RENDER: 1 days
-  S: 1 days
-  SATS: 1 days
-  SEI: 1 days
-  SHIB: 1 days
-  SKY: 1 days
-  SOL: 1 days
-  SPX6900: 1 days
-  STX: 1 days
-  SUI: 1 days
-  SYRUP: 1 days
-  TAO: 1 days
-  TIA: 1 days
-  TON: 1 days
-  TRUMP: 1 days
-  TRX: 1 days
-  UNI: 1 days
-  VIRTUAL: 1 days
-  VVV: 1 days
-  WELL: 1 days
-  WIF: 1 days
-  WLD: 1 days
-  WLFI: 1 days
-  XAUT.v2: 1 days
-  XLM: 1 days
-  XMR: 1 days
-  XPL: 1 days
-  XRP: 1 days
-  ZEC: 1 days
-  ZORA: 1 days
-  ZRO: 1 days
+  0G: 5 days
+  AAVE: 5 days
+  ADA: 5 days
+  AERO: 5 days
+  AI16Z: 5 days
+  AIXBT: 5 days
+  ALGO: 5 days
+  ANIME: 5 days
+  APE: 5 days
+  APT: 5 days
+  AR: 5 days
+  ARB: 5 days
+  ASTER: 5 days
+  ATOM: 5 days
+  AVAX: 5 days
+  AVNT: 5 days
+  BCH: 5 days
+  BERA: 5 days
+  BNB: 5 days
+  BOME: 5 days
+  BONK: 5 days
+  BRETT: 5 days
+  BTC: 5 days
+  CAKE: 5 days
+  CC: 5 days
+  CHZ: 5 days
+  CRO: 5 days
+  CRV: 5 days
+  CVX: 5 days
+  DASH: 5 days
+  DOGE: 5 days
+  DOLO: 5 days
+  DOT: 5 days
+  DYDX: 5 days
+  EIGEN: 5 days
+  ENA: 5 days
+  ETH: 5 days
+  FARTCOIN: 5 days
+  FET: 5 days
+  FIL: 5 days
+  FLOKI: 5 days
+  GMX: 5 days
+  HBAR: 5 days
+  HYPE: 5 days
+  ICP: 5 days
+  INJ: 5 days
+  IP: 5 days
+  JTO: 5 days
+  JUP: 5 days
+  KAS: 5 days
+  KTA: 5 days
+  LDO: 5 days
+  LINEA: 5 days
+  LINK: 5 days
+  LIT: 5 days
+  LTC: 5 days
+  MELANIA: 5 days
+  MEME: 5 days
+  MET: 5 days
+  MEW: 5 days
+  MKR: 5 days
+  MNT: 5 days
+  MON: 5 days
+  MOODENG: 5 days
+  MORPHO: 5 days
+  NEAR: 5 days
+  OKB: 5 days
+  OM: 5 days
+  ONDO: 5 days
+  OP: 5 days
+  ORDI: 5 days
+  PENDLE: 5 days
+  PENGU: 5 days
+  PEPE: 5 days
+  PI: 5 days
+  POL: 5 days
+  PUMP: 5 days
+  RENDER: 5 days
+  S: 5 days
+  SATS: 5 days
+  SEI: 5 days
+  SHIB: 5 days
+  SKY: 5 days
+  SOL: 5 days
+  SPX6900: 5 days
+  STX: 5 days
+  SUI: 5 days
+  SYRUP: 5 days
+  TAO: 5 days
+  TIA: 5 days
+  TON: 5 days
+  TRUMP: 5 days
+  TRX: 5 days
+  UNI: 5 days
+  VIRTUAL: 5 days
+  VVV: 5 days
+  WELL: 5 days
+  WIF: 5 days
+  WLD: 5 days
+  WLFI: 5 days
+  XAUT.v2: 5 days
+  XLM: 5 days
+  XMR: 5 days
+  XPL: 5 days
+  XRP: 5 days
+  ZEC: 5 days
+  ZORA: 5 days
+  ZRO: 5 days
