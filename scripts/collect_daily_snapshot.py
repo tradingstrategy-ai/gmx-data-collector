@@ -1,21 +1,25 @@
-"""Daily GMX V2 market snapshot collector.
+"""Daily GMX V2 comprehensive data collector.
 
 Fetches a point-in-time snapshot of **all** GMX V2 markets (perpetual +
 swap-only) via the public REST API. No HyperSync, no RPC, no API keys.
 
 Captures:
 
-- Daily OHLCV candles per symbol → CCXT feather format
+- OHLCV candles across all timeframes (1m, 5m, 15m, 1h, 4h, 1d) → CCXT feather format
 - Open Interest (long/short per market, including alt-collateral variants)
 - Pool Liquidity (pool amounts, available liquidity)
 - Funding & Borrowing rates
 - Swap-only pool data
+- Ticker data (bid/ask prices, volume)
+- APY data (yield across 7 periods: 1d, 7d, 30d, 90d, 180d, 1y, total)
 
 Output follows the existing ``user_data/`` layout::
 
     user_data/data/gmx/
-    ├── futures/{SYM}_USDC_USDC-1d-futures.feather   # OHLCV (appended)
-    └── snapshots/{date}.parquet                      # All markets snapshot
+    ├── futures/{SYM}_USDC_USDC-{tf}-futures.feather  # OHLCV (appended)
+    ├── snapshots/{date}.parquet                       # All markets snapshot
+    ├── tickers/{date}.parquet                         # Bid/ask/volume
+    └── apy/{date}.parquet                             # Yield data
 
 A ``data_report.txt`` file is generated in the output root after each run.
 
@@ -46,6 +50,200 @@ console = Console()
 
 # GMX 30-decimal precision for OI/rate values.
 _GMX_PRECISION = 1e30
+
+# All OHLCV timeframes to collect from the GMX API.
+TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+# APY periods available from the GMX API.
+APY_PERIODS = ["1d", "7d", "30d", "90d", "180d", "1y", "total"]
+
+
+def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
+    """Merge new OHLCV rows into an existing feather file (or create it).
+
+    Existing historical data is never deleted. Overlapping timestamps are
+    replaced with the newer values (``keep='last'``). Output is always
+    sorted by date.
+
+    :param new_df: New rows with columns ``[date, open, high, low, close, volume]``.
+    :param filepath: Path to the feather file (created if missing).
+    """
+    if new_df.empty:
+        return
+
+    if new_df["date"].dt.tz is None:
+        new_df["date"] = new_df["date"].dt.tz_localize("UTC")
+    new_df["date"] = new_df["date"].dt.as_unit("ns")
+
+    if filepath.exists():
+        existing = pd.read_feather(filepath)
+        if existing["date"].dt.tz is None:
+            existing["date"] = existing["date"].dt.tz_localize("UTC")
+        existing["date"] = existing["date"].dt.as_unit("ns")
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates(subset=["date"], keep="last")
+    else:
+        combined = new_df
+
+    combined = combined.sort_values("date").reset_index(drop=True)
+    if combined["date"].dtype == "object":
+        combined["date"] = pd.to_datetime(combined["date"], utc=True)
+    combined["date"] = combined["date"].dt.as_unit("ns")
+    feather.write_feather(combined, filepath)
+
+
+def _extract_symbols(markets: list[dict]) -> list[str]:
+    """Extract sorted unique symbols from listed perpetual markets.
+
+    Skips swap-only pools (no ``/`` in name) and unlisted markets.
+
+    :param markets: Raw market dicts from ``get_markets_info()``.
+    :returns: Sorted list of unique symbol strings.
+    """
+    symbols = set()
+    for market in markets:
+        if not market.get("isListed", True):
+            continue
+        name = market.get("name", "")
+        if "/" not in name:
+            continue
+        symbol = name.split("/")[0].strip()
+        if symbol:
+            symbols.add(symbol)
+    return sorted(symbols)
+
+
+def _flatten_apy(
+    raw_apy: dict,
+    period: str,
+    date_str: str,
+) -> pd.DataFrame:
+    """Flatten raw APY API response into a tabular DataFrame.
+
+    Combines both ``markets`` and ``glvs`` entries with a ``type`` column
+    to distinguish them.
+
+    :param raw_apy: Dict from ``get_apy()`` with ``markets`` and ``glvs`` keys.
+    :param period: APY period string (e.g., ``'30d'``).
+    :param date_str: ISO date string to tag each row.
+    :returns: DataFrame with one row per market/glv token.
+    """
+    rows = []
+    for market_token, data in raw_apy.get("markets", {}).items():
+        rows.append(
+            {
+                "date": date_str,
+                "period": period,
+                "type": "market",
+                "market_token": market_token,
+                "apy": data.get("apy", 0.0),
+                "base_apy": data.get("baseApy", 0.0),
+                "bonus_apr": data.get("bonusApr", 0.0),
+            }
+        )
+    for glv_token, data in raw_apy.get("glvs", {}).items():
+        rows.append(
+            {
+                "date": date_str,
+                "period": period,
+                "type": "glv",
+                "market_token": glv_token,
+                "apy": data.get("apy", 0.0),
+                "base_apy": data.get("baseApy", 0.0),
+                "bonus_apr": data.get("bonusApr", 0.0),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def collect_and_save_apy(
+    api: GMXAPI,
+    date_str: str,
+    apy_dir: Path,
+) -> int:
+    """Fetch APY data for all periods and save as daily parquet snapshot.
+
+    Fetches APY for each period in :data:`APY_PERIODS` and combines into
+    a single parquet file for the day.
+
+    :param api: Initialised GMXAPI client.
+    :param date_str: ISO date string for the snapshot.
+    :param apy_dir: Directory for APY parquet files.
+    :returns: Total number of APY entries saved.
+    """
+    apy_dir.mkdir(parents=True, exist_ok=True)
+
+    all_frames = []
+    for period in APY_PERIODS:
+        try:
+            raw_apy = api.get_apy(period=period, use_cache=False)
+            df = _flatten_apy(raw_apy, period, date_str)
+            if not df.empty:
+                all_frames.append(df)
+        except Exception as e:
+            console.print(f"    [yellow]Warning: APY {period} — {e}[/yellow]")
+        time.sleep(0.1)
+
+    if not all_frames:
+        console.print("  [yellow]Warning: No APY data collected[/yellow]")
+        return 0
+
+    combined = pd.concat(all_frames, ignore_index=True)
+    apy_path = apy_dir / f"{date_str}.parquet"
+    combined.to_parquet(apy_path, index=False)
+    console.print(
+        f"  [green]Saved {len(combined)} APY entries ({len(APY_PERIODS)} periods)[/green] → {apy_path}"
+    )
+    return len(combined)
+
+
+def _flatten_tickers(raw_tickers: list[dict], date_str: str) -> pd.DataFrame:
+    """Flatten raw ticker API response into a tabular DataFrame.
+
+    :param raw_tickers: List of ticker dicts from ``get_tickers()``.
+    :param date_str: ISO date string to tag each row.
+    :returns: DataFrame with one row per token.
+    """
+    rows = []
+    for ticker in raw_tickers:
+        rows.append(
+            {
+                "date": date_str,
+                "token_symbol": ticker.get("tokenSymbol", ""),
+                "token_address": ticker.get("tokenAddress", ""),
+                "min_price": ticker.get("minPrice", "0"),
+                "max_price": ticker.get("maxPrice", "0"),
+                "updated_at": ticker.get("updatedAt", 0),
+                "timestamp": ticker.get("timestamp", 0),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def collect_and_save_tickers(
+    api: GMXAPI,
+    date_str: str,
+    tickers_dir: Path,
+) -> int:
+    """Fetch current ticker data and save as daily parquet snapshot.
+
+    :param api: Initialised GMXAPI client.
+    :param date_str: ISO date string for the snapshot.
+    :param tickers_dir: Directory for ticker parquet files.
+    :returns: Number of tickers saved.
+    """
+    tickers_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_tickers = api.get_tickers(use_cache=False)
+    if not raw_tickers:
+        console.print("  [yellow]Warning: No ticker data returned[/yellow]")
+        return 0
+
+    df = _flatten_tickers(raw_tickers, date_str)
+    ticker_path = tickers_dir / f"{date_str}.parquet"
+    df.to_parquet(ticker_path, index=False)
+    console.print(f"  [green]Saved {len(df)} tickers[/green] → {ticker_path}")
+    return len(df)
 
 
 def _fetch_all_markets(api: GMXAPI) -> list[dict]:
@@ -121,95 +319,78 @@ def collect_markets_snapshot(
 def collect_and_save_ohlcv(
     api: GMXAPI,
     markets: list[dict],
-    date_str: str,
     futures_dir: Path,
+    timeframes: list[str] | None = None,
 ) -> tuple[int, list[str]]:
-    """Fetch daily OHLCV candles and append to per-symbol CCXT feather files.
+    """Fetch OHLCV candles for all timeframes and append to feather files.
 
-    For each unique symbol across all perpetual markets, fetches the latest
-    daily candle and appends it to
-    ``{futures_dir}/{SYM}_USDC_USDC-1d-futures.feather``. Existing rows
-    at the same date are replaced (idempotent on re-run).
+    For each unique listed perpetual symbol, fetches candles across all
+    requested timeframes and merges into per-symbol feather files using
+    the Freqtrade naming convention.
+
+    On first run (file doesn't exist): fetches max history (``limit=10000``).
+    On subsequent runs (file exists): fetches recent candles proportional
+    to the timeframe resolution.
 
     :param api: Initialised GMXAPI client.
     :param markets: Raw market dicts from ``get_markets_info()``.
-    :param date_str: ISO date string for the snapshot.
     :param futures_dir: Directory for CCXT feather files.
-    :returns: Tuple of (saved count, list of failed symbols).
+    :param timeframes: List of timeframes to collect (default: all from TIMEFRAMES).
+    :returns: Tuple of (total files saved, list of failed symbol/timeframe pairs).
     """
-    # Extract unique symbols from perpetual markets only
-    symbols = set()
-    for market in markets:
-        if not market.get("isListed", True):
-            continue
-        name = market.get("name", "")
-        if "/" not in name:
-            continue
-        symbol = name.split("/")[0].strip()
-        if symbol:
-            symbols.add(symbol)
-
-    symbols = sorted(symbols)
-    console.print(f"  Fetching daily candles for {len(symbols)} unique symbols...")
+    tfs = timeframes or TIMEFRAMES
+    symbols = _extract_symbols(markets)
+    console.print(f"  Fetching candles for {len(symbols)} symbols × {len(tfs)} timeframes...")
 
     futures_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
     failed = []
 
+    # Recent-fetch limits per timeframe (how many candles to fetch on incremental runs)
+    # 1m: ~24h = 1440, 5m: ~2d = 576, 15m: ~3d = 288, 1h: ~5d = 120, 4h: ~10d = 60, 1d: 5
+    incremental_limits = {
+        "1m": 1440,
+        "5m": 576,
+        "15m": 288,
+        "1h": 120,
+        "4h": 60,
+        "1d": 5,
+    }
+
     for symbol in symbols:
-        try:
-            filepath = futures_dir / f"{symbol}_USDC_USDC-1d-futures.feather"
+        for tf in tfs:
+            try:
+                filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
 
-            # Fetch full history on first run, just recent candles on subsequent
-            if filepath.exists():
-                limit = 5  # Last few days to catch up
-            else:
-                limit = 10000  # Max available history from API
+                if filepath.exists():
+                    limit = incremental_limits.get(tf, 100)
+                else:
+                    limit = 10000  # Max available history from API
 
-            df = api.get_candlesticks_dataframe(symbol, period="1d", limit=limit)
-            if df.empty:
-                failed.append(symbol)
-                continue
+                df = api.get_candlesticks_dataframe(symbol, period=tf, limit=limit)
+                if df.empty:
+                    failed.append(f"{symbol}/{tf}")
+                    continue
 
-            # Build CCXT-format DataFrame from all fetched candles
-            new_rows = pd.DataFrame(
-                {
-                    "date": df["timestamp"],
-                    "open": df["open"].astype(float),
-                    "high": df["high"].astype(float),
-                    "low": df["low"].astype(float),
-                    "close": df["close"].astype(float),
-                    "volume": 0.0,
-                }
-            )
-            if new_rows["date"].dt.tz is None:
-                new_rows["date"] = new_rows["date"].dt.tz_localize("UTC")
-            new_rows["date"] = new_rows["date"].dt.as_unit("ns")
+                new_rows = pd.DataFrame(
+                    {
+                        "date": df["timestamp"],
+                        "open": df["open"].astype(float),
+                        "high": df["high"].astype(float),
+                        "low": df["low"].astype(float),
+                        "close": df["close"].astype(float),
+                        "volume": 0.0,
+                    }
+                )
 
-            # Merge with existing data (idempotent — dedup by date)
-            if filepath.exists():
-                existing = pd.read_feather(filepath)
-                if existing["date"].dt.tz is None:
-                    existing["date"] = existing["date"].dt.tz_localize("UTC")
-                existing["date"] = existing["date"].dt.as_unit("ns")
-                combined = pd.concat([existing, new_rows], ignore_index=True)
-                combined = combined.drop_duplicates(subset=["date"], keep="last")
-            else:
-                combined = new_rows
+                _merge_feather(new_rows, filepath)
+                saved += 1
 
-            combined = combined.sort_values("date").reset_index(drop=True)
-            if combined["date"].dtype == "object":
-                combined["date"] = pd.to_datetime(combined["date"], utc=True)
-            combined["date"] = combined["date"].dt.as_unit("ns")
-            feather.write_feather(combined, filepath)
-            saved += 1
+            except Exception as e:
+                failed.append(f"{symbol}/{tf}")
+                console.print(f"    [yellow]Warning: {symbol}/{tf} — {e}[/yellow]")
 
-        except Exception as e:
-            failed.append(symbol)
-            console.print(f"    [yellow]Warning: {symbol} — {e}[/yellow]")
-
-        # Small delay to be polite to the API
-        time.sleep(0.1)
+            time.sleep(0.05)  # Polite delay (reduced since more calls now)
 
     console.print(
         f"  [green]Saved {saved} candle files[/green]"
@@ -228,8 +409,12 @@ def generate_report(
     markets_df: pd.DataFrame,
     candle_count: int,
     failed_symbols: list[str],
+    ticker_count: int,
+    apy_count: int,
     futures_dir: Path,
     snapshots_dir: Path,
+    tickers_dir: Path,
+    apy_dir: Path,
     report_path: Path,
 ) -> None:
     """Write a human-readable data report after each collection run.
@@ -237,9 +422,13 @@ def generate_report(
     :param date_str: Snapshot date.
     :param markets_df: Full markets snapshot DataFrame.
     :param candle_count: Number of OHLCV feather files written.
-    :param failed_symbols: Symbols that failed candle fetch.
+    :param failed_symbols: Symbols/timeframes that failed candle fetch.
+    :param ticker_count: Number of ticker entries saved.
+    :param apy_count: Number of APY entries saved.
     :param futures_dir: Path to CCXT feather directory.
     :param snapshots_dir: Path to snapshots directory.
+    :param tickers_dir: Path to tickers directory.
+    :param apy_dir: Path to APY directory.
     :param report_path: Output path for the report file.
     """
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -248,9 +437,16 @@ def generate_report(
     swap_df = markets_df[markets_df["is_swap_only"]]
     listed_df = markets_df[markets_df["is_listed"]]
 
-    # Count existing feather files and snapshot days
-    feather_files = list(futures_dir.glob("*-1d-futures.feather"))
+    # Count files per data type
     snapshot_files = list(snapshots_dir.glob("*.parquet"))
+    ticker_files = list(tickers_dir.glob("*.parquet")) if tickers_dir.exists() else []
+    apy_files = list(apy_dir.glob("*.parquet")) if apy_dir.exists() else []
+
+    # Count feather files per timeframe
+    tf_counts = {}
+    for tf in TIMEFRAMES:
+        tf_files = list(futures_dir.glob(f"*-{tf}-futures.feather"))
+        tf_counts[tf] = len(tf_files)
 
     # Compute total OI across all perpetual markets
     total_oi = 0
@@ -258,7 +454,7 @@ def generate_report(
         try:
             oi_long = int(row["open_interest_long"])
             oi_short = int(row["open_interest_short"])
-            total_oi += (oi_long + oi_short)
+            total_oi += oi_long + oi_short
         except (ValueError, TypeError):
             pass
     total_oi_usd = total_oi / _GMX_PRECISION
@@ -283,38 +479,58 @@ def generate_report(
         f"  - Perpetual markets: {len(perp_df)}",
         f"  - Swap-only pools: {len(swap_df)}",
         f"  - Listed: {len(listed_df)}, Unlisted: {len(markets_df) - len(listed_df)}",
-        f"- Unique symbols (OHLCV): {candle_count} saved"
+        f"- OHLCV candle files saved: {candle_count}"
         + (f", {len(failed_symbols)} failed" if failed_symbols else ""),
+        f"- Ticker entries: {ticker_count}",
+        f"- APY entries: {apy_count}",
         f"- Total OI (all markets): ${total_oi_usd:,.0f}",
         "",
         "## Data Files",
-        f"- OHLCV feather files: {len(feather_files)}",
         f"- Snapshot parquet files: {len(snapshot_files)} days",
-        "",
-        "## Top 10 Markets by Open Interest",
+        f"- Ticker parquet files: {len(ticker_files)} days",
+        f"- APY parquet files: {len(apy_files)} days",
+        "- OHLCV feather files by timeframe:",
     ]
+    for tf in TIMEFRAMES:
+        lines.append(f"    {tf}: {tf_counts[tf]} symbols")
 
+    lines.extend(
+        [
+            "",
+            "## Top 10 Markets by Open Interest",
+        ]
+    )
     for i, (name, oi) in enumerate(oi_rows[:10], 1):
         lines.append(f"  {i:2d}. {name:<40s} ${oi:>14,.0f}")
 
     if failed_symbols:
         lines.append("")
         lines.append("## Failed OHLCV Fetches")
-        lines.append(f"  {', '.join(failed_symbols)}")
+        for f in failed_symbols[:20]:
+            lines.append(f"  {f}")
+        if len(failed_symbols) > 20:
+            lines.append(f"  ... and {len(failed_symbols) - 20} more")
 
-    # Per-symbol candle counts (how many days of data each feather has)
-    lines.append("")
-    lines.append("## OHLCV Coverage (rows per symbol)")
-    symbol_rows = []
-    for f in sorted(feather_files):
-        try:
-            df = pd.read_feather(f)
-            sym = f.stem.replace("_USDC_USDC-1d-futures", "")
-            symbol_rows.append((sym, len(df)))
-        except Exception:
-            pass
-    for sym, count in sorted(symbol_rows):
-        lines.append(f"  {sym}: {count} days")
+    # Per-symbol candle counts for ALL timeframes
+    tf_label = {
+        "1m": "minutes",
+        "5m": "5-min bars",
+        "15m": "15-min bars",
+        "1h": "hours",
+        "4h": "4-hour bars",
+        "1d": "days",
+    }
+    for tf in TIMEFRAMES:
+        lines.append("")
+        lines.append(f"## OHLCV Coverage — {tf} (rows per symbol)")
+        tf_feather_files = sorted(futures_dir.glob(f"*-{tf}-futures.feather"))
+        for f in tf_feather_files:
+            try:
+                df = pd.read_feather(f)
+                sym = f.stem.replace(f"_USDC_USDC-{tf}-futures", "")
+                lines.append(f"  {sym}: {len(df)} {tf_label.get(tf, 'rows')}")
+            except Exception:
+                pass
 
     lines.append("")
 
@@ -326,11 +542,11 @@ def generate_report(
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Collect daily GMX V2 market snapshot (OI, liquidity, OHLCV)",
+        description="Collect daily GMX V2 market snapshot (all data types, all timeframes)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Today's snapshot
+  # Today's snapshot (all data)
   poetry run python scripts/collect_daily_snapshot.py
 
   # Specific date
@@ -364,12 +580,16 @@ Examples:
 
     futures_dir = args.output_dir / "data" / "gmx" / "futures"
     snapshots_dir = args.output_dir / "data" / "gmx" / "snapshots"
+    tickers_dir = args.output_dir / "data" / "gmx" / "tickers"
+    apy_dir = args.output_dir / "data" / "gmx" / "apy"
     report_path = args.output_dir.parent / "data_report.txt"
 
     console.print(f"\n[bold]GMX Daily Snapshot — {date_str}[/bold]")
-    console.print(f"  Network:   {args.network}")
-    console.print(f"  Futures:   {futures_dir}")
-    console.print(f"  Snapshots: {snapshots_dir}\n")
+    console.print(f"  Network:    {args.network}")
+    console.print(f"  Futures:    {futures_dir}")
+    console.print(f"  Snapshots:  {snapshots_dir}")
+    console.print(f"  Tickers:    {tickers_dir}")
+    console.print(f"  APY:        {apy_dir}\n")
 
     api = GMXAPI(chain=args.network)
 
@@ -380,31 +600,42 @@ Examples:
         console.print("[red]Error: No market data returned from GMX API[/red]")
         sys.exit(1)
 
-    # --- 1. Markets snapshot (ALL markets: perp + swap-only + unlisted) ---
+    # --- Phase 1: Markets snapshot (ALL markets: perp + swap-only + unlisted) ---
     console.print("\n[bold]Phase 1: Markets snapshot (OI, liquidity, rates)[/bold]")
     markets_df = collect_markets_snapshot(all_markets, date_str)
-
     markets_path = snapshots_dir / f"{date_str}.parquet"
     markets_path.parent.mkdir(parents=True, exist_ok=True)
     markets_df.to_parquet(markets_path, index=False)
     console.print(f"  Saved → {markets_path}\n")
 
-    # --- 2. OHLCV daily candles (CCXT feather format) ---
-    console.print("[bold]Phase 2: Daily OHLCV candles (CCXT feather)[/bold]")
-    candle_count, failed_symbols = collect_and_save_ohlcv(
-        api, all_markets, date_str, futures_dir
-    )
+    # --- Phase 2: OHLCV candles for ALL timeframes ---
+    console.print("[bold]Phase 2: OHLCV candles (all timeframes)[/bold]")
+    candle_count, failed_symbols = collect_and_save_ohlcv(api, all_markets, futures_dir)
     console.print()
 
-    # --- 3. Generate report ---
-    console.print("[bold]Phase 3: Data report[/bold]")
+    # --- Phase 3: Tickers (bid/ask/volume) ---
+    console.print("[bold]Phase 3: Tickers (bid/ask prices)[/bold]")
+    ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
+    console.print()
+
+    # --- Phase 4: APY (all periods) ---
+    console.print("[bold]Phase 4: APY (yield data)[/bold]")
+    apy_count = collect_and_save_apy(api, date_str, apy_dir)
+    console.print()
+
+    # --- Phase 5: Generate report ---
+    console.print("[bold]Phase 5: Data report[/bold]")
     generate_report(
         date_str=date_str,
         markets_df=markets_df,
         candle_count=candle_count,
         failed_symbols=failed_symbols,
+        ticker_count=ticker_count,
+        apy_count=apy_count,
         futures_dir=futures_dir,
         snapshots_dir=snapshots_dir,
+        tickers_dir=tickers_dir,
+        apy_dir=apy_dir,
         report_path=report_path,
     )
     console.print()
@@ -413,7 +644,9 @@ Examples:
     console.print("[bold]Summary[/bold]")
     console.print(f"  Date:      {date_str}")
     console.print(f"  Markets:   {len(markets_df)} (all)")
-    console.print(f"  Candles:   {candle_count}")
+    console.print(f"  Candles:   {candle_count} files ({len(TIMEFRAMES)} timeframes)")
+    console.print(f"  Tickers:   {ticker_count}")
+    console.print(f"  APY:       {apy_count} entries")
     console.print("[green]Done.[/green]")
 
 

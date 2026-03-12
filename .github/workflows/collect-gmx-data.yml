@@ -11,7 +11,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code from master
@@ -83,7 +83,12 @@ jobs:
 
           # Remove old report location if present
           git rm -f user_data/data_report.txt 2>/dev/null || true
-          git add --force user_data/data/gmx/futures/ user_data/data/gmx/snapshots/ data_report.txt
+          git add --force \
+            user_data/data/gmx/futures/ \
+            user_data/data/gmx/snapshots/ \
+            user_data/data/gmx/tickers/ \
+            user_data/data/gmx/apy/ \
+            data_report.txt
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
