@@ -67,9 +67,9 @@ jobs:
       - name: Show report in job summary
         if: always()
         run: |
-          if [ -f data/user_data/data_report.txt ]; then
+          if [ -f data/data_report.txt ]; then
             echo '```' >> $GITHUB_STEP_SUMMARY
-            cat data/user_data/data_report.txt >> $GITHUB_STEP_SUMMARY
+            cat data/data_report.txt >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
           else
             echo "No report generated" >> $GITHUB_STEP_SUMMARY
@@ -81,7 +81,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add --force user_data/data/gmx/futures/ user_data/data/gmx/snapshots/ user_data/data_report.txt
+          # Remove old report location if present
+          git rm -f user_data/data_report.txt 2>/dev/null || true
+          git add --force user_data/data/gmx/futures/ user_data/data/gmx/snapshots/ data_report.txt
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else

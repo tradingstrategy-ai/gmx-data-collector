@@ -363,7 +363,7 @@ Examples:
 
     futures_dir = args.output_dir / "data" / "gmx" / "futures"
     snapshots_dir = args.output_dir / "data" / "gmx" / "snapshots"
-    report_path = args.output_dir / "data_report.txt"
+    report_path = args.output_dir.parent / "data_report.txt"
 
     console.print(f"\n[bold]GMX Daily Snapshot — {date_str}[/bold]")
     console.print(f"  Network:   {args.network}")
