@@ -1,5 +1,5 @@
 # GMX Data Report — 2026-03-12
-Generated: 2026-03-12 07:55:04 UTC
+Generated: 2026-03-12 08:13:10 UTC
 
 ## Collection Summary
 - Snapshot date: 2026-03-12
@@ -8,23 +8,23 @@ Generated: 2026-03-12 07:55:04 UTC
   - Swap-only pools: 5
   - Listed: 127, Unlisted: 2
 - Unique symbols (OHLCV): 108 saved
-- Total OI (all markets): $79,062,167
+- Total OI (all markets): $79,430,692
 
 ## Data Files
 - OHLCV feather files: 108
 - Snapshot parquet files: 1 days
 
 ## Top 10 Markets by Open Interest
-   1. ETH/USD [ETH-USDC]                       $    32,307,083
-   2. BTC/USD [WBTC.b-USDC]                    $    23,836,255
-   3. ETH/USD [ETH-ETH]                        $     5,587,375
-   4. XRP/USD [ETH-USDC]                       $     4,260,744
-   5. LINK/USD [LINK-USDC]                     $     3,069,310
-   6. BTC/USD [WBTC.b-WBTC.b]                  $     1,862,328
-   7. SOL/USD [SOL-USDC]                       $     1,558,142
-   8. HYPE/USD [WBTC.b-USDC]                   $       796,154
-   9. GMX/USD [GMX-USDC]                       $       497,340
-  10. SUI/USD [ETH-USDC]                       $       409,804
+   1. ETH/USD [ETH-USDC]                       $    32,635,585
+   2. BTC/USD [WBTC.b-USDC]                    $    23,884,179
+   3. ETH/USD [ETH-ETH]                        $     5,582,327
+   4. XRP/USD [ETH-USDC]                       $     4,262,573
+   5. LINK/USD [LINK-USDC]                     $     3,068,774
+   6. BTC/USD [WBTC.b-WBTC.b]                  $     1,859,530
+   7. SOL/USD [SOL-USDC]                       $     1,566,690
+   8. HYPE/USD [WBTC.b-USDC]                   $       795,473
+   9. GMX/USD [GMX-USDC]                       $       499,619
+  10. SUI/USD [ETH-USDC]                       $       421,354
 
 ## OHLCV Coverage (rows per symbol)
   0G: 1 days
