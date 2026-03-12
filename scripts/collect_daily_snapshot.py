@@ -158,43 +158,44 @@ def collect_and_save_ohlcv(
 
     for symbol in symbols:
         try:
-            df = api.get_candlesticks_dataframe(symbol, period="1d", limit=2)
+            filepath = futures_dir / f"{symbol}_USDC_USDC-1d-futures.feather"
+
+            # Fetch full history on first run, just recent candles on subsequent
+            if filepath.exists():
+                limit = 5  # Last few days to catch up
+            else:
+                limit = 10000  # Max available history from API
+
+            df = api.get_candlesticks_dataframe(symbol, period="1d", limit=limit)
             if df.empty:
                 failed.append(symbol)
                 continue
 
-            # Take the latest candle and build CCXT-format row
-            latest = df.iloc[-1]
-            ts = latest["timestamp"]
-            if hasattr(ts, "tzinfo") and ts.tzinfo is None:
-                ts = pd.Timestamp(ts, tz="UTC")
-
-            new_row = pd.DataFrame(
-                [
-                    {
-                        "date": ts,
-                        "open": float(latest["open"]),
-                        "high": float(latest["high"]),
-                        "low": float(latest["low"]),
-                        "close": float(latest["close"]),
-                        "volume": 0.0,
-                    }
-                ]
+            # Build CCXT-format DataFrame from all fetched candles
+            new_rows = pd.DataFrame(
+                {
+                    "date": df["timestamp"],
+                    "open": df["open"].astype(float),
+                    "high": df["high"].astype(float),
+                    "low": df["low"].astype(float),
+                    "close": df["close"].astype(float),
+                    "volume": 0.0,
+                }
             )
+            if new_rows["date"].dt.tz is None:
+                new_rows["date"] = new_rows["date"].dt.tz_localize("UTC")
+            new_rows["date"] = new_rows["date"].dt.as_unit("ns")
 
-            # Append to existing feather file or create new one
-            filepath = futures_dir / f"{symbol}_USDC_USDC-1d-futures.feather"
+            # Merge with existing data (idempotent — dedup by date)
             if filepath.exists():
                 existing = pd.read_feather(filepath)
                 if existing["date"].dt.tz is None:
                     existing["date"] = existing["date"].dt.tz_localize("UTC")
-                # Ensure new_row matches existing dtype before concat
-                new_row["date"] = new_row["date"].dt.as_unit("ns")
-                # Drop any existing row at the same timestamp (idempotent)
-                existing = existing[existing["date"] != ts]
-                combined = pd.concat([existing, new_row], ignore_index=True)
+                existing["date"] = existing["date"].dt.as_unit("ns")
+                combined = pd.concat([existing, new_rows], ignore_index=True)
+                combined = combined.drop_duplicates(subset=["date"], keep="last")
             else:
-                combined = new_row
+                combined = new_rows
 
             combined = combined.sort_values("date").reset_index(drop=True)
             if combined["date"].dtype == "object":
