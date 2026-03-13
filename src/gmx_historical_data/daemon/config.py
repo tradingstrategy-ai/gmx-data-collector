@@ -19,12 +19,12 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
     Excluded from Chainlink list (collateral/swap-only tokens, not perp markets):
         DAI, STETH, USDC, USDC.e, USDT, WBTC.b
 
-    Markets WITHOUT Chainlink feeds (86 total - not collected by default):
+    Markets WITHOUT Chainlink feeds (88 total - not collected by default):
         0G, ADA, AERO, AI16Z, AIXBT, ALGO, ANIME, APE_deprecated, APT, AR,
-        ASTER, AVNT, BCH, BERA, BOME, BONK, BRETT, CAKE, CHZ, CRO, CVX,
+        ASTER, AVNT, BCH, BERA, BOME, BONK, BRETT, CAKE, CC, CHZ, CRO, CVX,
         DASH, DOLO, DOT, DYDX, EIGEN, ENA, FARTCOIN, FET, FIL, FLOKI,
         FTM, GLV [ETH-USDC], GLV [WBTC.b-USDC], HBAR, HYPE, ICP, INJ, IP,
-        JTO, JUP, KAS, KTA, LINEA, LIT, MELANIA, MEME, MEW, MNT, MON,
+        JTO, JUP, KAS, KTA, LINEA, LIT, MELANIA, MEME, MET, MEW, MNT, MON,
         MOODENG, MORPHO, OKB, OM, ONDO, ORDI, PENGU, PI, PUMP, RENDER, S,
         SATS, SKY, SPX6900, STX, SUI, SYRUP, TIA, TON, TRUMP,
         TRX, USDe, VIRTUAL, VVV, WELL, WLD, WLFI, XAUT, XAUT.v2, XLM, XMR,
@@ -66,7 +66,7 @@ def get_gmx_markets_with_chainlink_feeds() -> list[str]:
 def get_gmx_markets_without_chainlink_feeds() -> list[str]:
     """Get list of GMX markets that do NOT have public Chainlink price feeds.
 
-    These 86 markets require OraclePriceUpdate event collection from
+    These 88 markets require OraclePriceUpdate event collection from
     GMX EventEmitter contract to build OHLCV candles.
 
     :return: List of GMX market symbols without Chainlink feeds
@@ -89,6 +89,7 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "BONK",  # No Chainlink feed on Arbitrum
         "BRETT",
         "CAKE",
+        "CC",
         "CHZ",
         "CRO",
         "CVX",
@@ -116,6 +117,7 @@ def get_gmx_markets_without_chainlink_feeds() -> list[str]:
         "LIT",
         "MELANIA",
         "MEME",
+        "MET",
         "MEW",
         "MNT",
         "MON",

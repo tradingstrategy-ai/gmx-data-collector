@@ -615,8 +615,14 @@ class DataCollector:
                     f"[dim]({earliest} to {latest})[/dim]"
                 )
 
-        # Save checkpoint for this symbol so we can skip it on re-run
-        self._save_symbol_checkpoint(symbol)
+        # Save checkpoint only for Chainlink-backed symbols.
+        # Non-Chainlink symbols need oracle event historical backfill via
+        # collect_non_chainlink_markets(), which skips any symbol that already
+        # has a checkpoint. Saving a checkpoint here for non-Chainlink symbols
+        # would cause collect_non_chainlink_markets() to skip them, leaving
+        # those symbols with only GMX API recent data (no full historical data).
+        if chainlink_available:
+            self._save_symbol_checkpoint(symbol)
 
         console.print(f"\n[bold green]✓ Collection complete for {symbol}[/bold green]")
 
