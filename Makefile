@@ -15,11 +15,11 @@ endif
 NETWORK ?= arbitrum
 
 # Directory paths
-DATA_DIR ?= ./data
+DATA_DIR ?= ./user_data
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
-OI_OUTPUT_DIR ?= ./user_data/data/gmx/open_interest
-POOL_LIQUIDITY_OUTPUT_DIR ?= ./user_data/data/gmx/pool_liquidity
-FEATHER_DIR ?= ./user_data
+OI_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/open_interest
+POOL_LIQUIDITY_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/pool_liquidity
+FEATHER_DIR ?= $(DATA_DIR)
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
 
@@ -31,6 +31,11 @@ OUTPUT_FORMAT ?= parquet
 FROM_BLOCK ?=
 TO_BLOCK ?=
 MARKET ?=
+SYMBOL ?=
+
+# Extra CLI arguments passed through to the underlying script
+# Example: make collect-full ARGS="--symbol ETH --chainlink-only"
+ARGS ?=
 
 # Set INCLUDE_DATASTORE=1 to include archive RPC reads (slow, requires JSON_RPC_ARBITRUM)
 INCLUDE_DATASTORE ?=
@@ -94,11 +99,15 @@ help:
 	@echo "  show-config          - Show all configuration variables"
 	@echo ""
 	@echo "Usage examples:"
-	@echo "  make extract-all-resume                       # Incremental OI + liquidity update"
-	@echo "  make oi FROM_BLOCK=120000000                  # Full OI backfill from genesis"
-	@echo "  make pool-liquidity NETWORK=arbitrum          # Full liquidity backfill"
-	@echo "  make update-gmx-data                          # Candles + funding incremental"
-	@echo "  make funding-unified-resume                   # Funding only, incremental"
+	@echo "  make collect-full                             # Full candle backfill (all symbols → user_data/)"
+	@echo "  make collect-full SYMBOL=ETH                 # Single symbol only"
+	@echo "  make collect-full ARGS=\"--chainlink-only\"    # Chainlink markets only"
+	@echo "  make collect-full DATA_DIR=./data            # Override output directory"
+	@echo "  make extract-all-resume                      # Incremental OI + liquidity update"
+	@echo "  make oi FROM_BLOCK=120000000                 # Full OI backfill from genesis"
+	@echo "  make pool-liquidity NETWORK=arbitrum         # Full liquidity backfill"
+	@echo "  make update-gmx-data                         # Candles + funding incremental"
+	@echo "  make funding-unified-resume                  # Funding only, incremental"
 	@echo ""
 	@echo "Tip: .env is auto-loaded (HYPERSYNC_API_TOKEN, JSON_RPC_ARBITRUM, etc.)"
 	@echo "  Override: export JSON_RPC_ARBITRUM=https://...  # or set in .env"
@@ -201,6 +210,8 @@ show-config:
 	@echo "  FROM_BLOCK                = $(FROM_BLOCK)"
 	@echo "  TO_BLOCK                  = $(TO_BLOCK)"
 	@echo "  MARKET                    = $(MARKET)"
+	@echo "  SYMBOL                    = $(SYMBOL)"
+	@echo "  ARGS                      = $(ARGS)"
 
 # Install dependencies
 install:
@@ -214,11 +225,17 @@ install:
 
 define COLLECT_CMD
 	@echo "Starting $(1) candle collection..."
-	@echo "  Output:     $(DATA_DIR)"
+	@echo "  Output:      $(DATA_DIR)"
 	@echo "  Concurrency: $(CONCURRENCY)"
+	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
+	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
 	@echo ""
 	@mkdir -p $(DATA_DIR) $(LOG_DIR)
-	poetry run python -m gmx_historical_data.cli collect --$(2) --output-dir $(DATA_DIR) --concurrency $(CONCURRENCY)
+	poetry run python -m gmx_historical_data.cli collect --$(2) \
+		--output-dir $(DATA_DIR) \
+		--concurrency $(CONCURRENCY) \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(ARGS)
 endef
 
 # Incremental candle collection (GMX API + Chainlink + oracle events)

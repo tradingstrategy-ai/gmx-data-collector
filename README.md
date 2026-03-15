@@ -11,7 +11,7 @@ Collect historical price data for all 118 GMX V2 tokens with smart incremental u
 - **Freqtrade Compatible** — Direct export to Feather format (OHLCV + funding rate + mark price)
 - **Concurrent Collection** — Parallel symbol processing and RPC batch requests
 - **Historical OI & Pool Liquidity** — Full on-chain history of open interest and LP pool depth via HyperSync
-- **Analysis Notebooks** — Interactive Plotly notebooks for OI trends, pool utilisation, and cross-exchange validation
+- **Analysis Notebooks** — Interactive Plotly notebooks for OI trends, pool utilisation, cross-exchange validation, and CEX/GMX correlation
 
 ## Quick Start
 
@@ -24,14 +24,16 @@ export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
 export HYPERSYNC_API_TOKEN="your_token_here"  # Free from https://envio.dev
 
 # Collect full historical data for 34 Chainlink-feed tokens (no HyperSync needed)
-gmx_historical_data collect --full --chainlink-only --output-dir user_data --concurrency 3
+make collect-full ARGS="--chainlink-only"
 
-# Initial collection: all 118 tokens (4-5 hours)
-gmx_historical_data collect --default --output-dir ./data --concurrency 5
+# Initial collection: all 118 tokens (~4-5 hours)
+make collect-full
 
-# Daily incremental update (10-30 minutes for all tokens)
-gmx_historical_data collect --update --output-dir ./data --concurrency 10
+# Daily incremental update (~10-30 minutes for all tokens)
+make collect-update
 ```
+
+All data is written to `./user_data` by default. Override with `DATA_DIR=./my_path`.
 
 ## Installation
 
@@ -45,14 +47,86 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 poetry install
 ```
 
+## Makefile Reference
+
+All targets write to `./user_data` by default. Configuration variables can be overridden on the command line.
+
+### Candle Collection
+
+```bash
+make collect-full                           # Full historical backfill (all symbols)
+make collect-full SYMBOL=ETH               # Single symbol only
+make collect-full ARGS="--chainlink-only"  # 34 Chainlink markets only (no HyperSync)
+make collect-full CONCURRENCY=15           # Tune parallelism (default: 4)
+make collect-full DATA_DIR=./data          # Override output directory
+
+make collect-update                        # Incremental update (only missing data)
+make collect-update SYMBOL=BTC             # Incremental for one symbol
+```
+
+### Combined Updates
+
+```bash
+make update-gmx-data                       # Candles + funding (recommended for daily runs)
+make extract-all                           # OI + pool liquidity (full history)
+make extract-all-resume                    # OI + pool liquidity (incremental)
+```
+
+### Funding Rates
+
+```bash
+make funding-unified                       # Full extraction (HyperSync only, fast)
+make funding-unified-resume               # Incremental update (resume from checkpoints)
+make funding-unified-merge                # Merge only (skip re-extraction)
+make funding-full                         # Include DataStore phase (pre-V2.2, slow)
+make funding-feather                      # Export to FreqTrade feather format
+```
+
+### Open Interest & Pool Liquidity
+
+```bash
+make oi                                   # Full OI backfill from genesis
+make oi-resume                            # Incremental OI update
+make pool-liquidity                       # Full pool liquidity backfill
+make pool-liquidity-resume               # Incremental pool liquidity update
+```
+
+### Utilities
+
+```bash
+make show-config                          # Print all current configuration values
+make install                              # Install dependencies with Poetry
+make export-freqtrade                     # Export candles + funding to FreqTrade format
+```
+
+### Configuration Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DATA_DIR` | `./user_data` | Root output directory |
+| `SYMBOL` | *(all)* | Limit candle collection to one symbol |
+| `ARGS` | *(none)* | Extra CLI flags passed to the collect script |
+| `CONCURRENCY` | `4` | Parallel workers |
+| `NETWORK` | `arbitrum` | Chain name |
+| `FROM_BLOCK` | *(auto)* | Start block for extraction scripts |
+| `TO_BLOCK` | *(latest)* | End block |
+| `MARKET` | *(all)* | Filter to a single market address |
+| `INCLUDE_DATASTORE` | *(off)* | Set to `1` to include archive RPC DataStore phase |
+
+Tip: create a `.env` file — it is auto-loaded by the Makefile:
+
+```bash
+HYPERSYNC_API_TOKEN=your_token
+JSON_RPC_ARBITRUM=https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY
+CONCURRENCY=8
+```
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `collect --default` | Collect GMX + Chainlink data (recommended) |
 | `collect --full` | Full historical collection |
 | `collect --full --chainlink-only` | Collect only 34 Chainlink-feed markets (no HyperSync needed) |
-| `collect --full --all-markets` | Collect all 118 markets (requires HyperSync) |
 | `collect --update` | Incremental update — only fetches new data |
 | `verify` | Verify data quality |
 | `export-freqtrade` | Export OHLCV + funding rate + mark price to Freqtrade feather format |
@@ -62,10 +136,9 @@ poetry install
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--output-dir PATH` | Output directory | `./data` |
+| `--output-dir PATH` | Output directory | `./user_data` |
 | `--symbol TEXT` | Token(s) — comma-separated for `collect`, repeatable for `export-freqtrade` | All tokens |
 | `--chainlink-only` | Only collect 34 Chainlink markets (no HyperSync needed) | Off |
-| `--all-markets` | Collect all 118 markets (requires HyperSync) | On |
 | `--concurrency INT` | Parallelism level | `4` |
 
 ### Concurrency
@@ -75,11 +148,11 @@ poetry install
 | 1 | 1 | 1 | Slow/rate-limited RPC |
 | 4 (default) | 4 | 4 | Balanced |
 | 8 | 8 | 8 | Fast RPC endpoint |
-| 10+ | 10+ | 8 (capped) | Maximum speed |
+| 15 | 15 | 8 (capped) | Maximum speed, fast RPC + HyperSync |
 
 ### Estimated Times (with `--concurrency 10`)
 
-**Initial collection (`--full` / `--default`):**
+**Initial collection (`--full`):**
 - Single Chainlink token: ~2-3 minutes
 - All 118 tokens: ~4-5 hours
 
@@ -91,8 +164,8 @@ poetry install
 
 ```bash
 # Cron job: update daily at 2 AM
-0 2 * * * cd /path/to/gmx_historical_data && source .venv/bin/activate && \
-  gmx_historical_data collect --update --output-dir ./data --concurrency 10 >> /var/log/gmx-update.log 2>&1
+0 2 * * * cd /path/to/gmx_historical_data && \
+  make update-gmx-data >> /var/log/gmx-update.log 2>&1
 ```
 
 ## Export for Freqtrade
@@ -101,16 +174,19 @@ Exports OHLCV candles, funding rates, and mark prices in FreqTrade's feather for
 
 ```bash
 # Export all data types
-gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./freqtrade_data
+make export-freqtrade
+
+# Or via CLI directly
+gmx_historical_data export-freqtrade --data-dir ./user_data --output-dir ./user_data
 
 # Export specific symbols/timeframes
-gmx_historical_data export-freqtrade --data-dir ./data --symbol ETH --symbol BTC --timeframe 1h
+gmx_historical_data export-freqtrade --data-dir ./user_data --symbol ETH --symbol BTC --timeframe 1h
 ```
 
 Output structure:
 
 ```
-freqtrade_data/gmx/futures/
+user_data/gmx/futures/
 ├── ETH_USDC_USDC-1h-futures.feather
 ├── ETH_USDC_USDC-1h-funding_rate.feather
 ├── ETH_USDC_USDC-1h-mark.feather
@@ -130,8 +206,7 @@ pip install "freqtrade>=2025.11" "web3-ethereum-defi[web3v7,ccxt]>=0.38" plotly
 
 ```bash
 # Export data to freqtrade format
-gmx_historical_data export-freqtrade --data-dir ./data --output-dir ./user_data/data \
-    --symbol BTC --symbol ETH --timeframe 1h
+make export-freqtrade
 
 # Run backtest
 ./freqtrade-gmx backtesting --config configs/adxmomentum_gmx.json \
@@ -151,61 +226,35 @@ See `examples/strategies/ADXMomentum.py` for an example strategy.
 ## Data Structure
 
 ```
-data/
+user_data/
 ├── candles/arbitrum/{SYMBOL}/
-│   ├── 1m.parquet
+│   ├── 1min.parquet
 │   ├── 1h.parquet
 │   └── 1d.parquet
-├── open_interest/arbitrum/
-│   ├── raw/{SYMBOL}/data.parquet         # Raw OI events (every position change)
-│   ├── snapshots/{SYMBOL}/daily.parquet  # End-of-day OI snapshots
-│   └── checkpoints/
-├── pool_liquidity/arbitrum/
-│   ├── raw/{SYMBOL}/data.parquet         # Raw PoolAmountUpdated events
-│   ├── snapshots/{SYMBOL}/daily.parquet  # Daily pool depth snapshots
-│   └── checkpoints/pool_liquidity_checkpoint.json
+├── data/gmx/
+│   ├── open_interest/arbitrum/
+│   │   ├── raw/{SYMBOL}/data.parquet         # Raw OI events (every position change)
+│   │   ├── snapshots/{SYMBOL}/daily.parquet  # End-of-day OI snapshots
+│   │   └── checkpoints/
+│   └── pool_liquidity/arbitrum/
+│       ├── pool_liquidity_raw.parquet        # Raw PoolAmountUpdated events
+│       ├── pool_liquidity_daily.parquet      # Daily pool depth snapshots
+│       └── checkpoints/
 ├── funding/arbitrum/
 │   ├── raw/
 │   │   ├── funding/{SYMBOL}/partition=0/data.parquet
 │   │   └── fee_per_size/{SYMBOL}/data.parquet
 │   ├── rates/{SYMBOL}/
-│   │   ├── 1h.parquet                    # Unified hourly rates
-│   │   ├── 1h_factor.parquet             # HyperSync-only rates
-│   │   └── 1h_datastore.parquet          # DataStore-only rates
+│   │   ├── 1h.feather                        # Unified hourly rates (feather)
+│   │   ├── 1h_factor.parquet                 # HyperSync-only rates (V2.2+)
+│   │   └── 1h_datastore.parquet              # DataStore-only rates (pre-V2.2)
 │   ├── direction/{SYMBOL}/1h.parquet
 │   └── checkpoints/
-├── borrowing/arbitrum/
-│   ├── raw/borrowing/{SYMBOL}/partition=0/data.parquet
-│   ├── rates/{SYMBOL}/1h.parquet
-│   └── checkpoints/borrowing_factor_checkpoint.json
-└── raw/arbitrum/{SYMBOL}/
+└── borrowing/arbitrum/
+    ├── raw/borrowing/{SYMBOL}/partition=0/data.parquet
+    ├── rates/{SYMBOL}/1h.parquet
+    └── checkpoints/
 ```
-
-## Docker Usage
-
-```bash
-cp .env.example .env
-# Edit .env with your API keys
-
-# All 118 markets
-docker-compose --profile all up gmx-collect-all
-
-# 34 Chainlink markets only
-docker-compose --profile chainlink up gmx-collect-chainlink-only
-
-# Custom symbols
-SYMBOLS=ETH,BTC,SUI docker-compose --profile custom up gmx-collect-custom
-```
-
-| Profile | Markets | Duration (first run) |
-|---------|---------|----------------------|
-| `all` | 118 | 6-8 hours |
-| `chainlink` | 34 | 2-3 hours |
-| `custom` | User defined | Varies |
-| `update` | All existing | 10-30 minutes |
-| `verify` | N/A | 1-2 minutes |
-
-See [Docker Usage Guide](docs/docker-usage.md) for details.
 
 ## Funding Rate Extraction
 
@@ -213,16 +262,16 @@ Extract exact per-second `fundingFactorPerSecond` from on-chain GMX V2 events (H
 
 ```bash
 # Full extraction
-poetry run python scripts/extract_unified_funding.py
+make funding-unified
 
 # Incremental update (resumes from checkpoints)
-poetry run python scripts/extract_unified_funding.py --resume
+make funding-unified-resume
+
+# Include pre-V2.2 DataStore phase (requires archive RPC, slow)
+make funding-full
 
 # Export to FreqTrade feather format
-poetry run python scripts/extract_unified_funding.py --feather-dir ./user_data/data
-
-# Output as feather
-poetry run python scripts/extract_unified_funding.py --output feather
+make funding-feather
 ```
 
 ### How It Works
@@ -230,24 +279,11 @@ poetry run python scripts/extract_unified_funding.py --output feather
 1. **Phase 2 — Funding Factor** (HyperSync): Streams `Funding` events for `fundingFactorPerSecond` magnitude (V2.2+, Aug 2025+)
 2. **Phase 3 — Direction** (HyperSync): Streams `FundingFeeAmountPerSizeUpdated`, compares long/short delta sums to determine who pays
 3. **Phase 1 — DataStore** (opt-in): Reads signed `savedFundingFactorPerSecond` via batched `eth_call` at hourly intervals (pre-V2.2, requires archive RPC)
-4. **Merge**: Combines sources, applies direction correction, deduplicates, writes unified `1h.parquet`
+4. **Merge**: Combines sources, applies direction correction, deduplicates, writes unified `1h.feather`
 
 The DataStore phase uses fully-batched JSON-RPC — all network I/O completes before any record is written (~203 HTTP requests total vs ~17,000 sequential).
 
-```bash
-# Via Makefile
-make funding-unified
-make funding-unified INCLUDE_DATASTORE=1   # Include pre-V2.2 DataStore phase
-make funding-unified-resume                # Incremental
-make funding-unified MARKET="ETH/USD"      # Single market
-
-# Run individual scripts
-poetry run python scripts/extract_funding_factor.py --resume
-poetry run python scripts/extract_funding_fee_per_size.py --resume
-poetry run python scripts/extract_funding_datastore.py --resume  # Archive RPC required
-```
-
-### Unified Hourly Rates Schema (`rates/{SYMBOL}/1h.parquet`)
+### Unified Hourly Rates Schema (`rates/{SYMBOL}/1h.feather`)
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -265,7 +301,7 @@ poetry run python scripts/extract_funding_datastore.py --resume  # Archive RPC r
 
 ```bash
 0 2 * * * cd /path/to/gmx_historical_data && \
-  poetry run python scripts/extract_unified_funding.py --resume >> logs/unified_funding.log 2>&1
+  make funding-unified-resume >> logs/unified_funding.log 2>&1
 ```
 
 ## Borrowing Rate Extraction
@@ -302,26 +338,10 @@ To compute net position cost: `net_rate = funding_rate + borrowing_rate`. Both o
 Extract full historical `OpenInterestUpdated` and `OpenInterestInTokensUpdated` events from GMX V2 via HyperSync. Records every position change with USD and token-denominated OI.
 
 ```bash
-# Full historical backfill (from GMX V2 launch, ~20 min)
-poetry run python scripts/extract_open_interest.py --from-block 120000000
-
-# Incremental update (resumes from checkpoint)
-poetry run python scripts/extract_open_interest.py --resume
-
-# Filter to a single market
-poetry run python scripts/extract_open_interest.py --resume --market "ETH/USD"
-
-# Quick test on a small block range
-poetry run python scripts/extract_open_interest.py --from-block 290000000 --to-block 290100000
-```
-
-**Output structure:**
-
-```
-data/open_interest/arbitrum/
-├── raw/{SYMBOL}/data.parquet          — raw events (every position change)
-├── snapshots/{SYMBOL}/daily.parquet   — end-of-day OI snapshots
-└── checkpoints/
+make oi                                    # Full backfill from genesis (~20 min)
+make oi-resume                             # Incremental update (resume from checkpoint)
+make oi MARKET="ETH/USD"                   # Single market
+make oi FROM_BLOCK=290000000 TO_BLOCK=290100000  # Block range
 ```
 
 **Daily snapshot schema** (`snapshots/{SYMBOL}/daily.parquet`):
@@ -341,26 +361,12 @@ data/open_interest/arbitrum/
 Extract full historical `PoolAmountUpdated` events — LP pool token changes on every deposit, withdrawal, and position-triggered rebalance.
 
 ```bash
-# Full historical backfill (~20 min via HyperSync)
-poetry run python scripts/extract_pool_liquidity.py --from-block 120000000
-
-# Incremental update
-poetry run python scripts/extract_pool_liquidity.py --resume
-
-# Filter to a single market
-poetry run python scripts/extract_pool_liquidity.py --resume --market "ETH/USD"
+make pool-liquidity                        # Full backfill (~20 min via HyperSync)
+make pool-liquidity-resume                # Incremental update
+make pool-liquidity MARKET="ETH/USD"      # Single market
 ```
 
-**Output structure:**
-
-```
-data/pool_liquidity/arbitrum/
-├── raw/{SYMBOL}/data.parquet          — raw events (delta + nextValue per token)
-├── snapshots/{SYMBOL}/daily.parquet   — daily pool depth snapshots
-└── checkpoints/pool_liquidity_checkpoint.json
-```
-
-**Daily snapshot schema** (`snapshots/{SYMBOL}/daily.parquet`):
+**Daily snapshot schema** (`pool_liquidity_daily.parquet`):
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -371,7 +377,7 @@ data/pool_liquidity/arbitrum/
 
 ## Analysis Notebooks
 
-Interactive Plotly notebooks for exploring OI and liquidity. Launch with:
+Interactive Plotly notebooks for exploring OI, liquidity, and cross-exchange data. Launch with:
 
 ```bash
 poetry run jupyter lab notebooks/
@@ -382,6 +388,7 @@ poetry run jupyter lab notebooks/
 | `notebooks/01_oi_analysis.ipynb` | OI time series, long/short breakdown, market rankings, monthly heatmap |
 | `notebooks/02_liquidity_analysis.ipynb` | Pool depth over time, OI vs pool dual-axis, utilisation scatter, trading universe filter |
 | `notebooks/03_cross_exchange_validation.ipynb` | GMX OI vs Binance/Hyperliquid volume correlation, cross-exchange funding rate comparison |
+| `notebooks/04_cex_gmx_correlation.ipynb` | CEX vs GMX price correlation, spread analysis, and arbitrage signal identification |
 
 **Usage example:**
 
@@ -391,7 +398,7 @@ import pandas as pd
 from pathlib import Path
 
 SCALE_30 = 10 ** 30
-snapshots_dir = Path("data/open_interest/arbitrum/snapshots")
+snapshots_dir = Path("user_data/data/gmx/open_interest/arbitrum/snapshots")
 frames = [pd.read_parquet(f) for f in snapshots_dir.rglob("daily.parquet")]
 oi = pd.concat(frames)
 oi["total_oi_usd"] = oi["totalOiUsd"].astype(float) / SCALE_30

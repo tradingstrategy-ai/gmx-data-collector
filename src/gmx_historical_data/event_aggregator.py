@@ -5,11 +5,23 @@ OHLCV data suitable for backtesting and analysis.
 """
 
 import pandas as pd
+import polars as pl
 
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
 #: GMX USD precision (30 decimals)
 GMX_USD_PRECISION = 10**30
+
+#: Mapping from pandas timeframe aliases to Polars aliases.
+_PANDAS_TO_POLARS_TIMEFRAME: dict[str, str] = {
+    "1min": "1m",
+    "5min": "5m",
+    "15min": "15m",
+    "1h": "1h",
+    "4h": "4h",
+    "1D": "1d",
+    "1d": "1d",
+}
 
 
 def aggregate_events_to_ohlcv(
@@ -33,67 +45,36 @@ def aggregate_events_to_ohlcv(
     :return: DataFrame with OHLC data (no volume)
     """
     if not events:
-        # Return empty DataFrame with correct schema
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "symbol"])
 
-    # Convert events to DataFrame
-    if use_execution_price:
-        # Use actual execution price (includes slippage) for backtesting
-        # This reflects what you'd actually get when executing trades
-        df = pd.DataFrame(
-            [
-                {
-                    "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
-                    "price": e.execution_price / GMX_USD_PRECISION,
-                }
-                for e in events
-            ]
-        )
-    else:
-        # Use oracle mid-price: average of Chainlink's min/max prices
-        # This gives clean market prices without price impact from executions
-        df = pd.DataFrame(
-            [
-                {
-                    "timestamp": pd.Timestamp(e.block_timestamp, unit="s", tz="UTC"),
-                    "price": (e.index_token_price_min + e.index_token_price_max)
-                    / 2
-                    / GMX_USD_PRECISION,
-                }
-                for e in events
-            ]
-        )
+    polars_tf = _PANDAS_TO_POLARS_TIMEFRAME[timeframe]
 
-    # Add original order column to ensure deterministic sorting
-    df["original_order"] = range(len(df))
+    prices = [
+        e.execution_price / GMX_USD_PRECISION
+        if use_execution_price
+        else (e.index_token_price_min + e.index_token_price_max) / 2 / GMX_USD_PRECISION
+        for e in events
+    ]
 
-    # Sort by timestamp, then by original order for deterministic behavior
-    df = df.sort_values(["timestamp", "original_order"])
+    df = pl.DataFrame(
+        {
+            "timestamp": [pd.Timestamp(e.block_timestamp, unit="s", tz="UTC") for e in events],
+            "price": prices,
+            "original_order": list(range(len(events))),
+        }
+    )
+    df = df.sort(["timestamp", "original_order"])
 
-    # Resample to OHLC (no volume)
-    ohlcv = (
-        df.set_index("timestamp")
-        .resample(timeframe)
-        .agg(
-            {
-                "price": ["first", "max", "min", "last"],
-            }
-        )
+    ohlcv = df.group_by_dynamic("timestamp", every=polars_tf).agg(
+        [
+            pl.first("price").alias("open"),
+            pl.max("price").alias("high"),
+            pl.min("price").alias("low"),
+            pl.last("price").alias("close"),
+        ]
     )
 
-    # Flatten column names
-    ohlcv.columns = ["open", "high", "low", "close"]
+    ohlcv = ohlcv.with_columns(pl.lit(symbol).alias("symbol"))
+    ohlcv = ohlcv.drop_nulls(subset=["open", "high", "low", "close"])
 
-    # Add symbol
-    ohlcv["symbol"] = symbol
-
-    # Drop rows with no data (NaN in all OHLC)
-    ohlcv = ohlcv.dropna(subset=["open", "high", "low", "close"], how="all")
-
-    # Reset index to make timestamp a column
-    ohlcv = ohlcv.reset_index()
-
-    # Drop the helper column used for deterministic sorting
-    ohlcv = ohlcv.drop(columns=["original_order"], errors="ignore")
-
-    return ohlcv
+    return ohlcv.to_pandas()

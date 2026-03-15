@@ -6,6 +6,7 @@ timestamps and block numbers without excessive RPC calls.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +43,7 @@ class BlockTimestampCache:
         web3: Web3,
         genesis_block: int = GMX_V2_GENESIS_BLOCK,
         sample_interval: int = BLOCK_SAMPLE_INTERVAL,
+        fetch_workers: int = 32,
     ):
         """Initialize BlockTimestampCache.
 
@@ -49,16 +51,18 @@ class BlockTimestampCache:
         :param web3: Web3 instance
         :param genesis_block: Genesis block number
         :param sample_interval: Sample interval in blocks
+        :param fetch_workers: Number of parallel RPC workers for cache build/update
         """
         self.cache_path = Path(cache_path)
         self.web3 = web3
         self.genesis_block = genesis_block
         self.sample_interval = sample_interval
+        self.fetch_workers = fetch_workers
         self.cache_df: pd.DataFrame | None = None
 
         logger.info(
             f"Initialized BlockTimestampCache: path={cache_path}, "
-            f"genesis={genesis_block}, interval={sample_interval}"
+            f"genesis={genesis_block}, interval={sample_interval}, workers={fetch_workers}"
         )
 
     def get_block_for_timestamp(self, timestamp: int) -> int:
@@ -153,6 +157,19 @@ class BlockTimestampCache:
 
         return estimated_timestamp
 
+    def _fetch_block_timestamp(self, block_num: int) -> tuple[int, int] | None:
+        """Fetch timestamp for a single block via RPC.
+
+        :param block_num: Block number to fetch
+        :return: ``(block_num, timestamp)`` or ``None`` on failure
+        """
+        try:
+            block = self.web3.eth.get_block(block_num)
+            return block_num, block.timestamp
+        except Exception as e:
+            logger.warning(f"Failed to fetch block {block_num}: {e}. Skipping.")
+            return None
+
     def build_cache(self, end_block: int | None = None) -> None:
         """Build cache from scratch by sampling blocks.
 
@@ -175,10 +192,11 @@ class BlockTimestampCache:
             sample_blocks.append(end_block)
 
         console.print(
-            f"[cyan]Sampling {len(sample_blocks)} blocks at {self.sample_interval}-block intervals...[/cyan]"
+            f"[cyan]Sampling {len(sample_blocks)} blocks at {self.sample_interval}-block intervals "
+            f"({self.fetch_workers} workers)...[/cyan]"
         )
 
-        # Fetch timestamps with progress bar
+        # Fetch timestamps in parallel with progress bar
         blocks_data = []
 
         with Progress(
@@ -190,14 +208,18 @@ class BlockTimestampCache:
         ) as progress:
             task = progress.add_task("Fetching block timestamps...", total=len(sample_blocks))
 
-            for block_num in sample_blocks:
-                try:
-                    block = self.web3.eth.get_block(block_num)
-                    blocks_data.append({"block": block_num, "timestamp": block.timestamp})
+            with ThreadPoolExecutor(max_workers=self.fetch_workers) as executor:
+                futures = {
+                    executor.submit(self._fetch_block_timestamp, bn): bn for bn in sample_blocks
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is not None:
+                        blocks_data.append({"block": result[0], "timestamp": result[1]})
                     progress.update(task, advance=1)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch block {block_num}: {e}. Skipping.")
-                    continue
+
+        # Sort by block number (as_completed returns in completion order)
+        blocks_data.sort(key=lambda x: x["block"])
 
         # Create DataFrame
         df = pd.DataFrame(blocks_data)
@@ -254,9 +276,12 @@ class BlockTimestampCache:
         elif not sample_blocks:
             sample_blocks = [end_block]
 
-        console.print(f"[cyan]Updating cache with {len(sample_blocks)} new samples...[/cyan]")
+        console.print(
+            f"[cyan]Updating cache with {len(sample_blocks)} new samples "
+            f"({self.fetch_workers} workers)...[/cyan]"
+        )
 
-        # Fetch new timestamps
+        # Fetch new timestamps in parallel
         new_blocks_data = []
         with Progress(
             SpinnerColumn(),
@@ -267,14 +292,18 @@ class BlockTimestampCache:
         ) as progress:
             task = progress.add_task("Fetching new block timestamps...", total=len(sample_blocks))
 
-            for block_num in sample_blocks:
-                try:
-                    block = self.web3.eth.get_block(block_num)
-                    new_blocks_data.append({"block": block_num, "timestamp": block.timestamp})
+            with ThreadPoolExecutor(max_workers=self.fetch_workers) as executor:
+                futures = {
+                    executor.submit(self._fetch_block_timestamp, bn): bn for bn in sample_blocks
+                }
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result is not None:
+                        new_blocks_data.append({"block": result[0], "timestamp": result[1]})
                     progress.update(task, advance=1)
-                except Exception as e:
-                    logger.warning(f"Failed to fetch block {block_num}: {e}. Skipping.")
-                    continue
+
+        # Sort by block number (as_completed returns in completion order)
+        new_blocks_data.sort(key=lambda x: x["block"])
 
         # Append to existing cache
         new_df = pd.DataFrame(new_blocks_data)

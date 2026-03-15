@@ -19,8 +19,7 @@ Funding rate parquet files are read from
 import logging
 from pathlib import Path
 
-import pandas as pd
-import pyarrow.feather as feather
+import polars as pl
 
 from gmx_historical_data.storage import ParquetStorage
 
@@ -112,8 +111,9 @@ class FreqtradeExporter:
             for tf in export_tfs:
                 # --- OHLCV candles ---
                 if tf in candle_tfs:
-                    df = self.storage.read_candles(tf, symbol)
-                    if not df.empty:
+                    raw = self.storage.read_candles(tf, symbol)
+                    if not raw.empty:
+                        df = pl.from_pandas(raw)
                         ft_df = self._transform_dataframe(df)
                         filename = self._get_freqtrade_filename(
                             symbol,
@@ -154,7 +154,7 @@ class FreqtradeExporter:
                 # --- Funding rate ---
                 if tf in funding_tfs:
                     funding_df = self._read_funding_rate(symbol, tf)
-                    if funding_df is not None and not funding_df.empty:
+                    if funding_df is not None and not funding_df.is_empty():
                         ft_funding = self._transform_funding_rate(funding_df)
                         funding_filename = self._get_freqtrade_filename(
                             symbol,
@@ -208,18 +208,18 @@ class FreqtradeExporter:
     # Data readers
     # ------------------------------------------------------------------
 
-    def _read_funding_rate(self, symbol: str, timeframe: str) -> pd.DataFrame | None:
+    def _read_funding_rate(self, symbol: str, timeframe: str) -> pl.DataFrame | None:
         """Read funding rate parquet for a symbol/timeframe.
 
         :param symbol: Token symbol.
         :param timeframe: Timeframe (e.g., ``'1h'``).
-        :returns: DataFrame with funding columns, or ``None`` if missing.
+        :returns: Polars DataFrame with funding columns, or ``None`` if missing.
         """
         path = self.funding_dir / symbol / f"{timeframe}.parquet"
         if not path.exists():
             return None
-        df = pd.read_parquet(path)
-        if df.empty:
+        df = pl.read_parquet(path)
+        if df.is_empty():
             return None
         return df
 
@@ -227,77 +227,77 @@ class FreqtradeExporter:
     # Transformers
     # ------------------------------------------------------------------
 
-    def _transform_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _transform_dataframe(self, df: pl.DataFrame) -> pl.DataFrame:
         """Transform GMX OHLCV dataframe to Freqtrade format.
 
         :param df: GMX candle dataframe.
-        :returns: Freqtrade-compatible dataframe.
+        :returns: Freqtrade-compatible Polars dataframe.
         """
-        result = df.copy()
-        result = result.rename(columns={"timestamp": "date"})
-        result["date"] = result["date"].dt.as_unit("ns")
-        result["volume"] = 0.0
-        return result[["date", "open", "high", "low", "close", "volume"]]
+        df = df.rename({"timestamp": "date"})
+        df = df.with_columns(
+            [
+                pl.col("date").dt.convert_time_zone("UTC").dt.cast_time_unit("ns"),
+                pl.lit(0).cast(pl.Float64).alias("volume"),
+            ]
+        )
+        df = df.select(["date", "open", "high", "low", "close", "volume"])
+        return df.sort("date")
 
-    def _transform_funding_rate(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _transform_funding_rate(self, df: pl.DataFrame) -> pl.DataFrame:
         """Transform GMX funding rate dataframe to Freqtrade format.
 
         FreqTrade stores funding rate in the ``open`` column with other
         OHLCV columns set to 0.  Uses ``funding_rate_hourly`` as the
         rate value (falls back to ``funding_rate`` if hourly is missing).
 
-        :param df: Funding rate dataframe from parquet.
-        :returns: Freqtrade-compatible dataframe.
+        :param df: Funding rate Polars dataframe from parquet.
+        :returns: Freqtrade-compatible Polars dataframe.
         """
-        result = pd.DataFrame()
-        result["date"] = df["timestamp"].dt.as_unit("ns")
+        col = "funding_rate_hourly" if "funding_rate_hourly" in df.columns else "funding_rate"
+        df = df.rename({"timestamp": "date", col: "open"})
+        df = df.with_columns(
+            [
+                pl.col("open").cast(pl.Float64),
+                pl.lit(0).cast(pl.Float64).alias("high"),
+                pl.lit(0).cast(pl.Float64).alias("low"),
+                pl.lit(0).cast(pl.Float64).alias("close"),
+                pl.lit(0).cast(pl.Float64).alias("volume"),
+                pl.col("date").dt.convert_time_zone("UTC").dt.cast_time_unit("ns"),
+            ]
+        )
+        df = df.drop_nulls(subset=["open"])
+        return df.sort("date").unique(subset=["date"], keep="first", maintain_order=False).sort("date")
 
-        # Prefer hourly rate; fall back to raw rate
-        if "funding_rate_hourly" in df.columns:
-            result["open"] = df["funding_rate_hourly"].astype(float)
-        else:
-            result["open"] = df["funding_rate"].astype(float)
-
-        result["high"] = 0.0
-        result["low"] = 0.0
-        result["close"] = 0.0
-        result["volume"] = 0.0
-
-        result = result.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
-        result = result.dropna(subset=["open"])
-        return result
-
-    def _transform_mark_price(self, df: pd.DataFrame) -> pd.DataFrame:
+    def _transform_mark_price(self, df: pl.DataFrame) -> pl.DataFrame:
         """Generate mark price feather from OHLCV candle data.
 
         Uses OHLCV as a mark price proxy (GMX doesn't provide a separate
         mark price feed).
 
-        :param df: GMX candle dataframe.
-        :returns: Freqtrade-compatible mark price dataframe.
+        :param df: GMX candle Polars dataframe.
+        :returns: Freqtrade-compatible mark price Polars dataframe.
         """
-        result = df.copy()
-        result = result.rename(columns={"timestamp": "date"})
-        result["date"] = result["date"].dt.as_unit("ns")
-        result["volume"] = 0.0
-        result = result[["date", "open", "high", "low", "close", "volume"]]
-        return result.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
+        return (
+            self._transform_dataframe(df)
+            .unique(subset=["date"], keep="first", maintain_order=False)
+            .sort("date")
+        )
 
     # ------------------------------------------------------------------
     # File I/O
     # ------------------------------------------------------------------
 
-    def _write(self, df: pd.DataFrame, path: Path, fmt: str) -> None:
+    def _write(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
         """Write dataframe in the requested format.
 
-        :param df: Dataframe to write.
+        :param df: Polars dataframe to write.
         :param path: Output file path.
         :param fmt: ``'feather'`` or ``'parquet'``.
         """
         if fmt == "feather":
-            feather.write_feather(df, path)
+            df.write_ipc(path)
         else:
-            df.to_parquet(path, index=False)
+            df.write_parquet(str(path))
 
     # ------------------------------------------------------------------
     # Filename generation

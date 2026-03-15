@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 import typer
 from rich import box
 from rich.console import Console
@@ -302,22 +303,21 @@ class DataCollector:
         if not dfs:
             return 0
 
-        if len(dfs) == 1:
-            combined = dfs[0]
-        else:
-            combined = pd.concat(dfs, ignore_index=True)
-
         # Merge with existing storage if incremental
         if merge_with_existing:
             existing = self.storage.read_candles(timeframe, symbol)
             if not existing.empty:
-                combined = pd.concat([existing, combined], ignore_index=True)
+                dfs = [existing, *dfs]
 
-        # Deduplicate and sort
-        combined = combined.drop_duplicates(subset=["timestamp"], keep="last")
-        combined = combined.sort_values("timestamp").reset_index(drop=True)
+        pl_frames = [
+            pl.from_pandas(df).with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
+            for df in dfs
+        ]
+        combined = pl.concat(pl_frames)
+        combined = combined.unique(subset=["timestamp"], keep="last", maintain_order=False)
+        combined = combined.sort("timestamp")
 
-        self.storage.save_candles(combined, timeframe, symbol)
+        self.storage.save_candles(combined.to_pandas(), timeframe, symbol)
         return len(combined)
 
     def _save_symbol_checkpoint(self, symbol: str) -> None:
@@ -712,17 +712,8 @@ class DataCollector:
                 if ohlcv.empty:
                     continue
 
-                # Merge with existing data
-                existing = self.storage.read_candles(timeframe, symbol)
-                if not existing.empty:
-                    merged = pd.concat([existing, ohlcv], ignore_index=True)
-                    merged = merged.sort_values("timestamp").drop_duplicates(
-                        subset=["timestamp"], keep="last"
-                    )
-                else:
-                    merged = ohlcv
-
-                self.storage.save_candles(merged, timeframe, symbol)
+                # Merge with existing data and save
+                self._merge_and_save_candles(symbol, timeframe, ohlcv, merge_with_existing=True)
                 console.print(
                     f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles via oracle fallback"
                 )
@@ -990,6 +981,7 @@ class DataCollector:
         start_block: int | None = None,
         end_block: int | None = None,
         symbols: list[str] | None = None,
+        concurrency: int = 1,
     ) -> None:
         """Collect data for non-Chainlink markets via GMX API + OraclePriceUpdate events.
 
@@ -999,7 +991,11 @@ class DataCollector:
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
         :param symbols: List of specific symbols to collect (None = all non-Chainlink)
+        :param concurrency: Number of symbols to process concurrently in Step 2 (default: 1)
         """
+        if concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+
         # Check HyperSync availability (required for oracle events)
         if self.hypersync is None:
             console.print(
@@ -1014,7 +1010,8 @@ class DataCollector:
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
         from gmx_historical_data.oracle_event_aggregator import (
-            aggregate_oracle_events_to_ohlcv,
+            build_oracle_price_dataframe,
+            resample_oracle_price_dataframe,
         )
         from gmx_historical_data.oracle_price_collector import OraclePriceCollector
 
@@ -1044,6 +1041,8 @@ class DataCollector:
         console.print("\n[bold]Initializing block-timestamp cache...[/bold]")
         cache_path = self.config.output_dir / ".cache" / "block_timestamps.parquet"
         block_cache = BlockTimestampCache(cache_path, self.web3)
+        # Pre-build cache before parallel execution to avoid concurrent RPC calls
+        block_cache._ensure_cache_loaded()
 
         # Initialize coverage analyzer
         coverage_analyzer = DataCoverageAnalyzer(self.config.output_dir)
@@ -1133,16 +1132,32 @@ class DataCollector:
         gmx_data_by_symbol: dict[str, dict[str, pd.DataFrame]] = {}
 
         if self.use_gmx_api and self.gmx_fetcher:
-            for symbol in symbols_to_collect:
-                console.print(f"\n[cyan]{symbol}[/cyan]")
+            gmx_sem = asyncio.Semaphore(concurrency)
 
-                gmx_candles = await self._fetch_gmx_candles_for_timeframes(symbol)
-                if gmx_candles:
-                    gmx_data_by_symbol[symbol] = gmx_candles
-                    for tf, df in gmx_candles.items():
-                        console.print(f"  [green]✓[/green] {tf}: {len(df):,} candles from GMX API")
+            async def _fetch_gmx_for_symbol(symbol: str) -> tuple[str, dict]:
+                async with gmx_sem:
+                    console.print(f"\n[cyan]{symbol}[/cyan]")
+                    gmx_candles = await self._fetch_gmx_candles_for_timeframes(symbol)
+                    if gmx_candles:
+                        for tf, df in gmx_candles.items():
+                            console.print(
+                                f"  [green]✓[/green] {tf}: {len(df):,} candles from GMX API"
+                            )
+                    else:
+                        console.print("  [yellow]○[/yellow] No GMX API data available")
+                    return symbol, gmx_candles or {}
+
+            gmx_results = await asyncio.gather(
+                *[_fetch_gmx_for_symbol(s) for s in symbols_to_collect],
+                return_exceptions=True,
+            )
+            for gmx_result in gmx_results:
+                if isinstance(gmx_result, BaseException):
+                    logger.error("GMX API fetch task failed: %s", gmx_result)
                 else:
-                    console.print("  [yellow]○[/yellow] No GMX API data available")
+                    sym, candles = gmx_result
+                    if candles:
+                        gmx_data_by_symbol[sym] = candles
 
         # Build reverse mapping: symbol -> token_addr (needed for Step 2)
         symbol_to_token = {}
@@ -1156,84 +1171,100 @@ class DataCollector:
 
         # Determine default block range
         default_start = start_block or GMX_V2_GENESIS_BLOCK
-        # Process each symbol individually for incremental collection
         oracle_events_by_symbol: dict[str, list] = {}
 
-        for symbol in symbols_to_collect:
-            console.print(f"\n[cyan]{symbol}[/cyan]")
+        sem = asyncio.Semaphore(concurrency)
 
-            # Analyze existing coverage
-            console.print("  [dim]Analyzing existing data coverage...[/dim]")
-            coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
+        async def _collect_oracle_for_symbol(symbol: str) -> tuple[str, list]:
+            async with sem:
+                console.print(f"\n[cyan]{symbol}[/cyan]")
 
-            if coverage.has_data:
-                console.print(
-                    f"  [green]✓[/green] Found existing data covering "
-                    f"{len(coverage.timeframe_coverage)} timeframe(s)"
-                )
-                for tf, tf_cov in coverage.timeframe_coverage.items():
-                    earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
-                    latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
+                # Analyze existing coverage
+                console.print("  [dim]Analyzing existing data coverage...[/dim]")
+                coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
+
+                if coverage.has_data:
                     console.print(
-                        f"    {tf}: {tf_cov.candle_count:,} candles "
-                        f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
+                        f"  [green]✓[/green] Found existing data covering "
+                        f"{len(coverage.timeframe_coverage)} timeframe(s)"
                     )
-            else:
-                console.print("  [yellow]○[/yellow] No existing data - full historical collection")
-
-            # Calculate missing block range
-            symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
-                coverage,
-                block_cache,
-                genesis_block=default_start,
-                safety_margin=1000,  # 1000 blocks overlap for safety
-            )
-
-            if symbol_start is None and symbol_end is None:
-                console.print("  [green]✓[/green] Data already complete - no oracle events needed")
-                oracle_events_by_symbol[symbol] = []
-                continue
-
-            # Display range to fetch
-            if symbol_end is None:
-                console.print(
-                    f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to latest"
-                )
-            else:
-                blocks_to_fetch = symbol_end - symbol_start
-                console.print(
-                    f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to {symbol_end:,} "
-                    f"({blocks_to_fetch:,} blocks)"
-                )
-
-            # Get token address for this symbol
-            token_addr = symbol_to_token.get(symbol, "").lower()
-            if not token_addr:
-                console.print("  [red]✗[/red] Token address not found")
-                oracle_events_by_symbol[symbol] = []
-                continue
-
-            # Collect oracle events for this symbol's range
-            try:
-                events = await oracle_collector.collect_oracle_events(
-                    start_block=symbol_start,
-                    end_block=symbol_end,
-                    token_addresses=[token_addr],  # Only this token
-                    concurrency=4,
-                )
-
-                oracle_events_by_symbol[symbol] = events
-
-                if events:
-                    console.print(f"  [green]✓[/green] Collected {len(events):,} oracle events")
+                    for tf, tf_cov in coverage.timeframe_coverage.items():
+                        earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
+                        latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
+                        console.print(
+                            f"    {tf}: {tf_cov.candle_count:,} candles "
+                            f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
+                        )
                 else:
-                    console.print("  [yellow]○[/yellow] No oracle events found in range")
+                    console.print(
+                        "  [yellow]○[/yellow] No existing data - full historical collection"
+                    )
 
-            except Exception as e:
-                console.print(f"  [red]✗[/red] Failed to collect oracle events: {e}")
-                logger.error(f"Oracle collection failed for {symbol}: {e}")
-                traceback.print_exc()
-                oracle_events_by_symbol[symbol] = []
+                # Calculate missing block range
+                symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
+                    coverage,
+                    block_cache,
+                    genesis_block=default_start,
+                    safety_margin=1000,  # 1000 blocks overlap for safety
+                )
+
+                if symbol_start is None and symbol_end is None:
+                    console.print(
+                        "  [green]✓[/green] Data already complete - no oracle events needed"
+                    )
+                    return symbol, []
+
+                # Display range to fetch
+                if symbol_end is None:
+                    console.print(
+                        f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to latest"
+                    )
+                else:
+                    blocks_to_fetch = symbol_end - symbol_start
+                    console.print(
+                        f"  [dim]Fetching oracle events:[/dim] blocks {symbol_start:,} to "
+                        f"{symbol_end:,} ({blocks_to_fetch:,} blocks)"
+                    )
+
+                # Get token address for this symbol
+                token_addr = symbol_to_token.get(symbol, "").lower()
+                if not token_addr:
+                    console.print("  [red]✗[/red] Token address not found")
+                    return symbol, []
+
+                # Collect oracle events for this symbol's range
+                try:
+                    events = await oracle_collector.collect_oracle_events(
+                        start_block=symbol_start,
+                        end_block=symbol_end,
+                        token_addresses=[token_addr],  # Only this token
+                        concurrency=4,
+                    )
+
+                    if events:
+                        console.print(f"  [green]✓[/green] Collected {len(events):,} oracle events")
+                    else:
+                        console.print("  [yellow]○[/yellow] No oracle events found in range")
+
+                    return symbol, events
+
+                except Exception as e:
+                    console.print(f"  [red]✗[/red] Failed to collect oracle events: {e}")
+                    logger.error("Oracle collection failed for %s: %s", symbol, e)
+                    traceback.print_exc()
+                    return symbol, []
+
+        # Run all symbols concurrently (bounded by semaphore)
+        gather_results = await asyncio.gather(
+            *[_collect_oracle_for_symbol(s) for s in symbols_to_collect],
+            return_exceptions=True,
+        )
+        for gather_result in gather_results:
+            if isinstance(gather_result, BaseException):
+                logger.error("Oracle collection task failed: %s", gather_result)
+            else:
+                sym, events = gather_result
+                oracle_events_by_symbol[sym] = events
 
         # Step 3: Combine GMX API + Oracle events per symbol
         console.print("\n[bold]Step 3: Combining GMX API + Oracle data...[/bold]")
@@ -1262,13 +1293,21 @@ class DataCollector:
                 continue
 
             try:
+                # Build price DataFrame once per symbol (expensive list comprehension + sort),
+                # then resample cheaply per timeframe below — avoids 6x redundant reconstruction.
+                oracle_price_df = (
+                    build_oracle_price_dataframe(token_events, token_decimals=decimals)
+                    if token_events
+                    else None
+                )
+
                 for timeframe in TIMEFRAMES:
                     gmx_df = gmx_candles.get(timeframe)
                     oracle_df = None
 
-                    if token_events:
-                        oracle_df = aggregate_oracle_events_to_ohlcv(
-                            token_events, timeframe, symbol, token_decimals=decimals
+                    if oracle_price_df is not None and not oracle_price_df.empty:
+                        oracle_df = resample_oracle_price_dataframe(
+                            oracle_price_df, timeframe, symbol
                         )
                         if oracle_df.empty:
                             oracle_df = None
@@ -1647,6 +1686,7 @@ def _cli_impl(
                         start_block=start_block,
                         end_block=end_block,
                         symbols=non_chainlink_symbols,
+                        concurrency=concurrency,
                     )
                 )
             elif non_chainlink_symbols and chainlink_only:
@@ -1673,6 +1713,7 @@ def _cli_impl(
                     collector.collect_non_chainlink_markets(
                         start_block=start_block,
                         end_block=end_block,
+                        concurrency=concurrency,
                     )
                 )
     except KeyboardInterrupt:

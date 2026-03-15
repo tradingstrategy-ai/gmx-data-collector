@@ -408,8 +408,13 @@ async def extract_pool_events(
                 if "/" not in symbol:
                     continue
 
-                timestamp = block_timestamps.get(log.block_number, 0)
-                dt_str = datetime.fromtimestamp(timestamp, tz=UTC).isoformat() if timestamp else ""
+                timestamp = block_timestamps.get(log.block_number)
+                if not timestamp:
+                    # Block timestamp not available for this log — skip to avoid
+                    # writing epoch-zero (1970-01-01) timestamps to Parquet.
+                    decode_errors += 1
+                    continue
+                dt_str = datetime.fromtimestamp(timestamp, tz=UTC).isoformat()
 
                 tx_hash = log.transaction_hash or ""
                 if isinstance(tx_hash, bytes):

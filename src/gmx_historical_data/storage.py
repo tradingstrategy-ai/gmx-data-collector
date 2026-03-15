@@ -7,8 +7,8 @@ and fast querying.
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
@@ -149,12 +149,7 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pq.write_table(
-            table,
-            output_path,
-            compression="zstd",
-            compression_level=22,
-        )
+        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
 
         return output_path
 
@@ -223,12 +218,7 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = symbol_dir / f"{filename}.parquet"
-        pq.write_table(
-            table,
-            output_path,
-            compression="zstd",
-            compression_level=22,
-        )
+        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
 
         return output_path
 
@@ -369,11 +359,6 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pq.write_table(
-            table,
-            output_path,
-            compression="zstd",
-            compression_level=22,
-        )
+        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
 
         return output_path
