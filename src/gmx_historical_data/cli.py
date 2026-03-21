@@ -2327,6 +2327,36 @@ def export_freqtrade_command(
     console.print()
     console.print(f"[green]✓[/green] Exported to: [cyan]{output_dir / 'gmx'}[/cyan]")
 
+    # Cleanup: remove source parquet files now that feather export is complete.
+    # We only keep feather files (freqtrade format); parquets are intermediate.
+    console.print("\n[bold]Cleaning up source parquet files...[/bold]")
+
+    deleted_parquet = 0
+    candles_dir = data_dir / "candles"
+    if candles_dir.exists():
+        for pq_file in candles_dir.rglob("*.parquet"):
+            pq_file.unlink()
+            deleted_parquet += 1
+        # Remove empty dirs left behind
+        for d in sorted(candles_dir.rglob("*"), reverse=True):
+            if d.is_dir() and not any(d.iterdir()):
+                d.rmdir()
+        if deleted_parquet:
+            console.print(
+                f"[green]✓[/green] Deleted [cyan]{deleted_parquet}[/cyan] parquet files "
+                f"from [dim]{candles_dir}[/dim]"
+            )
+        else:
+            console.print(f"[dim]No parquet files found in {candles_dir}[/dim]")
+    else:
+        console.print(f"[dim]Candles dir not found: {candles_dir}[/dim]")
+
+    raw_dir = data_dir / "raw"
+    if raw_dir.exists():
+        import shutil
+        shutil.rmtree(raw_dir)
+        console.print(f"[green]✓[/green] Deleted raw/ intermediate data from [dim]{raw_dir}[/dim]")
+
 
 # Create Typer app with comprehensive help
 CLI_HELP = """
