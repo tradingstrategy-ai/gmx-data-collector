@@ -104,24 +104,17 @@ def load_and_dedup(raw_dir: Path, event_type: str) -> pl.DataFrame:
     :param event_type: Label for logging (``'funding_fee'`` or ``'claimable'``).
     :returns: Deduplicated polars DataFrame.
     """
-    dfs = []
     if not raw_dir.exists():
         console.print(f"  [yellow]Directory not found: {raw_dir}[/yellow]")
         return pl.DataFrame()
 
-    for symbol_dir in sorted(raw_dir.iterdir()):
-        if not symbol_dir.is_dir():
-            continue
-        parquet_path = symbol_dir / "data.parquet"
-        if parquet_path.exists():
-            df = pl.read_parquet(parquet_path)
-            dfs.append(df)
-
-    if not dfs:
+    # Use scan_parquet to avoid loading all per-symbol files into memory at once
+    parquet_files = sorted(raw_dir.glob("*/data.parquet"))
+    if not parquet_files:
         console.print(f"  [yellow]No {event_type} data found in {raw_dir}[/yellow]")
         return pl.DataFrame()
 
-    combined = pl.concat(dfs)
+    combined = pl.concat([pl.scan_parquet(f) for f in parquet_files]).collect()
 
     # Dedup: keep latest per (market, collateral_token, is_long, transaction_hash)
     combined = combined.sort(["block_number", "log_index"], descending=True)
@@ -169,11 +162,15 @@ def join_oracle_prices(
         )
     )
 
-    # Join
-    joined = df.join(
-        oracle,
-        on=["transaction_hash", "collateral_token"],
-        how="left",
+    # Lazy join to let Polars optimize the query plan and reduce peak memory
+    joined = (
+        df.lazy()
+        .join(
+            oracle.lazy(),
+            on=["transaction_hash", "collateral_token"],
+            how="left",
+        )
+        .collect()
     )
 
     # Compute delta_usd.  Both delta and oracle_max_price are GMX 30-decimal

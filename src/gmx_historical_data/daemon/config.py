@@ -293,12 +293,20 @@ class DaemonConfig:
         # Optional - output directory
         output_dir = Path(os.getenv("OUTPUT_DIR", "./data"))
 
-        # Optional - timeframe concurrency
-        concurrency_str = os.getenv("TIMEFRAME_CONCURRENCY", "6")
-        try:
-            timeframe_concurrency = int(concurrency_str)
-        except ValueError:
-            raise ValueError(f"TIMEFRAME_CONCURRENCY must be an integer, got: {concurrency_str}")
+        # Optional - timeframe concurrency (auto-tuned from system resources if not set)
+        concurrency_str = os.getenv("TIMEFRAME_CONCURRENCY")
+        if concurrency_str is None:
+            from gmx_historical_data.resource_limiter import get_resource_limits
+
+            resource_limits = get_resource_limits()
+            timeframe_concurrency = resource_limits["timeframe_concurrency"]
+        else:
+            try:
+                timeframe_concurrency = int(concurrency_str)
+            except ValueError:
+                raise ValueError(
+                    f"TIMEFRAME_CONCURRENCY must be an integer, got: {concurrency_str}"
+                )
 
         # Optional - health check port
         port_str = os.getenv("HEALTH_CHECK_PORT", "8080")

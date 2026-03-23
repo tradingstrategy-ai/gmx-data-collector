@@ -326,35 +326,30 @@ class HyperSyncCollector:
 
         raise last_exception
 
-    async def collect_events(
+    async def collect_events_streaming(
         self,
         aggregator_addresses: list[str],
         start_block: int = 0,
         end_block: int | None = None,
         batch_size: int = 10000,
         max_retries: int = 5,
-    ) -> list[list[AnswerUpdatedEvent]]:
-        """Collect AnswerUpdated events from HyperSync.
+    ):
+        """Collect AnswerUpdated events as an async generator yielding batches.
 
-        Returns batches of events.
+        Memory-efficient alternative to :meth:`collect_events` — yields batches
+        one at a time instead of accumulating all batches in a list.
 
         :param aggregator_addresses: List of aggregator contract addresses
         :param start_block: Starting block number
         :param end_block: Ending block number (None = latest)
         :param batch_size: Number of events to yield per batch
         :param max_retries: Maximum number of retry attempts for failed requests
-        :return: List of batches of decoded AnswerUpdatedEvents
+        :yields: Batches of decoded AnswerUpdatedEvents
         """
         query = self.build_query(aggregator_addresses, start_block, end_block)
-
-        # Execute query with retry logic
         response = await self._execute_query_with_retry(query, max_retries=max_retries)
 
-        # Process logs
-        all_batches = []
         batch = []
-
-        # Create a mapping of block_number -> timestamp for efficient lookup
         block_timestamps = (
             {block.number: block.timestamp for block in response.data.blocks}
             if response.data.blocks
@@ -362,7 +357,6 @@ class HyperSyncCollector:
         )
 
         for log in response.data.logs:
-            # Convert log to dict format expected by decoder
             log_data = {
                 "block_number": log.block_number,
                 "block_timestamp": block_timestamps.get(log.block_number, 0),
@@ -378,16 +372,40 @@ class HyperSyncCollector:
                 batch.append(event)
 
                 if len(batch) >= batch_size:
-                    all_batches.append(batch)
+                    yield batch
                     batch = []
             except (ValueError, KeyError, IndexError) as e:
                 print(f"Warning: Failed to decode event: {e}")
                 continue
 
-        # Add remaining events
         if batch:
-            all_batches.append(batch)
+            yield batch
 
+    async def collect_events(
+        self,
+        aggregator_addresses: list[str],
+        start_block: int = 0,
+        end_block: int | None = None,
+        batch_size: int = 10000,
+        max_retries: int = 5,
+    ) -> list[list[AnswerUpdatedEvent]]:
+        """Collect AnswerUpdated events from HyperSync.
+
+        Returns batches of events. For memory-efficient streaming, use
+        :meth:`collect_events_streaming` instead.
+
+        :param aggregator_addresses: List of aggregator contract addresses
+        :param start_block: Starting block number
+        :param end_block: Ending block number (None = latest)
+        :param batch_size: Number of events to yield per batch
+        :param max_retries: Maximum number of retry attempts for failed requests
+        :return: List of batches of decoded AnswerUpdatedEvents
+        """
+        all_batches = []
+        async for batch in self.collect_events_streaming(
+            aggregator_addresses, start_block, end_block, batch_size, max_retries
+        ):
+            all_batches.append(batch)
         return all_batches
 
     async def find_first_event_block(

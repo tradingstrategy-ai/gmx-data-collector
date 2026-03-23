@@ -20,6 +20,7 @@ Key Design Decisions:
 """
 
 import asyncio
+import gc
 import heapq
 import logging
 import random
@@ -89,6 +90,15 @@ class ArbitrumMockProvider(BaseProvider):
         """Mock connection check."""
         return True
 
+
+# Memory management: flush events to callback every N events to bound memory usage.
+# Auto-tuned from system resources; falls back to 500K (empirically safe — OOM at ~3.5M).
+try:
+    from gmx_historical_data.resource_limiter import get_resource_limits as _get_limits
+
+    FLUSH_EVERY = _get_limits()["flush_every"]
+except Exception:
+    FLUSH_EVERY = 500_000
 
 # Retry configuration defaults
 DEFAULT_MAX_RETRIES = 5
@@ -503,6 +513,7 @@ class OraclePriceCollector:
         total_chunks: int,
         progress_callback: Callable[[str], None] | None = None,
         stats: CollectionStats | None = None,
+        flush_callback: Callable[[list["OraclePriceEvent"]], None] | None = None,
     ) -> tuple[list[OraclePriceEvent], dict[int, int]]:
         """Collect oracle events with retry logic for HyperSync failures.
 
@@ -516,6 +527,10 @@ class OraclePriceCollector:
         :param total_chunks: Total number of chunks for progress calculation
         :param progress_callback: Optional callback for progress updates
         :param stats: Optional CollectionStats for tracking errors
+        :param flush_callback: Optional callback to flush events to disk when
+            memory threshold is reached. When provided, events are flushed
+            every ``FLUSH_EVERY`` events and the returned events list contains
+            only the un-flushed remainder.
         :return: Tuple of (events list, block_timestamps dict)
         """
 
@@ -528,6 +543,7 @@ class OraclePriceCollector:
                 total_chunks,
                 progress_callback,
                 stats,
+                flush_callback,
             )
 
         return await retry_with_backoff(
@@ -548,6 +564,7 @@ class OraclePriceCollector:
         total_chunks: int,
         progress_callback: Callable[[str], None] | None = None,
         stats: CollectionStats | None = None,
+        flush_callback: Callable[[list["OraclePriceEvent"]], None] | None = None,
     ) -> tuple[list[OraclePriceEvent], dict[int, int]]:
         """Collect oracle events for a single block range chunk using streaming API.
 
@@ -561,11 +578,17 @@ class OraclePriceCollector:
         :param total_chunks: Total number of chunks for progress calculation
         :param progress_callback: Optional callback for progress updates
         :param stats: Optional CollectionStats for tracking errors
-        :return: Tuple of (events list, block_timestamps dict)
+        :param flush_callback: Optional callback to flush events to disk when
+            memory threshold is reached. Events are flushed every
+            ``FLUSH_EVERY`` events and the list is cleared to free memory.
+        :return: Tuple of (events list, block_timestamps dict). When
+            flush_callback is provided, the events list contains only the
+            un-flushed remainder.
         """
         events = []
         block_timestamps = {}
         total_logs = 0
+        total_flushed = 0
         last_log_time = time.time()
         current_block = chunk_start
 
@@ -606,6 +629,17 @@ class OraclePriceCollector:
                     events.extend(batch_events)
                     total_logs += len(batch_events)
 
+                # Flush events to callback when memory threshold reached
+                if flush_callback is not None and len(events) >= FLUSH_EVERY:
+                    logger.info(
+                        f"[Chunk {chunk_id}] Flushing {len(events):,} events "
+                        f"at block {current_block:,} to bound memory"
+                    )
+                    flush_callback(events)
+                    total_flushed += len(events)
+                    events = []
+                    gc.collect()
+
                 # Log progress every 5 seconds
                 now = time.time()
                 if now - last_log_time >= 5.0:
@@ -614,10 +648,12 @@ class OraclePriceCollector:
                         if chunk_end > chunk_start
                         else 100
                     )
+                    in_memory = len(events)
                     msg = (
                         f"[Chunk {chunk_id}/{total_chunks}] "
                         f"Block {current_block:,} / {chunk_end:,} "
                         f"({chunk_progress:.1f}%) - {total_logs} events found"
+                        f" (flushed: {total_flushed:,}, in-memory: {in_memory:,})"
                     )
                     logger.info(msg)
                     if progress_callback:
@@ -638,18 +674,27 @@ class OraclePriceCollector:
         token_addresses: list[str] | None = None,
         concurrency: int = 4,
         progress_callback: Callable[[str], None] | None = None,
+        flush_callback: Callable[[list["OraclePriceEvent"]], None] | None = None,
     ) -> list[OraclePriceEvent]:
         """Collect oracle price events from HyperSync with parallel chunk processing.
 
         Splits the block range into chunks and processes them concurrently
         for faster collection of large historical ranges.
 
+        When ``flush_callback`` is provided, events are flushed to the callback
+        every ``FLUSH_EVERY`` events during collection **and** after each chunk
+        completes, bounding peak memory to O(FLUSH_EVERY) instead of O(all_events).
+        The returned list contains only un-flushed remainder events.
+
         :param start_block: Starting block number
         :param end_block: Ending block number (None = latest)
         :param token_addresses: Optional filter for specific token addresses
         :param concurrency: Number of parallel chunks to process (default: 4)
         :param progress_callback: Optional callback for progress updates
-        :return: List of parsed oracle price events
+        :param flush_callback: Optional callback to flush events incrementally.
+            When provided, chunks are processed sequentially and events are
+            flushed during and after each chunk to bound memory usage.
+        :return: List of parsed oracle price events (remainder if flush_callback used)
         """
         # Get current block if end_block not specified (using HyperSync, no RPC needed)
         if end_block is None:
@@ -685,8 +730,18 @@ class OraclePriceCollector:
                 total_chunks=1,
                 progress_callback=progress_callback,
                 stats=stats,
+                flush_callback=flush_callback,
             )
-            stats.total_events = len(events)
+
+            # Flush any remaining events
+            if flush_callback is not None and events:
+                flush_callback(events)
+                stats.total_events += len(events)
+                events = []
+                gc.collect()
+            else:
+                stats.total_events = len(events)
+
             stats.chunks_processed = 1
 
             # Log summary with error details if any
@@ -702,27 +757,59 @@ class OraclePriceCollector:
         chunk_size = total_blocks // concurrency
         chunks = []
         for i in range(concurrency):
-            chunk_start = start_block + (i * chunk_size)
-            chunk_end = (
-                start_block + ((i + 1) * chunk_size) - 1 if i < concurrency - 1 else end_block
-            )
-            chunks.append((chunk_start, chunk_end))
+            cs = start_block + (i * chunk_size)
+            ce = start_block + ((i + 1) * chunk_size) - 1 if i < concurrency - 1 else end_block
+            chunks.append((cs, ce))
 
-        logger.info(f"Splitting into {len(chunks)} parallel chunks of ~{chunk_size:,} blocks each")
+        logger.info(f"Splitting into {len(chunks)} chunks of ~{chunk_size:,} blocks each")
 
-        # Process chunks in parallel (each chunk gets its own stats instance)
+        # When flush_callback is provided, process chunks sequentially to bound
+        # memory — each chunk flushes during collection and its remainder is
+        # flushed after completion. The storage layer handles sorting per-symbol.
+        if flush_callback is not None:
+            chunk_stats = [CollectionStats() for _ in chunks]
+            for i, (cs, ce) in enumerate(chunks):
+                chunk_events, _ = await self._collect_chunk_with_retry(
+                    cs,
+                    ce,
+                    token_addresses,
+                    chunk_id=i + 1,
+                    total_chunks=len(chunks),
+                    progress_callback=progress_callback,
+                    stats=chunk_stats[i],
+                    flush_callback=flush_callback,
+                )
+                # Flush remainder from this chunk
+                if chunk_events:
+                    flush_callback(chunk_events)
+                    stats.total_events += len(chunk_events)
+                    del chunk_events
+                gc.collect()
+
+            # Aggregate stats
+            stats.chunks_processed = len(chunks)
+            for cs_stat in chunk_stats:
+                stats.failed_events += cs_stat.failed_events
+                for failure in cs_stat.first_failures:
+                    if len(stats.first_failures) < stats.max_failures_to_log:
+                        stats.first_failures.append(failure)
+
+            logger.info(stats.summary())
+            return []
+
+        # No flush_callback — original parallel path: accumulate all in memory
         chunk_stats = [CollectionStats() for _ in chunks]
         tasks = [
             self._collect_chunk_with_retry(
-                chunk_start,
-                chunk_end,
+                cs,
+                ce,
                 token_addresses,
                 chunk_id=i + 1,
                 total_chunks=len(chunks),
                 progress_callback=progress_callback,
                 stats=chunk_stats[i],
             )
-            for i, (chunk_start, chunk_end) in enumerate(chunks)
+            for i, (cs, ce) in enumerate(chunks)
         ]
 
         results = await asyncio.gather(*tasks)
@@ -734,13 +821,18 @@ class OraclePriceCollector:
         # heapq.merge efficiently merges pre-sorted iterables
         all_events = list(heapq.merge(*chunk_events, key=lambda e: (e.block_number, e.log_index)))
 
+        # Free chunk references
+        del chunk_events
+        del results
+        gc.collect()
+
         # Aggregate stats from all chunks
         stats.total_events = len(all_events)
         stats.chunks_processed = len(chunks)
-        for cs in chunk_stats:
-            stats.failed_events += cs.failed_events
+        for cs_stat in chunk_stats:
+            stats.failed_events += cs_stat.failed_events
             # Collect first failures from each chunk
-            for failure in cs.first_failures:
+            for failure in cs_stat.first_failures:
                 if len(stats.first_failures) < stats.max_failures_to_log:
                     stats.first_failures.append(failure)
 

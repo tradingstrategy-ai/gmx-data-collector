@@ -81,7 +81,7 @@ class CheckpointManager:
             with open(checkpoint_path) as f:
                 data = json.load(f)
                 return Checkpoint(**data)
-        except (json.JSONDecodeError, TypeError, KeyError) as e:
+        except (json.JSONDecodeError, TypeError, KeyError, OSError) as e:
             print(f"Warning: Failed to load checkpoint for {symbol}: {e}")
             return None
 

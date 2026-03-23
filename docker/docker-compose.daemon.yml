@@ -12,6 +12,10 @@ services:
       # Mount data directory for persistent storage
       - ../data:/app/data
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 2g
     # Uncomment if implementing HTTP health endpoint
     # ports:
     #   - "${HEALTH_CHECK_PORT:-8080}:8080"

@@ -48,6 +48,7 @@ EXAMPLE:
 """
 
 import asyncio
+import gc
 import logging
 import signal
 import sys
@@ -412,12 +413,14 @@ class GMXPeriodicCollector:
                 # Save if not dry run
                 if not self.config.dry_run:
                     self.storage.save_candles(merged, timeframe, symbol)
+                del merged
 
                 candles_by_timeframe[timeframe] = len(ohlcv)
 
             except Exception as e:
                 logger.warning(f"Oracle fallback aggregation failed for {symbol} {timeframe}: {e}")
 
+        gc.collect()
         return candles_by_timeframe
 
     async def _collect_non_chainlink_markets(self) -> dict[str, int]:
@@ -489,10 +492,12 @@ class GMXPeriodicCollector:
             f"[dim]Collected {len(events):,} oracle events up to block {self._last_oracle_block:,}[/dim]"
         )
 
-        # Group events by token
+        # Group events by token, then release the flat list to free memory
         events_by_token: dict[str, list] = defaultdict(list)
         for event in events:
             events_by_token[event.token.lower()].append(event)
+        del events
+        gc.collect()
 
         # Aggregate to OHLCV per symbol
         results: dict[str, int] = {}
@@ -560,6 +565,10 @@ class GMXPeriodicCollector:
 
                     except Exception as e:
                         logger.error(f"Failed to aggregate {symbol} {timeframe}: {e}")
+
+                # Release per-token events after aggregation
+                del token_events
+                gc.collect()
 
                 if symbol_candles > 0:
                     results[symbol] = symbol_candles
@@ -691,6 +700,7 @@ class GMXPeriodicCollector:
                         failed += 1
 
                 progress.update(task, advance=1)
+                gc.collect()
 
         # End cycle tracking
         self.health_monitor.end_cycle(total_symbols=len(symbols))
@@ -834,6 +844,10 @@ class GMXPeriodicCollector:
 def main() -> None:
     """Main entry point for the periodic collector daemon."""
     try:
+        from gmx_historical_data.resource_limiter import apply_nice
+
+        apply_nice()
+
         # Load configuration from environment
         config = DaemonConfig.from_env()
 
