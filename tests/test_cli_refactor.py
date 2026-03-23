@@ -1,7 +1,5 @@
 """Smoke tests for CLI refactor helpers."""
 
-import pytest
-
 from gmx_historical_data.cli import _filter_and_categorize_symbols
 
 

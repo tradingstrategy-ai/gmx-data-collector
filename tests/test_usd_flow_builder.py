@@ -1,7 +1,6 @@
 """Tests for USD funding flow builder functions."""
 
 import polars as pl
-import pytest
 
 
 class TestBuildSingleTokenSet:
@@ -160,8 +159,8 @@ class TestBuildUsdFlows:
 
         result = build_usd_flows(ff, cf)
         assert len(result) == 1
-        assert result["is_long"][0] == True
-        assert result["is_long_cf"][0] == False
+        assert result["is_long"][0] == True  # noqa: E712 (numpy bool)
+        assert result["is_long_cf"][0] == False  # noqa: E712 (numpy bool)
         # longs pay: long_funding_rate = funding_rate_ff
         assert result["long_funding_rate"][0] == result["funding_rate_ff"][0]
 

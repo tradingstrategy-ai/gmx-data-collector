@@ -1,8 +1,7 @@
 """Tests for RPC configuration parsing and fallback URL handling."""
 
-import os
 import pytest
-from pathlib import Path
+
 from gmx_historical_data.config import CollectionConfig
 from gmx_historical_data.daemon.config import DaemonConfig
 

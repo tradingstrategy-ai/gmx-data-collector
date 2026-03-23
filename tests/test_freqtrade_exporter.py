@@ -4,11 +4,10 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.feather as feather
 import pytest
 
-from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+from gmx_historical_data.storage import ParquetStorage
 
 
 @pytest.fixture
@@ -55,7 +54,7 @@ def test_export_creates_freqtrade_format(sample_storage):
     """Test export creates files with correct freqtrade futures format."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result = exporter.export()
+        exporter.export()
 
         # Check files created in gmx/futures subdirectory
         futures_dir = Path(output_dir) / "gmx" / "futures"
@@ -76,7 +75,7 @@ def test_export_specific_symbols(sample_storage):
     """Test export filters by symbol."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result = exporter.export(symbols=["ETH"])
+        exporter.export(symbols=["ETH"])
 
         futures_dir = Path(output_dir) / "gmx" / "futures"
         assert (futures_dir / "ETH_USDC_USDC-1h-futures.feather").exists()
@@ -87,7 +86,7 @@ def test_export_specific_timeframes(sample_storage):
     """Test export filters by timeframe."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result = exporter.export(timeframes=["1h"])
+        exporter.export(timeframes=["1h"])
 
         futures_dir = Path(output_dir) / "gmx" / "futures"
         assert (futures_dir / "ETH_USDC_USDC-1h-futures.feather").exists()

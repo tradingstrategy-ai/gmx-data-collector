@@ -1,8 +1,10 @@
 """Integration test for hybrid data collection."""
 
-import pytest
 import os
 from pathlib import Path
+
+import pytest
+
 from gmx_historical_data.cli import DataCollector
 from gmx_historical_data.config import CollectionConfig
 
@@ -42,7 +44,7 @@ async def test_hybrid_collection_eth():
     # Should extend to recent data
     assert time_range_days > 180, f"Expected >180 days, got {time_range_days}"
 
-    print(f"\n✓ ETH hybrid collection successful")
+    print("\n✓ ETH hybrid collection successful")
     print(f"  Coverage: {earliest} → {latest} ({time_range_days} days)")
     print(f"  1h candles: {len(df_1h):,}")
 
@@ -62,6 +64,6 @@ def test_gmx_v2_genesis_constant():
     # Verify timestamp corresponds to Aug 2023
     import datetime
 
-    dt = datetime.datetime.fromtimestamp(GMX_V2_GENESIS_TIMESTAMP, tz=datetime.timezone.utc)
+    dt = datetime.datetime.fromtimestamp(GMX_V2_GENESIS_TIMESTAMP, tz=datetime.UTC)
     assert dt.year == 2023
     assert dt.month == 8

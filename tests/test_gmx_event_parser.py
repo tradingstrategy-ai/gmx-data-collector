@@ -2,10 +2,10 @@
 
 import pytest
 from web3 import Web3
+
 from gmx_historical_data.gmx_event_parser import (
-    GMXPositionEvent,
-    parse_position_event,
     get_event_name_hash,
+    parse_position_event,
 )
 
 

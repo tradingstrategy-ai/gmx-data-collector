@@ -15,7 +15,7 @@ def test_find_chainlink_symbol_direct_match():
 
 def test_find_chainlink_symbol_manual_override():
     """Test manual override mapping."""
-    assert find_chainlink_symbol("WBTC.b") == "BTC"
+    assert find_chainlink_symbol("WBTC.b") == "WBTC"
     assert find_chainlink_symbol("WETH") == "ETH"
     assert find_chainlink_symbol("USDC.e") == "USDC"
 
@@ -43,9 +43,9 @@ def test_get_feed_address_for_gmx_symbol():
     eth_feed = get_feed_address_for_gmx_symbol("ETH")
     assert eth_feed == "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
 
-    # Via override
+    # Via override: WBTC.b -> WBTC (separate Chainlink feed from BTC)
     wbtc_feed = get_feed_address_for_gmx_symbol("WBTC.b")
-    assert wbtc_feed == "0x6ce185860a4963106506C203335A2910413708e9"
+    assert wbtc_feed == "0xd0C7101eACbB49F3deCcCc166d238410D6D46d57"
 
     # Not found
     assert get_feed_address_for_gmx_symbol("NOTREAL") is None

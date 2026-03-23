@@ -51,25 +51,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
-from eth_hash.auto import keccak
-from eth_utils import to_hex
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
-from rich.table import Table
-from web3 import Web3
 from eth_defi.gmx.api import GMXAPI
 from eth_defi.gmx.config import GMXConfig
-from gmx_historical_data.market_registry import fetch_markets
-from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
-
-import hypersync
+from eth_hash.auto import keccak
+from eth_utils import to_hex
+from extract_open_interest import (
+    _stream_with_retry,
+    decode_event_log_data,
+)
 from hypersync import (
     BlockField,
     ClientConfig,
@@ -79,11 +68,19 @@ from hypersync import (
     LogSelection,
     Query,
 )
-
-from extract_open_interest import (
-    decode_event_log_data,
-    _stream_with_retry,
+from rich.console import Console
+from rich.panel import Panel
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeElapsedColumn,
 )
+from web3 import Web3
+
+from gmx_historical_data.market_registry import fetch_markets
+from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
 
 try:
     import polars as pl

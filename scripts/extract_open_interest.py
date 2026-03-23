@@ -99,6 +99,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
+
 from gmx_historical_data.market_registry import fetch_markets as _fetch_markets_cached
 
 # Optional imports

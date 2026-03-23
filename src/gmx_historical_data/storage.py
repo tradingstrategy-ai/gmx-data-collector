@@ -149,7 +149,9 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
 
@@ -176,14 +178,14 @@ class ParquetStorage:
                 return pd.DataFrame()
             return pd.read_parquet(partition_file)
         else:
-            # Read all partitions
+            # Read all partitions using Polars streaming scan for memory efficiency.
+            # This avoids loading N separate DataFrames into memory simultaneously.
             parquet_files = list(symbol_dir.glob("partition=*/data.parquet"))
             if not parquet_files:
                 return pd.DataFrame()
 
-            # Read and concatenate all partitions
-            dfs = [pd.read_parquet(f) for f in parquet_files]
-            return pd.concat(dfs, ignore_index=True)
+            combined = pl.concat([pl.scan_parquet(f) for f in parquet_files]).collect()
+            return combined.to_pandas()
 
     def save_candles(
         self,
@@ -218,7 +220,9 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = symbol_dir / f"{filename}.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
 
@@ -359,6 +363,8 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path

@@ -96,9 +96,7 @@ def build_oracle_price_dataframe(
 
     df = pl.DataFrame(
         {
-            "timestamp": [
-                pd.Timestamp(e.block_timestamp, unit="s", tz="UTC") for e in events
-            ],
+            "timestamp": [pd.Timestamp(e.block_timestamp, unit="s", tz="UTC") for e in events],
             "price": [(e.min_price + e.max_price) / 2 / divisor for e in events],
             "original_order": list(range(len(events))),
         }
@@ -132,13 +130,17 @@ def resample_oracle_price_dataframe(
     polars_tf = _PANDAS_TO_POLARS_TIMEFRAME[timeframe]
     df = pl.from_pandas(price_df)
 
-    ohlcv = df.sort("timestamp").group_by_dynamic("timestamp", every=polars_tf).agg(
-        [
-            pl.first("price").alias("open"),
-            pl.max("price").alias("high"),
-            pl.min("price").alias("low"),
-            pl.last("price").alias("close"),
-        ]
+    ohlcv = (
+        df.sort("timestamp")
+        .group_by_dynamic("timestamp", every=polars_tf)
+        .agg(
+            [
+                pl.first("price").alias("open"),
+                pl.max("price").alias("high"),
+                pl.min("price").alias("low"),
+                pl.last("price").alias("close"),
+            ]
+        )
     )
 
     ohlcv = ohlcv.with_columns(pl.lit(symbol).alias("symbol"))

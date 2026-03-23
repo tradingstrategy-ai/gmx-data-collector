@@ -4,10 +4,12 @@ Tests progressive rate limiting and HyperSync API key rotation.
 """
 
 import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from gmx_historical_data.oracle_price_collector import retry_with_backoff
+
+import pytest
+
 from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
+from gmx_historical_data.oracle_price_collector import retry_with_backoff
 
 
 @pytest.mark.asyncio

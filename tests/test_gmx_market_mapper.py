@@ -2,6 +2,7 @@
 
 import pytest
 from web3 import Web3
+
 from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
 
 

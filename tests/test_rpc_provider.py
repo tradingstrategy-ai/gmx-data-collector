@@ -1,8 +1,9 @@
 """Tests for RPC provider with fallback support."""
 
-import pytest
 from unittest.mock import Mock, patch
-from web3 import Web3
+
+import pytest
+
 from gmx_historical_data.rpc_provider import MultiRPCProvider, RPCProviderError
 
 

@@ -1,6 +1,7 @@
 """Command-line interface for GMX historical data collection."""
 
 import asyncio
+import gc
 import logging
 import traceback
 from collections import defaultdict
@@ -309,16 +310,23 @@ class DataCollector:
             if not existing.empty:
                 dfs = [existing, *dfs]
 
-        pl_frames = [
-            pl.from_pandas(df).with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
-            for df in dfs
-        ]
+        # Convert one at a time, releasing each pandas DataFrame to bound memory
+        pl_frames = []
+        for i in range(len(dfs)):
+            pl_frames.append(
+                pl.from_pandas(dfs[i]).with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
+            )
+            dfs[i] = None  # Release pandas reference
         combined = pl.concat(pl_frames)
+        del pl_frames
         combined = combined.unique(subset=["timestamp"], keep="last", maintain_order=False)
         combined = combined.sort("timestamp")
 
         self.storage.save_candles(combined.to_pandas(), timeframe, symbol)
-        return len(combined)
+        count = len(combined)
+        del combined
+        gc.collect()
+        return count
 
     def _save_symbol_checkpoint(self, symbol: str) -> None:
         """Save a completion checkpoint for a symbol after successful collection.
@@ -1037,10 +1045,17 @@ class DataCollector:
                 f"with {key_rotator.total_keys} key(s)"
             )
 
-        # Initialize block-timestamp cache
+        # Initialize block-timestamp cache (auto-tuned workers from system resources)
         console.print("\n[bold]Initializing block-timestamp cache...[/bold]")
         cache_path = self.config.output_dir / ".cache" / "block_timestamps.parquet"
-        block_cache = BlockTimestampCache(cache_path, self.web3)
+        try:
+            from gmx_historical_data.resource_limiter import get_resource_limits
+
+            _limits = get_resource_limits()
+            _cache_workers = _limits["block_cache_workers"]
+        except Exception:
+            _cache_workers = 32
+        block_cache = BlockTimestampCache(cache_path, self.web3, fetch_workers=_cache_workers)
         # Pre-build cache before parallel execution to avoid concurrent RPC calls
         block_cache._ensure_cache_loaded()
 
@@ -1449,6 +1464,11 @@ def cli(
         "--force",
         help="Ignore checkpoints and re-collect all symbols from scratch",
     ),
+    nice: bool = typer.Option(
+        False,
+        "--nice",
+        help="Lower process priority (nice +10) and auto-tune concurrency based on system resources",
+    ),
 ) -> None:
     """Collect GMX historical price data.
 
@@ -1544,6 +1564,7 @@ def cli(
             concurrency=concurrency,
             default_mode=default_mode,
             force=force,
+            nice=nice,
         )
 
 
@@ -1562,8 +1583,20 @@ def _cli_impl(
     concurrency: int,
     default_mode: bool,
     force: bool = False,
+    nice: bool = False,
 ) -> None:
     """Internal implementation of CLI logic."""
+    if nice:
+        from gmx_historical_data.resource_limiter import apply_nice, get_resource_limits
+
+        apply_nice()
+        resource_limits = get_resource_limits()
+
+        # Auto-tune concurrency from system resources if user didn't override (default is 2)
+        if concurrency == 2:
+            concurrency = resource_limits["concurrency"]
+            logger.info(f"Auto-tuned concurrency to {concurrency} based on system resources")
+
     # Validate --default flag
     if default_mode:
         if use_events:
