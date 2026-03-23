@@ -4,16 +4,16 @@ This module tests the BlockTimestampCache which provides efficient
 timestamp↔block conversions using sampled blocks and linear interpolation.
 """
 
+from unittest.mock import MagicMock, Mock
+
 import pandas as pd
 import pytest
-from pathlib import Path
-from unittest.mock import Mock, MagicMock
 from web3 import Web3
+
 from gmx_historical_data.block_timestamp_cache import BlockTimestampCache
 from gmx_historical_data.config import (
-    GMX_V2_GENESIS_BLOCK,
     BLOCK_SAMPLE_INTERVAL,
-    CACHE_STALE_THRESHOLD,
+    GMX_V2_GENESIS_BLOCK,
 )
 
 
@@ -261,7 +261,7 @@ def test_stale_cache_auto_updates(mock_web3, cache_file):
 
     # Call conversion - should detect staleness and update
     base_timestamp = 1691366400
-    block = cache2.get_block_for_timestamp(base_timestamp)
+    cache2.get_block_for_timestamp(base_timestamp)
 
     # Verify cache was updated to near current block
     assert cache2.cache_df is not None

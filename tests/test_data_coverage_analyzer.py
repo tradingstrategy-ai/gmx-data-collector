@@ -7,12 +7,10 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 
-from gmx_historical_data.storage import ParquetStorage
 from gmx_historical_data.data_coverage_analyzer import (
     DataCoverageAnalyzer,
-    SymbolCoverage,
-    TimeframeCoverage,
 )
+from gmx_historical_data.storage import ParquetStorage
 
 
 @pytest.fixture

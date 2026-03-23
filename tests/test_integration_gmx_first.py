@@ -1,13 +1,14 @@
 """Integration test for GMX-first data collection."""
 
-import pytest
 import os
-from pathlib import Path
+from datetime import UTC
+
 import pandas as pd
-from datetime import timezone
+import pytest
+
 from gmx_historical_data import (
-    GMXTokenDiscovery,
     DataGapAnalyzer,
+    GMXTokenDiscovery,
     find_chainlink_symbol,
     get_feed_address_for_gmx_symbol,
 )
@@ -31,7 +32,7 @@ def test_gmx_first_flow():
     assert feed_address == "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
 
     # Step 3: Test gap analysis (mock GMX data)
-    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
+    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=UTC)
     gmx_df = pd.DataFrame(
         {
             "timestamp": dates,
@@ -45,7 +46,7 @@ def test_gmx_first_flow():
     assert backfill_start == 0
     assert backfill_end is not None
 
-    print(f"\nGMX-first flow test passed:")
+    print("\nGMX-first flow test passed:")
     print(f"  - Discovered {len(symbols)} GMX tokens")
     print(f"  - Found Chainlink feed for ETH: {feed_address}")
     print(f"  - Gap analysis: backfill from block {backfill_start} to timestamp {backfill_end}")

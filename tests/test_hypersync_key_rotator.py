@@ -1,6 +1,7 @@
 """Tests for HyperSync API key rotation."""
 
 import pytest
+
 from gmx_historical_data.hypersync_key_rotator import HyperSyncKeyRotator
 
 

@@ -1,13 +1,13 @@
 """Tests for GMX event collector."""
 
 import os
+
 import pytest
-from web3 import Web3
+
 from gmx_historical_data.gmx_event_collector import (
     GMXEventCollector,
     get_position_event_hashes,
 )
-from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
 
 
 def test_get_position_event_hashes():

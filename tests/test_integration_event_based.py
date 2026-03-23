@@ -1,13 +1,14 @@
 """Integration test for event-based data collection."""
 
-import pytest
 import os
-import shutil
 from pathlib import Path
+
+import pytest
 from web3 import Web3
+
+from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_market_mapper import GMXMarketMapper
-from gmx_historical_data.event_aggregator import aggregate_events_to_ohlcv
 from gmx_historical_data.storage import ParquetStorage
 
 

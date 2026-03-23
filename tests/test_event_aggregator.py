@@ -1,11 +1,10 @@
 """Tests for event aggregation to OHLCV."""
 
-import pytest
-import pandas as pd
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
 from gmx_historical_data.event_aggregator import (
-    aggregate_events_to_ohlcv,
     GMX_USD_PRECISION,
+    aggregate_events_to_ohlcv,
 )
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
@@ -13,7 +12,7 @@ from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 def test_aggregate_events_to_ohlcv():
     """Test aggregating position events to OHLCV candles."""
     # Create mock events with different prices
-    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp())
 
     events = [
         GMXPositionEvent(
@@ -107,7 +106,7 @@ def test_aggregate_empty_events():
 
 def test_aggregate_single_event():
     """Test aggregating a single event."""
-    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp())
 
     events = [
         GMXPositionEvent(
@@ -145,7 +144,7 @@ def test_aggregate_single_event():
 
 def test_aggregate_identical_timestamps():
     """Test aggregating events with identical timestamps."""
-    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp())
 
     events = [
         GMXPositionEvent(
@@ -219,7 +218,7 @@ def test_aggregate_identical_timestamps():
 
 def test_aggregate_unsorted_events():
     """Test aggregating events that are not sorted by timestamp."""
-    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc).timestamp())
+    base_ts = int(datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC).timestamp())
 
     events = [
         # Events in reverse chronological order

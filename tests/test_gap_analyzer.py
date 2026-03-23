@@ -1,14 +1,16 @@
 """Tests for data gap analysis."""
 
+from datetime import UTC
+
 import pandas as pd
-from datetime import datetime, timezone
+
 from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 
 
 def test_calculate_gap_with_chainlink_available():
     """Test gap calculation when Chainlink feed exists."""
     # Create mock GMX data (starts 2024-07-01)
-    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
+    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=UTC)
     gmx_df = pd.DataFrame(
         {
             "timestamp": dates,
@@ -31,7 +33,7 @@ def test_calculate_gap_with_chainlink_available():
 
 def test_calculate_gap_no_chainlink():
     """Test gap when Chainlink feed doesn't exist."""
-    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=timezone.utc)
+    dates = pd.date_range("2024-07-01", "2024-12-31", freq="1h", tz=UTC)
     gmx_df = pd.DataFrame(
         {
             "timestamp": dates,
