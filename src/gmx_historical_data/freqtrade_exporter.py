@@ -266,7 +266,9 @@ class FreqtradeExporter:
             ]
         )
         df = df.drop_nulls(subset=["open"])
-        return df.sort("date").unique(subset=["date"], keep="first", maintain_order=False).sort("date")
+        return (
+            df.sort("date").unique(subset=["date"], keep="first", maintain_order=False).sort("date")
+        )
 
     def _transform_mark_price(self, df: pl.DataFrame) -> pl.DataFrame:
         """Generate mark price feather from OHLCV candle data.
