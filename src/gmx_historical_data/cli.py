@@ -1595,9 +1595,7 @@ def _cli_impl(
         # Auto-tune concurrency from system resources if user didn't override (default is 2)
         if concurrency == 2:
             concurrency = resource_limits["concurrency"]
-            logger.info(
-                f"Auto-tuned concurrency to {concurrency} based on system resources"
-            )
+            logger.info(f"Auto-tuned concurrency to {concurrency} based on system resources")
 
     # Validate --default flag
     if default_mode:

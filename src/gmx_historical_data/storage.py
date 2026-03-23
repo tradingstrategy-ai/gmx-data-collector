@@ -149,7 +149,9 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
 
@@ -182,9 +184,7 @@ class ParquetStorage:
             if not parquet_files:
                 return pd.DataFrame()
 
-            combined = pl.concat(
-                [pl.scan_parquet(f) for f in parquet_files]
-            ).collect()
+            combined = pl.concat([pl.scan_parquet(f) for f in parquet_files]).collect()
             return combined.to_pandas()
 
     def save_candles(
@@ -220,7 +220,9 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = symbol_dir / f"{filename}.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
 
@@ -361,6 +363,8 @@ class ParquetStorage:
 
         # Write to Parquet with compression
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
