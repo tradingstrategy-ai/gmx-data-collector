@@ -112,6 +112,19 @@ make export-freqtrade                     # Export candles + funding to FreqTrad
 | `TO_BLOCK` | *(latest)* | End block |
 | `MARKET` | *(all)* | Filter to a single market address |
 | `INCLUDE_DATASTORE` | *(off)* | Set to `1` to include archive RPC DataStore phase |
+| `NICE` | `nice -n 10` | OS process priority prefix — keeps the server responsive |
+
+### Resource Limiting
+
+All `make` targets run under `nice -n 10` by default, giving the OS permission to preempt the collector in favour of other services. The range is -20 (highest priority) to +19 (lowest); 0 is the system default.
+
+```bash
+# Disable (run at normal priority)
+make collect-full NICE=""
+
+# Run at even lower priority (background-only)
+make collect-full NICE="nice -n 19"
+```
 
 Tip: create a `.env` file — it is auto-loaded by the Makefile:
 
