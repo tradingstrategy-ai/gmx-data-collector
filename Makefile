@@ -27,6 +27,9 @@ CHECKPOINT_DIR ?= ./checkpoints
 # Collection options
 CONCURRENCY ?= 5
 
+# Run all commands at reduced priority to avoid saturating the server
+NICE ?= nice -n 10
+
 # Extraction options
 OUTPUT_FORMAT ?= parquet
 FROM_BLOCK ?=
@@ -116,7 +119,7 @@ define COLLECT_CMD
 	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
 	@echo ""
 	@mkdir -p $(DATA_DIR) $(LOG_DIR)
-	poetry run python -m gmx_historical_data.cli collect --$(2) \
+	$(NICE) poetry run python -m gmx_historical_data.cli collect --$(2) \
 		--output-dir $(DATA_DIR) \
 		--concurrency $(CONCURRENCY) \
 		--nice \
@@ -136,7 +139,7 @@ export-freqtrade:
 	@echo "  Output:     $(FEATHER_DIR)"
 	@echo ""
 	@mkdir -p $(FEATHER_DIR)
-	poetry run python -m gmx_historical_data.cli export-freqtrade --data-dir $(DATA_DIR) --output-dir $(FEATHER_DIR)
+	$(NICE) poetry run python -m gmx_historical_data.cli export-freqtrade --data-dir $(DATA_DIR) --output-dir $(FEATHER_DIR)
 
 # ==============================================================================
 # Open Interest Extraction
@@ -148,7 +151,7 @@ oi:
 	@echo "  Output:     $(OI_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(OI_OUTPUT_DIR) $(LOG_DIR)
-	poetry run python scripts/extract_open_interest.py \
+	$(NICE) poetry run python scripts/extract_open_interest.py \
 		--network $(NETWORK) \
 		--output-dir $(OI_OUTPUT_DIR) \
 		--output parquet \
@@ -162,7 +165,7 @@ oi-resume:
 	@echo "  Output:     $(OI_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(OI_OUTPUT_DIR) $(LOG_DIR)
-	poetry run python scripts/extract_open_interest.py \
+	$(NICE) poetry run python scripts/extract_open_interest.py \
 		--network $(NETWORK) \
 		--output-dir $(OI_OUTPUT_DIR) \
 		--output parquet \
@@ -179,7 +182,7 @@ pool-liquidity:
 	@echo "  Output:     $(POOL_LIQUIDITY_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(POOL_LIQUIDITY_OUTPUT_DIR) $(LOG_DIR)
-	poetry run python scripts/extract_pool_liquidity.py \
+	$(NICE) poetry run python scripts/extract_pool_liquidity.py \
 		--network $(NETWORK) \
 		--output-dir $(POOL_LIQUIDITY_OUTPUT_DIR) \
 		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),--from-block 120000000) \
@@ -192,7 +195,7 @@ pool-liquidity-resume:
 	@echo "  Output:     $(POOL_LIQUIDITY_OUTPUT_DIR)"
 	@echo ""
 	@mkdir -p $(POOL_LIQUIDITY_OUTPUT_DIR) $(LOG_DIR)
-	poetry run python scripts/extract_pool_liquidity.py \
+	$(NICE) poetry run python scripts/extract_pool_liquidity.py \
 		--network $(NETWORK) \
 		--output-dir $(POOL_LIQUIDITY_OUTPUT_DIR) \
 		--resume \
@@ -215,7 +218,7 @@ extract-all-resume: oi-resume pool-liquidity-resume
 # ==============================================================================
 
 define UNIFIED_CMD
-poetry run python scripts/extract_unified_funding.py \
+$(NICE) poetry run python scripts/extract_unified_funding.py \
 	--network $(NETWORK) \
 	--output-dir $(UNIFIED_OUTPUT_DIR) \
 	--output $(OUTPUT_FORMAT) \
@@ -252,7 +255,7 @@ funding-unified-resume:
 funding-unified-merge:
 	@echo "Merging existing funding rate data..."
 	@mkdir -p $(UNIFIED_OUTPUT_DIR)
-	poetry run python scripts/extract_unified_funding.py \
+	$(NICE) poetry run python scripts/extract_unified_funding.py \
 		--network $(NETWORK) \
 		--output-dir $(UNIFIED_OUTPUT_DIR) \
 		--merge-only \
@@ -264,7 +267,7 @@ funding-feather:
 	@echo "  Feather:    $(FEATHER_DIR)"
 	@echo ""
 	@mkdir -p $(FEATHER_DIR)
-	poetry run python scripts/extract_unified_funding.py \
+	$(NICE) poetry run python scripts/extract_unified_funding.py \
 		--network $(NETWORK) \
 		--output-dir $(UNIFIED_OUTPUT_DIR) \
 		--output feather \
