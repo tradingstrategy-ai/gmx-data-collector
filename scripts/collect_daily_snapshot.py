@@ -520,6 +520,15 @@ def generate_report(
         "4h": "4-hour bars",
         "1d": "days",
     }
+    # Minutes per bar for each timeframe (used to convert row count → days)
+    tf_minutes = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+        "4h": 240,
+        "1d": 1440,
+    }
     for tf in TIMEFRAMES:
         lines.append("")
         lines.append(f"## OHLCV Coverage — {tf} (rows per symbol)")
@@ -528,7 +537,13 @@ def generate_report(
             try:
                 df = pd.read_feather(f)
                 sym = f.stem.replace(f"_USDC_USDC-{tf}-futures", "")
-                lines.append(f"  {sym}: {len(df)} {tf_label.get(tf, 'rows')}")
+                count = len(df)
+                label = tf_label.get(tf, "rows")
+                days = round(count * tf_minutes.get(tf, 1) / 1440, 1)
+                if tf == "1d":
+                    lines.append(f"  {sym}: {count} {label}")
+                else:
+                    lines.append(f"  {sym}: {count} {label} ({days} days)")
             except Exception:
                 pass
 
