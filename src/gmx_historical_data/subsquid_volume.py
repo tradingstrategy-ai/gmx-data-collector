@@ -146,3 +146,5 @@ def fetch_volume_history(
 
     logger.info("Fetched %d daily volume snapshots (chain=%s)", len(history), chain)
     return history
+
+
