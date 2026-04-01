@@ -93,9 +93,7 @@ def show_volume_history(chain: str, days: int) -> None:
         console.print("[red]No history data returned.[/red]")
         return
 
-    table = Table(
-        title=f"GMX Daily Volume History — last {days} days ({chain.title()})"
-    )
+    table = Table(title=f"GMX Daily Volume History — last {days} days ({chain.title()})")
     table.add_column("Date", style="cyan", width=12)
     table.add_column("Total", justify="right", style="bold green", width=18)
     table.add_column("Margin", justify="right", style="green", width=18)
@@ -122,12 +120,8 @@ def show_volume_history(chain: str, days: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Fetch GMX trading volume from Subsquid"
-    )
-    parser.add_argument(
-        "--chain", default="arbitrum", choices=["arbitrum", "avalanche"]
-    )
+    parser = argparse.ArgumentParser(description="Fetch GMX trading volume from Subsquid")
+    parser.add_argument("--chain", default="arbitrum", choices=["arbitrum", "avalanche"])
     parser.add_argument(
         "--history",
         type=int,

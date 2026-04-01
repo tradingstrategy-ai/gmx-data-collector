@@ -68,7 +68,13 @@ def _query_subsquid(query: str, chain: str = "arbitrum", timeout: int = 30) -> d
             last_err = e
             if attempt < _MAX_RETRIES - 1:
                 wait = _RETRY_BACKOFF * (2**attempt)
-                logger.warning("Subsquid query failed (attempt %d/%d): %s — retrying in %ds", attempt + 1, _MAX_RETRIES, e, wait)
+                logger.warning(
+                    "Subsquid query failed (attempt %d/%d): %s — retrying in %ds",
+                    attempt + 1,
+                    _MAX_RETRIES,
+                    e,
+                    wait,
+                )
                 time.sleep(wait)
     raise last_err  # type: ignore[misc]
 
@@ -146,5 +152,3 @@ def fetch_volume_history(
 
     logger.info("Fetched %d daily volume snapshots (chain=%s)", len(history), chain)
     return history
-
-

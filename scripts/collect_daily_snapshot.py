@@ -536,7 +536,9 @@ def generate_report(
         f"- APY entries: {apy_count}",
         f"- Volume entries: {volume_count} markets",
         f"- Total OI (all markets): ${total_oi_usd:,.0f}",
-        f"- Total 24h Volume: ${sum(volume_data.values()):,.0f}" if volume_data else "- Total 24h Volume: N/A",
+        f"- Total 24h Volume: ${sum(volume_data.values()):,.0f}"
+        if volume_data
+        else "- Total 24h Volume: N/A",
         "",
         "## Data Files",
         f"- Snapshot parquet files: {len(snapshot_files)} days",
