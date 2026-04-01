@@ -249,10 +249,12 @@ user_data/
 │   │   ├── raw/{SYMBOL}/data.parquet         # Raw OI events (every position change)
 │   │   ├── snapshots/{SYMBOL}/daily.parquet  # End-of-day OI snapshots
 │   │   └── checkpoints/
-│   └── pool_liquidity/arbitrum/
-│       ├── pool_liquidity_raw.parquet        # Raw PoolAmountUpdated events
-│       ├── pool_liquidity_daily.parquet      # Daily pool depth snapshots
-│       └── checkpoints/
+│   ├── pool_liquidity/arbitrum/
+│   │   ├── pool_liquidity_raw.parquet        # Raw PoolAmountUpdated events
+│   │   ├── pool_liquidity_daily.parquet      # Daily pool depth snapshots
+│   │   └── checkpoints/
+│   └── volumes/
+│       └── {YYYY-MM-DD}.parquet              # Daily 24h volume per market
 ├── funding/arbitrum/
 │   ├── raw/
 │   │   ├── funding/{SYMBOL}/partition=0/data.parquet
@@ -267,6 +269,27 @@ user_data/
     ├── raw/borrowing/{SYMBOL}/partition=0/data.parquet
     ├── rates/{SYMBOL}/1h.parquet
     └── checkpoints/
+```
+
+### Data Note: OHLC vs OHLCV
+
+Candle data is **OHLC only** (no per-candle volume). Both data sources — GMX API candlesticks and Chainlink oracle price events — provide price data without trade volume. The "V" in OHLCV would require processing on-chain trade events (PositionIncrease/PositionDecrease) at per-candle granularity, which is not currently implemented.
+
+The daily volume snapshots collected from Subsquid (stored in `data/gmx/volumes/`) are **aggregate 24h trading volume per market**, useful for market filtering and reporting but not for per-candle volume.
+
+### Volume Data
+
+Daily 24h trading volume per market is collected from the Subsquid GraphQL indexer. To view current volume data:
+
+```bash
+# Show 24h volume for all markets (with symbol names)
+poetry run python scripts/fetch_volume.py
+
+# Include 7-day aggregate volume history
+poetry run python scripts/fetch_volume.py --history 7
+
+# Avalanche chain
+poetry run python scripts/fetch_volume.py --chain avalanche
 ```
 
 ## Funding Rate Extraction

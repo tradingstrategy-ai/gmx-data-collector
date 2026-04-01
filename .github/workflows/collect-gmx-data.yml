@@ -60,10 +60,9 @@ jobs:
       - name: Install Python dependencies
         run: |
           pip install pandas pyarrow rich requests eth-utils "web3-ethereum-defi>=0.39.0"
-          pip install -e code/
 
       - name: Collect daily snapshot
-        run: python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
+        run: PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
 
       - name: Show report in job summary
         if: always()
