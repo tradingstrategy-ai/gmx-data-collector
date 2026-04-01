@@ -10,16 +10,18 @@ Captures:
 - Pool Liquidity (pool amounts, available liquidity)
 - Funding & Borrowing rates
 - Swap-only pool data
-- Ticker data (bid/ask prices, volume)
+- Ticker data (bid/ask prices)
 - APY data (yield across 7 periods: 1d, 7d, 30d, 90d, 180d, 1y, total)
+- 24h trading volume per market (from Subsquid GraphQL)
 
 Output follows the existing ``user_data/`` layout::
 
     user_data/data/gmx/
     ├── futures/{SYM}_USDC_USDC-{tf}-futures.feather  # OHLCV (appended)
     ├── snapshots/{date}.parquet                       # All markets snapshot
-    ├── tickers/{date}.parquet                         # Bid/ask/volume
-    └── apy/{date}.parquet                             # Yield data
+    ├── tickers/{date}.parquet                         # Bid/ask prices
+    ├── apy/{date}.parquet                             # Yield data
+    └── volumes/{date}.parquet                         # 24h volume per market
 
 A ``data_report.txt`` file is generated in the output root after each run.
 
@@ -39,6 +41,7 @@ import argparse
 import sys
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
@@ -246,6 +249,47 @@ def collect_and_save_tickers(
     return len(df)
 
 
+def collect_and_save_volumes(
+    date_str: str,
+    volumes_dir: Path,
+    chain: str = "arbitrum",
+) -> tuple[int, dict[str, "Decimal"]]:
+    """Fetch per-market 24h trading volume from Subsquid and save as daily parquet.
+
+    :param date_str: ISO date string (e.g. ``"2026-04-01"``).
+    :param volumes_dir: Output directory for volume parquet files.
+    :param chain: GMX chain name.
+    :returns: Tuple of (number of markets saved, raw volumes dict).
+    """
+    from gmx_historical_data.subsquid_volume import fetch_daily_volumes
+
+    volumes_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        volumes = fetch_daily_volumes(chain=chain)
+    except Exception as e:
+        console.print(f"  [yellow]Warning: Volume fetch failed — {e}[/yellow]")
+        return 0, {}
+
+    if not volumes:
+        console.print("  [yellow]Warning: No volume data returned[/yellow]")
+        return 0, {}
+
+    rows = [
+        {"date": date_str, "market_address": addr, "volume_usd": str(vol)}
+        for addr, vol in sorted(volumes.items())
+    ]
+    df = pd.DataFrame(rows)
+    path = volumes_dir / f"{date_str}.parquet"
+    df.to_parquet(path, index=False)
+
+    total = sum(volumes.values())
+    nonzero = sum(1 for v in volumes.values() if v > 0)
+    console.print(f"  [green]Saved {len(df)} market volumes ({nonzero} active)[/green] → {path}")
+    console.print(f"  Total 24h volume: ${total:,.0f}")
+    return len(df), volumes
+
+
 def _fetch_all_markets(api: GMXAPI) -> list[dict]:
     """Fetch the full market list from the GMX API.
 
@@ -411,10 +455,13 @@ def generate_report(
     failed_symbols: list[str],
     ticker_count: int,
     apy_count: int,
+    volume_count: int,
+    volume_data: dict[str, Decimal],
     futures_dir: Path,
     snapshots_dir: Path,
     tickers_dir: Path,
     apy_dir: Path,
+    volumes_dir: Path,
     report_path: Path,
 ) -> None:
     """Write a human-readable data report after each collection run.
@@ -425,10 +472,13 @@ def generate_report(
     :param failed_symbols: Symbols/timeframes that failed candle fetch.
     :param ticker_count: Number of ticker entries saved.
     :param apy_count: Number of APY entries saved.
+    :param volume_count: Number of market volumes saved.
+    :param volume_data: Dict mapping market address to 24h volume in USD.
     :param futures_dir: Path to CCXT feather directory.
     :param snapshots_dir: Path to snapshots directory.
     :param tickers_dir: Path to tickers directory.
     :param apy_dir: Path to APY directory.
+    :param volumes_dir: Path to volumes directory.
     :param report_path: Output path for the report file.
     """
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -441,6 +491,7 @@ def generate_report(
     snapshot_files = list(snapshots_dir.glob("*.parquet"))
     ticker_files = list(tickers_dir.glob("*.parquet")) if tickers_dir.exists() else []
     apy_files = list(apy_dir.glob("*.parquet")) if apy_dir.exists() else []
+    volume_files = list(volumes_dir.glob("*.parquet")) if volumes_dir.exists() else []
 
     # Count feather files per timeframe
     tf_counts = {}
@@ -483,12 +534,17 @@ def generate_report(
         + (f", {len(failed_symbols)} failed" if failed_symbols else ""),
         f"- Ticker entries: {ticker_count}",
         f"- APY entries: {apy_count}",
+        f"- Volume entries: {volume_count} markets",
         f"- Total OI (all markets): ${total_oi_usd:,.0f}",
+        f"- Total 24h Volume: ${sum(volume_data.values()):,.0f}"
+        if volume_data
+        else "- Total 24h Volume: N/A",
         "",
         "## Data Files",
         f"- Snapshot parquet files: {len(snapshot_files)} days",
         f"- Ticker parquet files: {len(ticker_files)} days",
         f"- APY parquet files: {len(apy_files)} days",
+        f"- Volume parquet files: {len(volume_files)} days",
         "- OHLCV feather files by timeframe:",
     ]
     for tf in TIMEFRAMES:
@@ -502,6 +558,26 @@ def generate_report(
     )
     for i, (name, oi) in enumerate(oi_rows[:10], 1):
         lines.append(f"  {i:2d}. {name:<40s} ${oi:>14,.0f}")
+
+    # Top 10 markets by 24h volume
+    if volume_data:
+        # Build address → name lookup from markets DataFrame
+        addr_to_name: dict[str, str] = {}
+        for _, row in markets_df.iterrows():
+            addr = row.get("market_token", "")
+            name = row.get("name", addr[:10] + "...")
+            if addr:
+                addr_to_name[addr.lower()] = name
+
+        vol_rows = []
+        for addr, vol in volume_data.items():
+            name = addr_to_name.get(addr.lower(), addr[:10] + "...")
+            vol_rows.append((name, float(vol)))
+        vol_rows.sort(key=lambda x: x[1], reverse=True)
+
+        lines.extend(["", "## Top 10 Markets by 24h Volume"])
+        for i, (name, vol) in enumerate(vol_rows[:10], 1):
+            lines.append(f"  {i:2d}. {name:<40s} ${vol:>14,.0f}")
 
     if failed_symbols:
         lines.append("")
@@ -597,6 +673,7 @@ Examples:
     snapshots_dir = args.output_dir / "data" / "gmx" / "snapshots"
     tickers_dir = args.output_dir / "data" / "gmx" / "tickers"
     apy_dir = args.output_dir / "data" / "gmx" / "apy"
+    volumes_dir = args.output_dir / "data" / "gmx" / "volumes"
     report_path = args.output_dir.parent / "data_report.txt"
 
     console.print(f"\n[bold]GMX Daily Snapshot — {date_str}[/bold]")
@@ -604,7 +681,8 @@ Examples:
     console.print(f"  Futures:    {futures_dir}")
     console.print(f"  Snapshots:  {snapshots_dir}")
     console.print(f"  Tickers:    {tickers_dir}")
-    console.print(f"  APY:        {apy_dir}\n")
+    console.print(f"  APY:        {apy_dir}")
+    console.print(f"  Volumes:    {volumes_dir}\n")
 
     api = GMXAPI(chain=args.network)
 
@@ -628,18 +706,23 @@ Examples:
     candle_count, failed_symbols = collect_and_save_ohlcv(api, all_markets, futures_dir)
     console.print()
 
-    # --- Phase 3: Tickers (bid/ask/volume) ---
-    console.print("[bold]Phase 3: Tickers (bid/ask prices)[/bold]")
+    # --- Phase 3: 24h Volume (Subsquid GraphQL) ---
+    console.print("[bold]Phase 3: 24h Volume (Subsquid)[/bold]")
+    volume_count, volume_data = collect_and_save_volumes(date_str, volumes_dir, chain=args.network)
+    console.print()
+
+    # --- Phase 4: Tickers (bid/ask prices) ---
+    console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
     ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
     console.print()
 
-    # --- Phase 4: APY (all periods) ---
-    console.print("[bold]Phase 4: APY (yield data)[/bold]")
+    # --- Phase 5: APY (all periods) ---
+    console.print("[bold]Phase 5: APY (yield data)[/bold]")
     apy_count = collect_and_save_apy(api, date_str, apy_dir)
     console.print()
 
-    # --- Phase 5: Generate report ---
-    console.print("[bold]Phase 5: Data report[/bold]")
+    # --- Phase 6: Generate report ---
+    console.print("[bold]Phase 6: Data report[/bold]")
     generate_report(
         date_str=date_str,
         markets_df=markets_df,
@@ -647,10 +730,13 @@ Examples:
         failed_symbols=failed_symbols,
         ticker_count=ticker_count,
         apy_count=apy_count,
+        volume_count=volume_count,
+        volume_data=volume_data,
         futures_dir=futures_dir,
         snapshots_dir=snapshots_dir,
         tickers_dir=tickers_dir,
         apy_dir=apy_dir,
+        volumes_dir=volumes_dir,
         report_path=report_path,
     )
     console.print()
@@ -660,6 +746,7 @@ Examples:
     console.print(f"  Date:      {date_str}")
     console.print(f"  Markets:   {len(markets_df)} (all)")
     console.print(f"  Candles:   {candle_count} files ({len(TIMEFRAMES)} timeframes)")
+    console.print(f"  Volumes:   {volume_count} markets")
     console.print(f"  Tickers:   {ticker_count}")
     console.print(f"  APY:       {apy_count} entries")
     console.print("[green]Done.[/green]")

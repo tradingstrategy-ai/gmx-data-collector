@@ -162,6 +162,7 @@ def _build_registry(raw_markets: list[dict]) -> dict[str, dict]:
             registry[addr_lower] = {
                 "symbol": symbol,
                 "indexToken": index_token_sym,
+                "indexTokenAddress": None if is_swap_only else idx_addr,
                 "longTokenSymbol": long_sym if not is_swap_only else None,
                 "shortTokenSymbol": short_sym if not is_swap_only else None,
                 "listingDate": m.get("listingDate", ""),

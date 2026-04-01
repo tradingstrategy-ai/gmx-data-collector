@@ -43,10 +43,10 @@ def test_gmx_first_flow():
     analyzer = DataGapAnalyzer()
     backfill_start, backfill_end = analyzer.calculate_gap(gmx_df=gmx_df, chainlink_available=True)
 
-    assert backfill_start == 0
+    assert backfill_start is None
     assert backfill_end is not None
 
     print("\nGMX-first flow test passed:")
     print(f"  - Discovered {len(symbols)} GMX tokens")
     print(f"  - Found Chainlink feed for ETH: {feed_address}")
-    print(f"  - Gap analysis: backfill from block {backfill_start} to timestamp {backfill_end}")
+    print(f"  - Gap analysis: backfill start={backfill_start} to timestamp {backfill_end}")

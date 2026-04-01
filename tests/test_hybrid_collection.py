@@ -9,7 +9,10 @@ from gmx_historical_data.cli import DataCollector
 from gmx_historical_data.config import CollectionConfig
 
 
-@pytest.mark.skipif(not os.getenv("JSON_RPC_ARBITRUM"), reason="Requires JSON_RPC_ARBITRUM env var")
+@pytest.mark.skipif(
+    not os.getenv("JSON_RPC_ARBITRUM") or not os.getenv("HYPERSYNC_API_TOKEN"),
+    reason="Requires JSON_RPC_ARBITRUM and HYPERSYNC_API_TOKEN env vars",
+)
 @pytest.mark.asyncio
 async def test_hybrid_collection_eth():
     """Test hybrid collection for ETH (has Chainlink feed)."""
@@ -35,13 +38,11 @@ async def test_hybrid_collection_eth():
     latest = df_1h["timestamp"].max()
     time_range_days = (latest - earliest).days
 
-    # Should have historical data from GMX V2 launch
-    # GMX V2 launched Aug 2023, GMX API has ~6 months
-    # So earliest should be around Aug 2023
-    assert earliest.year == 2023, f"Expected 2023, got {earliest.year}"
-    assert earliest.month >= 8, f"Expected Aug or later, got month {earliest.month}"
+    # With Chainlink backfill, earliest data can go back to 2021 (Chainlink feed launch)
+    # Without backfill, it starts from GMX V2 launch (Aug 2023)
+    assert earliest.year <= 2023, f"Expected 2023 or earlier, got {earliest.year}"
 
-    # Should extend to recent data
+    # Should extend to recent data — at least 180 days of coverage
     assert time_range_days > 180, f"Expected >180 days, got {time_range_days}"
 
     print("\n✓ ETH hybrid collection successful")
