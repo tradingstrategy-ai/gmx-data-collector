@@ -56,8 +56,8 @@ async def test_collect_events_small_range():
         assert all(hasattr(e, "execution_price") for e in events)
         assert all(hasattr(e, "market") for e in events)
     except RuntimeError as e:
-        if "403 Forbidden" in str(e):
-            pytest.skip("HyperSync API returned 403 - authentication may be required")
+        if "403 Forbidden" in str(e) or "401 Unauthorized" in str(e):
+            pytest.skip("HyperSync API requires authentication — set HYPERSYNC_API_TOKEN")
         raise
 
 

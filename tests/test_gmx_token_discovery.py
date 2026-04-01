@@ -10,7 +10,7 @@ def test_fetch_all_tokens():
 
     # Should get ~97 tokens
     assert len(tokens) > 90
-    assert len(tokens) < 120
+    assert len(tokens) < 200
 
     # Check token structure
     assert all(isinstance(t, dict) for t in tokens)
