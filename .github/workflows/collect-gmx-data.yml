@@ -59,11 +59,10 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv venv .venv
-          uv pip install --python .venv/bin/python pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
+          uv pip install pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
 
       - name: Collect daily snapshot
-        run: PYTHONPATH=code/src .venv/bin/python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
+        run: PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
 
       - name: Show report in job summary
         if: always()
