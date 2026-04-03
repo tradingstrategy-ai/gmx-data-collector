@@ -94,5 +94,6 @@ jobs:
             echo "No volume data to commit"
           else
             git commit -m "data: daily GMX volume snapshot $(date -u '+%Y-%m-%d')"
+            git pull --rebase origin data/daily-collection
             git push origin data/daily-collection
           fi
