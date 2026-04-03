@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   collect-volume:
     runs-on: ubuntu-latest
@@ -49,6 +52,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.12'
+          cache-dependency-glob: 'code/pyproject.toml'
 
       - name: Install Python dependencies
         run: |
@@ -56,9 +60,6 @@ jobs:
 
       - name: Collect 24h volume snapshot
         run: |
-          DATE=$(date -u '+%Y-%m-%d')
-          VOLUMES_DIR=./data/user_data/data/gmx/volumes
-          mkdir -p "$VOLUMES_DIR"
           PYTHONPATH=code/src python - <<'EOF'
           import sys
           from datetime import datetime, UTC
@@ -80,7 +81,7 @@ jobs:
           df = pd.DataFrame(rows)
           out = volumes_dir / f"{date_str}.parquet"
           df.to_parquet(out, index=False)
-          print(f"Saved {len(df)} markets → {out}")
+          print(f"Saved {len(df)} markets -> {out}")
           EOF
 
       - name: Commit and push volume data

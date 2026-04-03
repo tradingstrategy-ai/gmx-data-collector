@@ -4,9 +4,17 @@ on:
   schedule:
     - cron: '0 2 * * *'  # 02:00 UTC daily (after GMX daily candle close)
   workflow_dispatch:       # Manual trigger
+    inputs:
+      date:
+        description: 'Snapshot date (YYYY-MM-DD). Defaults to today UTC.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   collect:
@@ -56,13 +64,20 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.12'
+          cache-dependency-glob: 'code/pyproject.toml'
 
       - name: Install Python dependencies
         run: |
           uv pip install pandas pyarrow rich requests eth-utils "web3-ethereum-defi>=1.1"
 
       - name: Collect daily snapshot
-        run: PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
+        run: |
+          DATE_ARG="${{ github.event.inputs.date }}"
+          EXTRA=""
+          if [ -n "$DATE_ARG" ]; then
+            EXTRA="--date $DATE_ARG"
+          fi
+          PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data $EXTRA
 
       - name: Show report in job summary
         if: always()
