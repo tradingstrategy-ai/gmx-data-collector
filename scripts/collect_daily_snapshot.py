@@ -706,10 +706,8 @@ Examples:
     candle_count, failed_symbols = collect_and_save_ohlcv(api, all_markets, futures_dir)
     console.print()
 
-    # --- Phase 3: 24h Volume (Subsquid GraphQL) ---
-    console.print("[bold]Phase 3: 24h Volume (Subsquid)[/bold]")
-    volume_count, volume_data = collect_and_save_volumes(date_str, volumes_dir, chain=args.network)
-    console.print()
+    # Phase 3: Volume collection runs in a separate workflow (collect-volume.yml)
+    volume_count, volume_data = 0, {}
 
     # --- Phase 4: Tickers (bid/ask prices) ---
     console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
@@ -746,7 +744,6 @@ Examples:
     console.print(f"  Date:      {date_str}")
     console.print(f"  Markets:   {len(markets_df)} (all)")
     console.print(f"  Candles:   {candle_count} files ({len(TIMEFRAMES)} timeframes)")
-    console.print(f"  Volumes:   {volume_count} markets")
     console.print(f"  Tickers:   {ticker_count}")
     console.print(f"  APY:       {apy_count} entries")
     console.print("[green]Done.[/green]")

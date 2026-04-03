@@ -59,7 +59,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv pip install pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
+          uv pip install pandas pyarrow rich requests eth-utils "web3-ethereum-defi>=1.1"
 
       - name: Collect daily snapshot
         run: PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
@@ -88,7 +88,6 @@ jobs:
             user_data/data/gmx/snapshots/ \
             user_data/data/gmx/tickers/ \
             user_data/data/gmx/apy/ \
-            user_data/data/gmx/volumes/ \
             data_report.txt
           if git diff --cached --quiet; then
             echo "No changes to commit"
