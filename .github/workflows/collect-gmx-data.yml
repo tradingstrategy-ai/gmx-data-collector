@@ -52,14 +52,14 @@ jobs:
           git commit --allow-empty -m "data: initialize daily collection branch"
           git push origin data/daily-collection
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: '3.12'
 
       - name: Install Python dependencies
         run: |
-          pip install pandas pyarrow rich requests eth-utils "web3-ethereum-defi>=0.39.0"
+          uv pip install --system pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
 
       - name: Collect daily snapshot
         run: PYTHONPATH=code/src python code/scripts/collect_daily_snapshot.py --output-dir ./data/user_data
