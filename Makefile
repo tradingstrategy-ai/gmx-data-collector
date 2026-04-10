@@ -64,7 +64,7 @@ help:
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
-	@echo "  collect-full         Candles: full historical from genesis"
+	@echo "  collect-full         Candles: full historical from genesis (seeds user_data/ from data branch by default; disable with QUICKSTART=)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
 	@echo "  funding-unified-resume  Funding: incremental (resume from checkpoints)"
 	@echo "  funding-full         Funding: all phases + DataStore (slow, archive RPC)"
@@ -116,6 +116,7 @@ define COLLECT_CMD
 	@echo "  Output:      $(DATA_DIR)"
 	@echo "  Concurrency: $(CONCURRENCY)"
 	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
+	$(if $(3),@echo "  Quickstart:  $(3) (seeds ./user_data/ from data/daily-collection branch)",)
 	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
 	@echo ""
 	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
@@ -124,14 +125,21 @@ define COLLECT_CMD
 		--concurrency $(CONCURRENCY) \
 		--nice \
 		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(3) \
 		$(ARGS)
 endef
 
 collect-update:
-	$(call COLLECT_CMD,incremental,update)
+	$(call COLLECT_CMD,incremental,update,)
 
+# --quickstart is ON BY DEFAULT for full collection: it shallow-clones the
+# data/daily-collection branch and merge-copies its user_data/ tree into
+# ./user_data/ before the candle run. The seed is idempotent (existing files
+# are never overwritten) so re-runs are safe. Disable with QUICKSTART= when
+# invoking: `make collect-full QUICKSTART=`.
+QUICKSTART ?= --quickstart
 collect-full:
-	$(call COLLECT_CMD,full historical,full)
+	$(call COLLECT_CMD,full historical,full,$(QUICKSTART))
 
 export-freqtrade:
 	@echo "Exporting to FreqTrade format..."
