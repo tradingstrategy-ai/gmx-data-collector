@@ -49,6 +49,11 @@ from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
 from gmx_historical_data.hypersync_collector import HyperSyncCollector
 from gmx_historical_data.market_registry import fetch_markets
+from gmx_historical_data.quickstart import (
+    DEFAULT_BRANCH,
+    print_coverage_summary,
+    seed_from_branch,
+)
 from gmx_historical_data.resampler import OHLCVResampler
 from gmx_historical_data.storage import ParquetStorage
 
@@ -1469,6 +1474,28 @@ def cli(
         "--nice",
         help="Lower process priority (nice +10) and auto-tune concurrency based on system resources",
     ),
+    quickstart: bool = typer.Option(
+        False,
+        "-q",
+        "--quickstart",
+        help=(
+            "Before collecting, shallow-clone the data/daily-collection branch "
+            "and merge-copy its user_data/ tree into ./user_data/ (existing local "
+            "files are never overwritten). The seed lands in ./user_data/, not in "
+            "--output-dir, because the branch layout is CCXT/feather — distinct "
+            "from the candles this CLI produces."
+        ),
+    ),
+    seed_only: bool = typer.Option(
+        False,
+        "--seed-only",
+        help="With --quickstart, seed and exit without running candle collection.",
+    ),
+    quickstart_ref: str = typer.Option(
+        DEFAULT_BRANCH,
+        "--quickstart-ref",
+        help=f"Remote branch to seed from (default: {DEFAULT_BRANCH}).",
+    ),
 ) -> None:
     """Collect GMX historical price data.
 
@@ -1536,6 +1563,30 @@ def cli(
       After collection, verify data quality:
       gmx_historical_data verify --output-dir ./data
     """
+    if quickstart:
+        seed_dir = Path("./user_data")
+        console.print("\n[bold]Quickstart: seeding from data branch[/bold]")
+        summary = seed_from_branch(seed_dir, quickstart_ref, console)
+        if "error" not in summary:
+            console.print(
+                f"  Copied {summary['copied']} new files "
+                f"({summary['bytes'] / 1e6:.1f} MB), "
+                f"skipped {summary['skipped']} existing."
+            )
+            print_coverage_summary(seed_dir, console)
+        else:
+            console.print(
+                "  [yellow]Proceeding without seed — collection will "
+                "still run.[/yellow]"
+            )
+        if seed_only:
+            console.print("\n[green]--seed-only set, exiting.[/green]")
+            return
+        console.print()
+    elif seed_only:
+        console.print("[red]--seed-only requires --quickstart.[/red]")
+        raise typer.Exit(code=2)
+
     # Setup logging first, before any output
     from gmx_historical_data.log_capture import LogCapture
 
