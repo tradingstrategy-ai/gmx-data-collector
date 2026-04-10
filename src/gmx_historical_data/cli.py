@@ -1575,10 +1575,7 @@ def cli(
             )
             print_coverage_summary(seed_dir, console)
         else:
-            console.print(
-                "  [yellow]Proceeding without seed — collection will "
-                "still run.[/yellow]"
-            )
+            console.print("  [yellow]Proceeding without seed — collection will still run.[/yellow]")
         if seed_only:
             console.print("\n[green]--seed-only set, exiting.[/green]")
             return

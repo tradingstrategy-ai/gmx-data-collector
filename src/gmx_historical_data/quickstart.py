@@ -69,9 +69,12 @@ def seed_from_branch(output_dir: Path, ref: str, console: Console) -> dict:
         try:
             subprocess.run(
                 [
-                    "git", "clone",
-                    "--depth", "1",
-                    "--branch", ref,
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    ref,
                     "--single-branch",
                     url,
                     str(tmp),
@@ -87,9 +90,7 @@ def seed_from_branch(output_dir: Path, ref: str, console: Console) -> dict:
 
         src_root = tmp / "user_data"
         if not src_root.is_dir():
-            console.print(
-                "  [yellow]Warning:[/yellow] branch has no user_data/ directory"
-            )
+            console.print("  [yellow]Warning:[/yellow] branch has no user_data/ directory")
             return {"copied": 0, "skipped": 0, "bytes": 0, "error": "no user_data"}
 
         copied = 0
@@ -131,7 +132,9 @@ def print_coverage_summary(output_dir: Path, console: Console) -> None:
     console.print("\n[bold]Seeded coverage[/bold]")
 
     for label, subdir in (("Snapshots", "snapshots"), ("Tickers", "tickers"), ("APY", "apy")):
-        files = sorted((gmx_root / subdir).glob("*.parquet")) if (gmx_root / subdir).is_dir() else []
+        files = (
+            sorted((gmx_root / subdir).glob("*.parquet")) if (gmx_root / subdir).is_dir() else []
+        )
         if not files:
             console.print(f"  {label:10s} (none)")
             continue
@@ -142,7 +145,9 @@ def print_coverage_summary(output_dir: Path, console: Console) -> None:
                 latest = datetime.strptime(dates[-1], "%Y-%m-%d").date()
                 gap = (today - latest).days
                 colour = "red" if gap > 1 else "green"
-                console.print(f"  {'Gap':10s} [bold {colour}]{gap} day(s) to today ({today})[/bold {colour}]")
+                console.print(
+                    f"  {'Gap':10s} [bold {colour}]{gap} day(s) to today ({today})[/bold {colour}]"
+                )
             except ValueError:
                 pass
 
