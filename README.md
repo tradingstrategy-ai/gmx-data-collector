@@ -35,6 +35,29 @@ make collect-update
 
 All data is written to `./user_data` by default. Override with `DATA_DIR=./my_path`.
 
+### Quickstart from the data branch
+
+If you want to skip waiting for the first full collection, the `-q` flag on
+`collect_daily_snapshot.py` seeds `user_data/` from the
+[`data/daily-collection`](https://github.com/tradingstrategy-ai/gmx-data-collector/tree/data/daily-collection)
+branch (a sibling data-only branch of this repo that CI updates daily), then
+runs today's snapshot on top:
+
+```bash
+# Seed + collect today in one shot
+poetry run python scripts/collect_daily_snapshot.py -q
+
+# Only seed, don't collect today
+poetry run python scripts/collect_daily_snapshot.py -q --seed-only
+
+# Seed from a different branch
+poetry run python scripts/collect_daily_snapshot.py -q --quickstart-ref some/other-branch
+```
+
+The seed is merge-only — existing local files are never overwritten, only
+missing ones are copied, so `-q` is safe to re-run and easy to undo
+(`rm -rf user_data/`).
+
 ## Installation
 
 **Prerequisites:** Python 3.11 or 3.12, Rust toolchain (for hypersync)
