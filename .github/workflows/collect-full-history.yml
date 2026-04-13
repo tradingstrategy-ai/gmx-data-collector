@@ -93,7 +93,7 @@ jobs:
         with:
           python-version: '3.12'
           cache: 'poetry'
-          cache-dependency-path: 'code/poetry.lock'
+          cache-dependency-path: 'code/pyproject.toml'
 
       - name: Install dependencies
         working-directory: code
