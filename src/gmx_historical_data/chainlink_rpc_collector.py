@@ -126,6 +126,24 @@ class ChainlinkRPCCollector:
         },
     ]
 
+    # Chainlink Proxy ABI - phaseAggregators lookup for multi-phase backfill
+    PROXY_ABI = [
+        {
+            "inputs": [{"name": "phaseId", "type": "uint16"}],
+            "name": "phaseAggregators",
+            "outputs": [{"name": "", "type": "address"}],
+            "stateMutability": "view",
+            "type": "function",
+        },
+        {
+            "inputs": [],
+            "name": "phaseId",
+            "outputs": [{"name": "", "type": "uint16"}],
+            "stateMutability": "view",
+            "type": "function",
+        },
+    ]
+
     # Old AggregatorInterface - simpler methods that work with JSON-RPC batching
     AGGREGATOR_OLD_ABI = [
         {
@@ -465,7 +483,7 @@ class ChainlinkRPCCollector:
         feed_address: str,
         start_timestamp: int | None = None,
         end_timestamp: int | None = None,
-        max_rounds: int = 1000000,
+        max_rounds: int = 2000000,
         batch_size: int = 1500,
         concurrency: int = 4,
         progress_callback: Callable[[str], None] | None = None,
@@ -522,27 +540,44 @@ class ChainlinkRPCCollector:
                 latest_round_id=end_round_id,
                 search_backwards=True,
             )
+            # Build phase-aware ranges and clip to [start_round_id, end_round_id].
+            # A single tuple spanning two phases would have a ~2^64 gap between
+            # the phase-1 and phase-2 round-ID spaces, causing list(range(...))
+            # to OOM before max_rounds is applied.
+            all_ranges = self._get_phase_ranges(feed_address, end_round_id)
+            phase_ranges = []
+            for first_id, last_id in all_ranges:
+                if last_id < start_round_id:
+                    continue  # entire phase is before our window
+                phase_ranges.append((max(first_id, start_round_id), last_id))
         else:
-            # Find first valid round instead of assuming round 1
-            start_round_id = self._find_first_valid_round(feed_address, latest_round.round_id)
+            # Full backfill: walk all phases so feeds that rotated aggregators
+            # (e.g. ETH/USD on Arbitrum switched to Phase 2 in March 2026) are
+            # collected in their entirety rather than just the current phase.
+            phase_ranges = self._get_phase_ranges(feed_address, end_round_id)
 
-        total_rounds = end_round_id - start_round_id + 1
-        console.print(
-            f"  [dim]Collecting rounds {start_round_id:,} → {end_round_id:,} "
-            f"({total_rounds:,} total)[/dim]"
-        )
+        # Build the flat list of round IDs across all phases.
+        # For full backfill (no start_timestamp) the phase ranges already contain
+        # exactly the right set of rounds — no artificial cap is applied so the
+        # collection automatically scales as new phases or rounds are added in future.
+        # For timestamp-bounded queries max_rounds acts as a safety guard only.
+        round_ids: list[int] = []
+        for first_id, last_id in phase_ranges:
+            phase_ids = list(range(first_id, last_id + 1))
+            if start_timestamp:
+                remaining = max_rounds - len(round_ids)
+                if remaining <= 0:
+                    break
+                if len(phase_ids) > remaining:
+                    console.print(
+                        f"  [yellow]⚠ Limiting phase to {remaining:,} rounds "
+                        f"(phase has {len(phase_ids):,})[/yellow]"
+                    )
+                    phase_ids = phase_ids[:remaining]
+            round_ids.extend(phase_ids)
 
-        # Limit to max_rounds
-        if total_rounds > max_rounds:
-            console.print(
-                f"  [yellow]⚠ Limiting to {max_rounds:,} rounds (requested {total_rounds:,})[/yellow]"
-            )
-            total_rounds = max_rounds
-
-        # Create round IDs to fetch
-        round_ids = list(
-            range(start_round_id, min(start_round_id + total_rounds, end_round_id + 1))
-        )
+        total_rounds = len(round_ids)
+        console.print(f"  [dim]Total rounds to fetch across all phases: {total_rounds:,}[/dim]")
 
         num_batches = (len(round_ids) + batch_size - 1) // batch_size
         console.print(
@@ -606,50 +641,148 @@ class ChainlinkRPCCollector:
         )
         return all_rounds
 
-    def _find_first_valid_round(
+    def _get_phase_ranges(
         self,
         feed_address: str,
         latest_round_id: int,
-    ) -> int:
-        """Find first valid round ID using binary search.
+    ) -> list[tuple[int, int]]:
+        """Return (first_round_id, last_round_id) for every Chainlink phase.
 
-        Chainlink round IDs on L2s (Arbitrum) encode phase information:
-        roundId = (phaseId << 64) + aggregatorRoundId
+        Chainlink L2 proxies (Arbitrum) encode phase information in the upper 64
+        bits of the 80-bit round ID::
 
-        This method searches within the current phase for the first valid round,
-        since older phases may have been deprecated or use different aggregators.
+            roundId = (phaseId << 64) + aggregatorRoundId
 
-        :param feed_address: Feed proxy contract address
-        :param latest_round_id: Latest known round ID
-        :return: First valid round ID
+        When a feed rotates to a new phase (new underlying aggregator), rounds from
+        older phases become inaccessible to callers who only look at the current
+        phase.  This method walks **all** phases from 1 to current so callers can
+        fetch the full history.
+
+        For each past phase the last round is obtained by calling ``latestRound()``
+        on the phase's aggregator contract via ``phaseAggregators(phaseId)``.  The
+        current phase uses ``latest_round_id`` directly.
+
+        :param feed_address: Feed proxy contract address.
+        :param latest_round_id: Latest round ID from ``latestRoundData()``.
+        :returns: List of ``(first_round_id, last_round_id)`` tuples, one per phase,
+            sorted oldest-first.  Phases that cannot be resolved are skipped with a
+            warning.
         """
-        # Extract phase ID from latest round (upper 64 bits)
-        # Round ID format: (phaseId << 64) + aggregatorRoundId
-        phase_id = latest_round_id >> 64
-
-        # First round in current phase
-        first_in_phase = (phase_id << 64) + 1
-
+        current_phase_id = latest_round_id >> 64
         console.print(
-            f"  [dim]Phase ID: {phase_id}, first round in phase: {first_in_phase:,}[/dim]"
+            f"  [dim]Feed has {current_phase_id} phase(s) — collecting across all phases[/dim]"
         )
 
-        # Binary search within current phase
-        low, high = first_in_phase, latest_round_id
-        first_valid = latest_round_id
+        if current_phase_id <= 1:
+            # Single phase: use simple first-valid search, no proxy lookup needed
+            first_valid = self._find_first_valid_round_in_phase(feed_address, latest_round_id)
+            return [(first_valid, latest_round_id)]
+
+        proxy_address = Web3.to_checksum_address(feed_address)
+        proxy_contract = self.web3.eth.contract(address=proxy_address, abi=self.PROXY_ABI)
+
+        ranges: list[tuple[int, int]] = []
+
+        for phase_id in range(1, current_phase_id + 1):
+            if phase_id == current_phase_id:
+                # Current phase: last round is the live latest
+                last_round_id = latest_round_id
+            else:
+                # Past phase: ask the proxy for this phase's aggregator, then its
+                # latestRound() to find where the phase ended.
+                try:
+                    agg_address = self._call_with_retry(
+                        proxy_contract.functions.phaseAggregators(phase_id)
+                    )
+                    if not agg_address or agg_address == "0x" + "0" * 40:
+                        console.print(
+                            f"  [yellow]⚠ Phase {phase_id}: no aggregator address, skipping[/yellow]"
+                        )
+                        continue
+
+                    agg_contract = self.web3.eth.contract(
+                        address=Web3.to_checksum_address(agg_address),
+                        abi=self.AGGREGATOR_OLD_ABI,
+                    )
+                    agg_latest_round = self._call_with_retry(
+                        agg_contract.functions.latestRound()
+                    )
+                    # Encode back to proxy round ID space
+                    last_round_id = (phase_id << 64) + int(agg_latest_round)
+                except Exception as exc:
+                    console.print(
+                        f"  [yellow]⚠ Phase {phase_id}: could not determine last round ({exc}), skipping[/yellow]"
+                    )
+                    continue
+
+            first_round_id = (phase_id << 64) + 1
+            # Verify the first round in this phase is actually valid
+            first_valid = self._find_first_valid_round_in_phase(
+                feed_address, last_round_id, phase_id=phase_id
+            )
+            console.print(
+                f"  [dim]Phase {phase_id}: rounds {first_valid:,} → {last_round_id:,} "
+                f"({last_round_id - first_valid + 1:,} rounds)[/dim]"
+            )
+            ranges.append((first_valid, last_round_id))
+
+        return ranges
+
+    def _find_first_valid_round_in_phase(
+        self,
+        feed_address: str,
+        last_round_id: int,
+        phase_id: int | None = None,
+    ) -> int:
+        """Binary-search for the first valid round within a single phase.
+
+        :param feed_address: Feed proxy contract address.
+        :param last_round_id: Last (highest) round ID in this phase.
+        :param phase_id: Phase ID override; inferred from ``last_round_id`` if
+            ``None``.
+        :returns: First valid round ID in the phase.
+        """
+        if phase_id is None:
+            phase_id = last_round_id >> 64
+
+        first_in_phase = (phase_id << 64) + 1
+        low, high = first_in_phase, last_round_id
+        first_valid = last_round_id
 
         while low <= high:
             mid = (low + high) // 2
             round_data = self.get_round_data(feed_address, mid)
 
             if round_data and round_data.updated_at > 0:
-                # Found a valid round, search earlier
                 first_valid = mid
                 high = mid - 1
             else:
-                # Invalid/missing round, search later
                 low = mid + 1
 
+        return first_valid
+
+    def _find_first_valid_round(
+        self,
+        feed_address: str,
+        latest_round_id: int,
+    ) -> int:
+        """Find first valid round ID in the current phase using binary search.
+
+        .. deprecated::
+            Use :meth:`_get_phase_ranges` for full multi-phase backfill.
+            This method is kept for backwards compatibility with callers that only
+            need the current phase.
+
+        :param feed_address: Feed proxy contract address.
+        :param latest_round_id: Latest known round ID.
+        :returns: First valid round ID in the current phase.
+        """
+        phase_id = latest_round_id >> 64
+        first_in_phase = (phase_id << 64) + 1
+        console.print(
+            f"  [dim]Phase ID: {phase_id}, first round in phase: {first_in_phase:,}[/dim]"
+        )
+        first_valid = self._find_first_valid_round_in_phase(feed_address, latest_round_id)
         console.print(f"  [dim]First valid round: {first_valid:,}[/dim]")
         return first_valid
 

@@ -501,7 +501,7 @@ class DataCollector:
                         feed_address=chainlink_feed_address,  # Use feed proxy, NOT aggregator!
                         start_timestamp=boundaries_1h.chainlink_start_timestamp,  # None = fetch all
                         end_timestamp=boundaries_1h.chainlink_end_timestamp,  # Use calculated boundary
-                        max_rounds=1000000,
+                        max_rounds=2000000,
                         batch_size=1500,  # Safe for most RPC providers; auto-reduces on 413
                         concurrency=self.chainlink_concurrency,
                     )
