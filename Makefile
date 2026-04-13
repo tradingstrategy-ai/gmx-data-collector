@@ -47,7 +47,7 @@ INCLUDE_DATASTORE ?=
 
 .PHONY: help install show-config monitor \
         refresh-data full-data \
-        collect-update collect-full export-freqtrade \
+        collect-update collect-full collect-full-nn export-freqtrade \
         funding-unified funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         oi oi-resume \
@@ -64,7 +64,8 @@ help:
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
-	@echo "  collect-full         Candles: full historical from genesis (seeds user_data/ from data branch by default; disable with QUICKSTART=)"
+	@echo "  collect-full         Candles: full historical from genesis, nice+10 (disable quickstart with QUICKSTART=)"
+	@echo "  collect-full-nn      Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
 	@echo "  funding-unified-resume  Funding: incremental (resume from checkpoints)"
 	@echo "  funding-full         Funding: all phases + DataStore (slow, archive RPC)"
@@ -140,6 +141,24 @@ collect-update:
 QUICKSTART ?= --quickstart
 collect-full:
 	$(call COLLECT_CMD,full historical,full,$(QUICKSTART))
+
+# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency 10.
+# Use this when you want maximum throughput (e.g. dedicated machine / overnight run).
+collect-full-nn:
+	@echo "Starting full historical candle collection (no-nice, concurrency 10)..."
+	@echo "  Output:      $(DATA_DIR)"
+	@echo "  Concurrency: 10"
+	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
+	$(if $(QUICKSTART),@echo "  Quickstart:  $(QUICKSTART)",)
+	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
+	@echo ""
+	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
+	poetry run python -m gmx_historical_data.cli collect --full \
+		--output-dir "$(DATA_DIR)" \
+		--concurrency 10 \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(QUICKSTART) \
+		$(ARGS)
 
 export-freqtrade:
 	@echo "Exporting to FreqTrade format..."
