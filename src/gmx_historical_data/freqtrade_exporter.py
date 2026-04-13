@@ -55,17 +55,22 @@ class FreqtradeExporter:
         output_format: str = "feather",
         trading_mode: str = "futures",
         quote_currency: str = "USDC",
+        overwrite: bool = False,
     ) -> dict[str, dict]:
         """Export GMX data to Freqtrade format.
 
         Exports OHLCV candles, funding rates, and mark price files for
         each symbol/timeframe combination.
 
+        By default existing files are merged incrementally — no history is
+        ever deleted.  Pass ``overwrite=True`` to replace files entirely.
+
         :param symbols: Specific symbols to export (default: all).
         :param timeframes: Specific timeframes to export (default: all).
         :param output_format: Output format (``'feather'`` or ``'parquet'``).
         :param trading_mode: ``'futures'`` or ``'spot'`` (default: ``'futures'``).
         :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
+        :param overwrite: If ``True``, replace existing files instead of merging.
         :returns: Dict mapping symbol to export stats.
         """
         # Create output directory
@@ -122,7 +127,7 @@ class FreqtradeExporter:
                             trading_mode,
                             quote_currency,
                         )
-                        self._write(ft_df, gmx_dir / filename, output_format)
+                        self._write(ft_df, gmx_dir / filename, output_format, overwrite)
                         ohlcv_files += 1
                         total_candles += len(ft_df)
 
@@ -136,7 +141,7 @@ class FreqtradeExporter:
                             quote_currency,
                             candle_type="mark",
                         )
-                        self._write(mark_df, gmx_dir / mark_filename, output_format)
+                        self._write(mark_df, gmx_dir / mark_filename, output_format, overwrite)
                         mark_files += 1
 
                         # --- Index price (same as mark for GMX/Chainlink) ---
@@ -148,7 +153,7 @@ class FreqtradeExporter:
                             quote_currency,
                             candle_type="index",
                         )
-                        self._write(mark_df, gmx_dir / index_filename, output_format)
+                        self._write(mark_df, gmx_dir / index_filename, output_format, overwrite)
                         index_files += 1
 
                 # --- Funding rate ---
@@ -164,7 +169,9 @@ class FreqtradeExporter:
                             quote_currency,
                             candle_type="funding_rate",
                         )
-                        self._write(ft_funding, gmx_dir / funding_filename, output_format)
+                        self._write(
+                            ft_funding, gmx_dir / funding_filename, output_format, overwrite
+                        )
                         funding_files += 1
 
             results[symbol] = {
@@ -289,13 +296,34 @@ class FreqtradeExporter:
     # File I/O
     # ------------------------------------------------------------------
 
-    def _write(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
-        """Write dataframe in the requested format.
+    def _write(self, df: pl.DataFrame, path: Path, fmt: str, overwrite: bool = False) -> None:
+        """Merge-write dataframe into an existing file or create it.
 
-        :param df: Polars dataframe to write.
-        :param path: Output file path.
+        By default (``overwrite=False``) existing rows are never deleted.
+        New rows are appended and overlapping timestamps are resolved by keeping
+        the newer value (``keep="last"`` after concatenating ``[existing, new]``).
+        This mirrors the ``_merge_feather`` logic in ``collect_daily_snapshot.py``
+        and prevents ``export-freqtrade`` from truncating history built by the
+        daily snapshot pipeline.
+
+        Pass ``overwrite=True`` to skip the merge and replace the file entirely.
+
+        :param df: New Polars dataframe to merge in.
+        :param path: Output file path (created if missing).
         :param fmt: ``'feather'`` or ``'parquet'``.
+        :param overwrite: If ``True``, replace the existing file instead of merging.
         """
+        if not overwrite and path.exists():
+            try:
+                existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
+                df = (
+                    pl.concat([existing, df])
+                    .unique(subset=["date"], keep="last", maintain_order=False)
+                    .sort("date")
+                )
+            except (OSError, pl.exceptions.InvalidOperationError) as exc:
+                logger.warning("Could not read existing %s, overwriting: %s", path, exc)
+
         if fmt == "feather":
             df.write_ipc(path)
         else:

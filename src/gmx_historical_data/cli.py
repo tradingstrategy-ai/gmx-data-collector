@@ -2259,6 +2259,11 @@ def export_freqtrade_command(
         "--format",
         help="Output format (feather or parquet)",
     ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Replace existing feather/parquet files instead of merging incrementally",
+    ),
 ) -> None:
     """Export GMX data to Freqtrade-compatible format.
 
@@ -2364,6 +2369,7 @@ def export_freqtrade_command(
             symbols=symbols_to_export,
             timeframes=timeframes_to_export,
             output_format=output_format,
+            overwrite=overwrite,
         )
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
