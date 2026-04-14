@@ -2,86 +2,84 @@ name: Full Historical Data Collection (one-time)
 
 # One-time manual trigger only — stores results on data/full-history branch
 # under historical/ (separate from the rolling data/daily-collection branch).
+#
+# Jobs run in parallel (candles / funding / oi / pool-liquidity) then a final
+# export job assembles everything into FreqTrade feather files.
+# Each job has its own 6 h timeout. If a job times out, use GitHub's
+# "Re-run failed jobs" to resume — earlier jobs' data is already committed.
 
 on:
   workflow_dispatch:
     inputs:
       symbols:
-        description: 'Symbols to collect (comma-separated, e.g. ETH,BTC,LINK — empty = all)'
+        description: 'Symbols (comma-separated, e.g. ETH,BTC — empty = all)'
         required: false
         default: ''
       concurrency:
-        description: 'Parallel workers'
+        description: 'Parallel workers for candle collection'
         required: false
         default: '10'
-      include_funding:
-        description: 'Collect funding rates'
-        type: boolean
-        required: false
-        default: true
-      include_oi:
-        description: 'Collect open interest + pool liquidity'
-        type: boolean
-        required: false
-        default: true
 
 permissions:
   contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  # Data lands under historical/ on a dedicated branch — never touches
-  # data/daily-collection or its user_data/ layout.
   DATA_BRANCH: data/full-history
   DATA_ROOT: historical
 
+# ── Shared setup steps (duplicated per job — GitHub Actions has no reuse) ─────
+# Each job: checkout code + data branch → free disk → install → collect → push
+# Push uses retry+rebase so parallel jobs committing to different dirs
+# never conflict (rebases are always clean).
+
 jobs:
-  collect:
+
+  # ── 0. Init: ensure data/full-history branch exists ─────────────────────────
+  init:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Create data branch if missing
+        run: |
+          if git ls-remote --exit-code --heads \
+              "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
+              "$DATA_BRANCH" > /dev/null 2>&1; then
+            echo "Branch already exists."
+          else
+            git clone --no-checkout \
+              "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" _data
+            cd _data
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git checkout --orphan "$DATA_BRANCH"
+            git rm -rf . 2>/dev/null || true
+            git commit --allow-empty -m "data: initialize full-history branch"
+            git push origin "$DATA_BRANCH"
+            echo "Branch created."
+          fi
+
+  # ── 1a. Candles (OHLCV) ──────────────────────────────────────────────────────
+  candles:
+    needs: [init]
     runs-on: ubuntu-latest
     timeout-minutes: 360
-
     steps:
-      - name: Checkout code from master
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: master
           path: code
 
-      - name: Check if data branch exists
-        id: check-branch
-        run: |
-          if git ls-remote --exit-code --heads \
-            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" \
-            "$DATA_BRANCH" > /dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Checkout existing data branch
-        if: steps.check-branch.outputs.exists == 'true'
+      - name: Checkout data branch
         uses: actions/checkout@v4
         with:
           ref: ${{ env.DATA_BRANCH }}
           path: data
           fetch-depth: 1
 
-      - name: Create data branch if missing
-        if: steps.check-branch.outputs.exists == 'false'
-        run: |
-          git clone --no-checkout \
-            "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
-          cd data
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout --orphan "$DATA_BRANCH"
-          git rm -rf . 2>/dev/null || true
-          git commit --allow-empty -m "data: initialize full-history branch"
-          git push origin "$DATA_BRANCH"
-
       - name: Free disk space
         run: |
-          df -h
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h
 
@@ -117,19 +115,130 @@ jobs:
             --concurrency ${{ github.event.inputs.concurrency }} \
             $SYMBOL_ARG
 
+      - name: Commit candles
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --force "$DATA_ROOT/" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "data: full-history candles $(date -u '+%Y-%m-%d')"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin "$DATA_BRANCH" && \
+              git push origin "$DATA_BRANCH" && break
+              echo "Push attempt $attempt failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            done
+          fi
+
+  # ── 1b. Funding rates ────────────────────────────────────────────────────────
+  funding:
+    needs: [init]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DATA_BRANCH }}
+          path: data
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'poetry'
+          cache-dependency-path: 'code/pyproject.toml'
+
+      - name: Install dependencies
+        working-directory: code
+        run: poetry install --no-interaction --no-ansi
+
       - name: Collect funding rates
-        if: ${{ github.event.inputs.include_funding == 'true' }}
         working-directory: code
         env:
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
         run: |
+          mkdir -p "../data/$DATA_ROOT/funding"
           poetry run python scripts/extract_unified_funding.py \
             --network arbitrum \
             --output-dir "../data/$DATA_ROOT/funding" \
             --output parquet
 
+      - name: Commit funding rates
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --force "$DATA_ROOT/funding/" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "data: full-history funding rates $(date -u '+%Y-%m-%d')"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin "$DATA_BRANCH" && \
+              git push origin "$DATA_BRANCH" && break
+              echo "Push attempt $attempt failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            done
+          fi
+
+  # ── 1c. Open Interest ────────────────────────────────────────────────────────
+  oi:
+    needs: [init]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DATA_BRANCH }}
+          path: data
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'poetry'
+          cache-dependency-path: 'code/pyproject.toml'
+
+      - name: Install dependencies
+        working-directory: code
+        run: poetry install --no-interaction --no-ansi
+
       - name: Collect open interest
-        if: ${{ github.event.inputs.include_oi == 'true' }}
         working-directory: code
         env:
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
@@ -141,8 +250,63 @@ jobs:
             --output parquet \
             --from-block 120000000
 
+      - name: Commit open interest
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --force "$DATA_ROOT/data/gmx/open_interest/" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "data: full-history open interest $(date -u '+%Y-%m-%d')"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin "$DATA_BRANCH" && \
+              git push origin "$DATA_BRANCH" && break
+              echo "Push attempt $attempt failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            done
+          fi
+
+  # ── 1d. Pool Liquidity ───────────────────────────────────────────────────────
+  pool-liquidity:
+    needs: [init]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Checkout data branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DATA_BRANCH }}
+          path: data
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'poetry'
+          cache-dependency-path: 'code/pyproject.toml'
+
+      - name: Install dependencies
+        working-directory: code
+        run: poetry install --no-interaction --no-ansi
+
       - name: Collect pool liquidity
-        if: ${{ github.event.inputs.include_oi == 'true' }}
         working-directory: code
         env:
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
@@ -153,6 +317,65 @@ jobs:
             --output-dir "../data/$DATA_ROOT/data/gmx/pool_liquidity" \
             --from-block 120000000
 
+      - name: Commit pool liquidity
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --force "$DATA_ROOT/data/gmx/pool_liquidity/" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "data: full-history pool liquidity $(date -u '+%Y-%m-%d')"
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin "$DATA_BRANCH" && \
+              git push origin "$DATA_BRANCH" && break
+              echo "Push attempt $attempt failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            done
+          fi
+
+  # ── 2. Export: FreqTrade feather + final commit ──────────────────────────────
+  export:
+    needs: [candles, funding, oi, pool-liquidity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: code
+
+      - name: Checkout data branch (all parallel jobs committed here)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DATA_BRANCH }}
+          path: data
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'poetry'
+          cache-dependency-path: 'code/pyproject.toml'
+
+      - name: Install dependencies
+        working-directory: code
+        run: poetry install --no-interaction --no-ansi
+
+      - name: Show assembled data
+        run: du -sh data/$DATA_ROOT/*/ 2>/dev/null || true
+
       - name: Export to FreqTrade feather format
         working-directory: code
         run: |
@@ -160,22 +383,20 @@ jobs:
             --data-dir "../data/$DATA_ROOT" \
             --output-dir "../data/$DATA_ROOT"
 
-      - name: Show disk usage
-        if: always()
-        run: df -h && du -sh data/$DATA_ROOT/*/  2>/dev/null || true
-
-      - name: Commit and push to data/full-history
+      - name: Final commit to data/full-history
         working-directory: data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add --force "$DATA_ROOT/" 2>/dev/null || true
-
           if git diff --cached --quiet; then
-            echo "No changes to commit"
+            echo "No changes to commit."
           else
-            git commit -m "data: full historical collection $(date -u '+%Y-%m-%d')"
+            git commit -m "data: full-history export complete $(date -u '+%Y-%m-%d')"
             git pull --rebase origin "$DATA_BRANCH"
             git push origin "$DATA_BRANCH"
           fi
+
+      - name: Show final disk usage
+        if: always()
+        run: df -h && du -sh data/$DATA_ROOT/*/ 2>/dev/null || true
