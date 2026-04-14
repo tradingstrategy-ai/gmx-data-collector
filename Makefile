@@ -46,7 +46,7 @@ INCLUDE_DATASTORE ?=
 # ==============================================================================
 
 .PHONY: help install show-config monitor \
-        refresh-data full-data \
+        refresh-data full-data full-data-nn \
         collect-update collect-full collect-full-nn export-freqtrade \
         funding-unified funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
@@ -61,6 +61,7 @@ help:
 	@echo "Recommended targets:"
 	@echo "  refresh-data    Incremental update (daily use): candles + funding + OI + liquidity + export"
 	@echo "  full-data       Full historical download from genesis + export"
+	@echo "  full-data-nn    Full historical download, no nice, concurrency 10 + export"
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
@@ -106,6 +107,12 @@ refresh-data: collect-update funding-unified-resume extract-all-resume export-fr
 full-data: collect-full funding-unified extract-all export-freqtrade
 	@echo ""
 	@echo "Full data download complete: candles + funding + OI + liquidity + FreqTrade export"
+	@echo "Data ready in $(DATA_DIR)"
+
+# Full historical download, no nice — maximum throughput (dedicated machine / overnight).
+full-data-nn: collect-full-nn funding-unified extract-all export-freqtrade
+	@echo ""
+	@echo "Full data download complete (no-nice): candles + funding + OI + liquidity + FreqTrade export"
 	@echo "Data ready in $(DATA_DIR)"
 
 # ==============================================================================
