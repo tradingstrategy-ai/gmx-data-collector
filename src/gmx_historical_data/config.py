@@ -136,6 +136,16 @@ GMX_V2_GENESIS_TIMESTAMP = 1691366400  # Aug 7, 2023 00:00:00 UTC (approximate)
 # Note: All symbols should be UPPERCASE for case-insensitive matching
 EXCLUDED_SYMBOLS = {
     "APE_DEPRECATED",  # Deprecated APE market (may appear as "APE_deprecated" in GMX metadata)
+    # Stablecoins — fixed at $1, no OHLCV value
+    "USDC",
+    "USDC.E",   # bridged USDC (USDC.e)
+    "USDT",
+    "DAI",
+    # Collateral-only tokens — not tradeable perp markets
+    "WBTC.B",   # wrapped BTC (WBTC.b)
+    "STETH",
+    # Synthetic stablecoins — pegged to $1, no OHLCV value
+    "USDE",     # Ethena USDe
 }
 
 # Symbol prefixes to exclude (covers all current and future variants)

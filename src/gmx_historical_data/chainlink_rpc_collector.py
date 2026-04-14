@@ -715,7 +715,6 @@ class ChainlinkRPCCollector:
                     )
                     continue
 
-            first_round_id = (phase_id << 64) + 1
             # Verify the first round in this phase is actually valid
             first_valid = self._find_first_valid_round_in_phase(
                 feed_address, last_round_id, phase_id=phase_id

@@ -73,7 +73,7 @@ help:
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
-	@echo "  collect-full         Candles: full historical from genesis, nice+10 (disable quickstart with QUICKSTART=)"
+	@echo "  collect-full         Candles: full historical from genesis, nice+10 (enable quickstart with QUICKSTART=--quickstart)"
 	@echo "  collect-full-nn      Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
 	@echo "  funding-unified-resume  Funding: incremental (resume from checkpoints)"
@@ -148,12 +148,9 @@ endef
 collect-update:
 	$(call COLLECT_CMD,incremental,update,)
 
-# --quickstart is ON BY DEFAULT for full collection: it shallow-clones the
-# data/daily-collection branch and merge-copies its user_data/ tree into
-# ./user_data/ before the candle run. The seed is idempotent (existing files
-# are never overwritten) so re-runs are safe. Disable with QUICKSTART= when
-# invoking: `make collect-full QUICKSTART=`.
-QUICKSTART ?= --quickstart
+# --quickstart is OFF BY DEFAULT. Enable with QUICKSTART=--quickstart when
+# invoking: `make collect-full QUICKSTART=--quickstart`.
+QUICKSTART ?=
 collect-full:
 	$(call COLLECT_CMD,full historical,full,$(QUICKSTART))
 
