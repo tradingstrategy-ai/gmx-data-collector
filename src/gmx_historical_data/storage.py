@@ -17,6 +17,59 @@ from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 
 logger = logging.getLogger(__name__)
 
+
+def _coverage_stats(df: "pl.DataFrame", ts_col: str) -> dict:
+    """Return row count and timestamp coverage for a Polars DataFrame.
+
+    :param df: Polars DataFrame to inspect.
+    :param ts_col: Name of the timestamp column.
+    :return: Dict with ``rows``, ``earliest``, and ``latest`` keys.
+    """
+    if df.is_empty():
+        return {"rows": 0, "earliest": None, "latest": None}
+    return {
+        "rows": df.height,
+        "earliest": df.select(pl.col(ts_col).min()).item(),
+        "latest": df.select(pl.col(ts_col).max()).item(),
+    }
+
+
+def _assert_history_preserved(
+    existing_stats: dict,
+    incoming_stats: dict,
+    merged_stats: dict,
+    *,
+    ts_label: str,
+    location: str,
+) -> None:
+    """Raise ValueError if a merge would shorten stored history.
+
+    :param existing_stats: Coverage stats from the on-disk DataFrame.
+    :param incoming_stats: Coverage stats from the incoming DataFrame.
+    :param merged_stats: Coverage stats from the merged result.
+    :param ts_label: Human-readable label for the timestamp column (for error messages).
+    :param location: Caller location string (for error messages).
+    :raises ValueError: If the merge would lose the earliest or latest timestamp.
+    """
+    if existing_stats["rows"] == 0:
+        return
+
+    if merged_stats["earliest"] is None or merged_stats["earliest"] > existing_stats["earliest"]:
+        raise ValueError(
+            f"{location}: merge would shorten history for {ts_label}: "
+            f"existing earliest={existing_stats['earliest']}, merged earliest={merged_stats['earliest']}"
+        )
+
+    expected_latest = max(
+        ts for ts in (existing_stats["latest"], incoming_stats["latest"]) if ts is not None
+    )
+    if merged_stats["latest"] is None or merged_stats["latest"] < expected_latest:
+        raise ValueError(
+            f"{location}: merge would lose tail coverage for {ts_label}: "
+            f"expected latest={expected_latest}, merged latest={merged_stats['latest']}"
+        )
+
+
 # Raw events schema
 RAW_EVENTS_SCHEMA = pa.schema(
     [
@@ -235,25 +288,25 @@ class ParquetStorage:
         )
 
         if not overwrite and output_path.exists():
-            try:
-                existing = pl.read_parquet(output_path).with_columns(
-                    pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
-                )
-                incoming = (
-                    pl.concat([existing, incoming])
-                    .unique(subset=["timestamp"], keep="last", maintain_order=True)
-                    .sort("timestamp")
-                )
-            except Exception as exc:
-                logger.error(
-                    "save_candles: merge FAILED for %s/%s (%s): %s — "
-                    "writing new data only; existing history may be lost",
-                    symbol,
-                    filename,
-                    output_path,
-                    exc,
-                    exc_info=True,
-                )
+            existing = pl.read_parquet(output_path).with_columns(
+                pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+            )
+            existing_stats = _coverage_stats(existing, "timestamp")
+            incoming_stats = _coverage_stats(incoming, "timestamp")
+            merged = (
+                pl.concat([existing, incoming])
+                .unique(subset=["timestamp"], keep="last", maintain_order=True)
+                .sort("timestamp")
+            )
+            merged_stats = _coverage_stats(merged, "timestamp")
+            _assert_history_preserved(
+                existing_stats,
+                incoming_stats,
+                merged_stats,
+                ts_label="timestamp",
+                location=f"save_candles({symbol}/{timeframe})",
+            )
+            incoming = merged
 
         table = pa.Table.from_pandas(incoming.to_pandas(), schema=OHLCV_SCHEMA)
         pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)

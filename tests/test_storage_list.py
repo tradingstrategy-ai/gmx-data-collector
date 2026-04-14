@@ -207,3 +207,121 @@ def test_save_candles_raises_on_tz_naive_timestamp():
         )
         with pytest.raises(ValueError, match="timezone-naive"):
             storage.save_candles(df, "1h", "BTC")
+
+
+def test_save_candles_raises_when_existing_merge_cannot_be_read(monkeypatch, tmp_path):
+    """save_candles must raise (not silently write incoming-only) when read fails.
+
+    :ensures: A read error on the existing Parquet file propagates as a hard error
+        instead of silently discarding older history.
+    """
+    storage = ParquetStorage(tmp_path)
+
+    historic = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2022-01-01", "2022-01-02"], utc=True),
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "symbol": ["BTC", "BTC"],
+        }
+    )
+    storage.save_candles(historic, "1d", "BTC")
+
+    incoming = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2022-01-03"], utc=True),
+            "open": [102.0],
+            "high": [107.0],
+            "low": [101.0],
+            "close": [106.0],
+            "symbol": ["BTC"],
+        }
+    )
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("cannot read existing parquet")
+
+    monkeypatch.setattr("gmx_historical_data.storage.pl.read_parquet", boom)
+
+    with pytest.raises(RuntimeError, match="cannot read existing parquet"):
+        storage.save_candles(incoming, "1d", "BTC")
+
+
+def test_save_candles_preserves_older_history_on_merge(tmp_path):
+    """save_candles must keep the earliest timestamp after a partial-range merge.
+
+    :ensures: Writing a recent-only slice does not shorten the stored history.
+    """
+    storage = ParquetStorage(tmp_path)
+
+    historic = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2022-01-01", "2022-01-02", "2022-01-03"], utc=True),
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [99.0, 100.0, 101.0],
+            "close": [104.0, 105.0, 106.0],
+            "symbol": ["BTC", "BTC", "BTC"],
+        }
+    )
+    storage.save_candles(historic, "1d", "BTC")
+
+    recent_only = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2022-01-03", "2022-01-04"], utc=True),
+            "open": [200.0, 201.0],
+            "high": [205.0, 206.0],
+            "low": [199.0, 200.0],
+            "close": [204.0, 205.0],
+            "symbol": ["BTC", "BTC"],
+        }
+    )
+    storage.save_candles(recent_only, "1d", "BTC")
+
+    result = storage.read_candles("1d", "BTC")
+    assert result["timestamp"].min() == pd.Timestamp("2022-01-01", tz="UTC")
+    assert result["timestamp"].max() == pd.Timestamp("2022-01-04", tz="UTC")
+    assert len(result) == 4
+
+
+def test_seeded_recent_data_plus_existing_history_keeps_earliest_timestamp(tmp_path):
+    """Seeding recent data must not discard older on-chain history.
+
+    :ensures: Writing a future-only slice after historic data is present keeps the
+        full range intact (earliest on-chain timestamp AND newest seeded timestamp).
+    """
+    storage = ParquetStorage(tmp_path)
+
+    # Simulate "older on-chain history" already present
+    historic = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-04-01", "2024-04-02"], utc=True),
+            "open": [10.0, 11.0],
+            "high": [10.0, 11.0],
+            "low": [10.0, 11.0],
+            "close": [10.0, 11.0],
+            "symbol": ["TOKEN", "TOKEN"],
+        }
+    )
+    storage.save_candles(historic, "1d", "TOKEN")
+
+    # Simulate "quick-seeded recent data" arriving later
+    seeded_recent = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2025-01-01", "2025-01-02"], utc=True),
+            "open": [20.0, 21.0],
+            "high": [20.0, 21.0],
+            "low": [20.0, 21.0],
+            "close": [20.0, 21.0],
+            "symbol": ["TOKEN", "TOKEN"],
+        }
+    )
+    storage.save_candles(seeded_recent, "1d", "TOKEN")
+
+    result = storage.read_candles("1d", "TOKEN")
+    # Full history preserved: oldest on-chain entry AND newest seeded entry both present
+    assert result["timestamp"].min() == pd.Timestamp("2024-04-01", tz="UTC")
+    assert result["timestamp"].max() == pd.Timestamp("2025-01-02", tz="UTC")
+    assert len(result) == 4

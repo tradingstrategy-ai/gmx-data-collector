@@ -140,3 +140,75 @@ def test_date_column_is_datetime(sample_storage):
             Path(output_dir) / "gmx" / "futures" / "ETH_USDC_USDC-1h-futures.feather"
         )
         assert pd.api.types.is_datetime64_any_dtype(df["date"])
+
+
+def test_export_preserves_existing_longer_history(tmp_path):
+    """Test that re-exporting with newer data merges and keeps oldest timestamp."""
+    storage_dir = tmp_path / "data"
+    storage_dir.mkdir()
+    storage = ParquetStorage(storage_dir)
+
+    # Save candles that start in 2024 (the "older" data)
+    older_data = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+        "open": [1.0, 2.0], "high": [1.0, 2.0], "low": [1.0, 2.0], "close": [1.0, 2.0],
+        "symbol": ["ETH", "ETH"],
+    })
+    storage.save_candles(older_data, "1h", "ETH")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    exporter = FreqtradeExporter(storage_dir, output_dir)
+
+    # First export — creates the feather file
+    exporter.export(symbols=["ETH"], timeframes=["1h"])
+
+    # Now add newer candles to storage
+    newer_data = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2024-01-03", "2024-01-04"], utc=True),
+        "open": [3.0, 4.0], "high": [3.0, 4.0], "low": [3.0, 4.0], "close": [3.0, 4.0],
+        "symbol": ["ETH", "ETH"],
+    })
+    storage.save_candles(newer_data, "1h", "ETH")
+
+    # Second export — should merge with existing feather, not replace it
+    exporter.export(symbols=["ETH"], timeframes=["1h"])
+
+    # Find the feather file
+    feather_files = list(output_dir.rglob("*.feather"))
+    assert len(feather_files) >= 1
+    # Find the OHLCV futures feather
+    futures_feathers = [f for f in feather_files if "futures" in f.name]
+    assert len(futures_feathers) == 1
+    result = pd.read_feather(futures_feathers[0])
+    assert result["date"].min() == pd.Timestamp("2024-01-01", tz="UTC")
+    assert result["date"].max() == pd.Timestamp("2024-01-04", tz="UTC")
+
+
+def test_export_raises_when_existing_feather_cannot_be_read(tmp_path, monkeypatch):
+    """Test that export raises when the existing feather cannot be read."""
+    storage_dir = tmp_path / "data"
+    storage_dir.mkdir()
+    storage = ParquetStorage(storage_dir)
+
+    df = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2024-01-01"], utc=True),
+        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+        "symbol": ["ETH"],
+    })
+    storage.save_candles(df, "1h", "ETH")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    exporter = FreqtradeExporter(storage_dir, output_dir)
+    # keep_parquet=True so the source parquet survives for the second export
+    exporter.export(symbols=["ETH"], timeframes=["1h"], keep_parquet=True)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("cannot read existing feather")
+
+    # Patch the IPC reader used inside freqtrade_exporter
+    monkeypatch.setattr("gmx_historical_data.freqtrade_exporter.pl.read_ipc", boom)
+
+    with pytest.raises(RuntimeError, match="cannot read existing feather"):
+        exporter.export(symbols=["ETH"], timeframes=["1h"], keep_parquet=True)

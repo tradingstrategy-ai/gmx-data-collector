@@ -49,6 +49,9 @@ ARGS ?=
 # Set INCLUDE_DATASTORE=1 to include archive RPC reads (slow, requires JSON_RPC_ARBITRUM)
 INCLUDE_DATASTORE ?=
 
+# Pass --keep to export-freqtrade to preserve source parquet after export (default: delete)
+KEEP ?=
+
 # ==============================================================================
 # Targets
 # ==============================================================================
@@ -178,7 +181,10 @@ export-freqtrade:
 	@echo "  Output:     $(FEATHER_DIR)"
 	@echo ""
 	@mkdir -p "$(FEATHER_DIR)"
-	$(NICE) poetry run python -m gmx_historical_data.cli export-freqtrade --data-dir "$(DATA_DIR)" --output-dir "$(FEATHER_DIR)"
+	$(NICE) poetry run python -m gmx_historical_data.cli export-freqtrade \
+		--data-dir "$(DATA_DIR)" \
+		--output-dir "$(FEATHER_DIR)" \
+		$(KEEP)
 
 # ==============================================================================
 # Open Interest Extraction

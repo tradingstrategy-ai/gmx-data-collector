@@ -21,7 +21,11 @@ from pathlib import Path
 
 import polars as pl
 
-from gmx_historical_data.storage import ParquetStorage
+from gmx_historical_data.storage import (
+    ParquetStorage,
+    _assert_history_preserved,
+    _coverage_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +60,7 @@ class FreqtradeExporter:
         trading_mode: str = "futures",
         quote_currency: str = "USDC",
         overwrite: bool = False,
+        keep_parquet: bool = False,
     ) -> dict[str, dict]:
         """Export GMX data to Freqtrade format.
 
@@ -71,6 +76,9 @@ class FreqtradeExporter:
         :param trading_mode: ``'futures'`` or ``'spot'`` (default: ``'futures'``).
         :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
         :param overwrite: If ``True``, replace existing files instead of merging.
+        :param keep_parquet: If ``False`` (default), delete the source candle
+            parquet file after a successful feather export.  Pass ``True`` to
+            retain the source file.
         :returns: Dict mapping symbol to export stats.
         """
         # Create output directory
@@ -173,6 +181,11 @@ class FreqtradeExporter:
                             ft_funding, gmx_dir / funding_filename, output_format, overwrite
                         )
                         funding_files += 1
+
+                # --- Cleanup source parquet if requested ---
+                # Deferred until after all writes (OHLCV, mark, index, funding) succeed.
+                if not keep_parquet and output_format == "feather":
+                    self._cleanup_source_parquet(symbol, tf)
 
             results[symbol] = {
                 "files": ohlcv_files + funding_files + mark_files + index_files,
@@ -303,6 +316,17 @@ class FreqtradeExporter:
     # File I/O
     # ------------------------------------------------------------------
 
+    def _cleanup_source_parquet(self, symbol: str, timeframe: str) -> None:
+        """Delete the source candle parquet for a symbol/timeframe.
+
+        :param symbol: Token symbol (e.g., ``'ETH'``).
+        :param timeframe: Timeframe string (e.g., ``'1h'``).
+        """
+        candle_path = self.data_dir / "candles" / "arbitrum" / symbol / f"{timeframe}.parquet"
+        if candle_path.exists():
+            candle_path.unlink()
+            logger.debug("Removed source parquet: %s", candle_path)
+
     def _write(self, df: pl.DataFrame, path: Path, fmt: str, overwrite: bool = False) -> None:
         """Merge-write dataframe into an existing file or create it.
 
@@ -315,67 +339,44 @@ class FreqtradeExporter:
 
         Pass ``overwrite=True`` to skip the merge and replace the file entirely.
 
+        Read errors propagate immediately — there is no fallback to writing
+        incoming-only data.
+
         :param df: New Polars dataframe to merge in.
         :param path: Output file path (created if missing).
         :param fmt: ``'feather'`` or ``'parquet'``.
         :param overwrite: If ``True``, replace the existing file instead of merging.
+        :raises: Any exception raised by ``pl.read_ipc`` / ``pl.read_parquet``
+            propagates unchanged.
         """
         if not overwrite and path.exists():
-            try:
-                file_size = path.stat().st_size
-                existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
-                existing_rows = existing.height
-                new_rows = df.height
-                df = (
-                    pl.concat([existing, df])
-                    .unique(subset=["date"], keep="last", maintain_order=False)
-                    .sort("date")
-                )
-                logger.debug(
-                    "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
-                    path,
-                    existing_rows,
-                    file_size / 1024,
-                    new_rows,
-                    df.height,
-                )
-            except Exception as exc:
-                # Broad catch: surface ANY merge failure with full traceback instead
-                # of silently overwriting history. Previously only OSError and
-                # pl.exceptions.InvalidOperationError were caught, which dropped
-                # schema mismatches, column errors, and other polars errors onto
-                # the warning path. We now log at ERROR with exc_info and include
-                # file stat context so the cause is visible.
-                try:
-                    size_info = f"{path.stat().st_size} bytes"
-                except OSError:
-                    size_info = "stat failed"
-                logger.error(
-                    "Merge FAILED for %s (fmt=%s, %s, new_rows=%d): %s — "
-                    "HISTORY WILL BE OVERWRITTEN with new-only data",
-                    path,
-                    fmt,
-                    size_info,
-                    df.height,
-                    exc,
-                    exc_info=True,
-                )
-
-        try:
-            if fmt == "feather":
-                df.write_ipc(path)
-            else:
-                df.write_parquet(str(path))
-        except Exception as exc:
-            logger.error(
-                "Write FAILED for %s (fmt=%s, rows=%d): %s",
-                path,
-                fmt,
-                df.height,
-                exc,
-                exc_info=True,
+            file_size = path.stat().st_size
+            existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
+            existing_stats = _coverage_stats(existing, ts_col="date")
+            incoming_stats = _coverage_stats(df, ts_col="date")
+            merged = (
+                pl.concat([existing, df])
+                .unique(subset=["date"], keep="last", maintain_order=False)
+                .sort("date")
             )
-            raise
+            merged_stats = _coverage_stats(merged, ts_col="date")
+            _assert_history_preserved(
+                existing_stats, incoming_stats, merged_stats, ts_label="date", location=str(path)
+            )
+            logger.debug(
+                "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
+                path,
+                existing_stats["rows"],
+                file_size / 1024,
+                incoming_stats["rows"],
+                merged_stats["rows"],
+            )
+            df = merged
+
+        if fmt == "feather":
+            df.write_ipc(path)
+        else:
+            df.write_parquet(str(path))
 
     # ------------------------------------------------------------------
     # Filename generation
