@@ -16,6 +16,14 @@ endif
 NETWORK ?= arbitrum
 
 # Directory paths
+# DAT_DIR: shorthand override that sets both source (DATA_DIR) and export
+# (FEATHER_DIR) to the same path. Explicit DATA_DIR / FEATHER_DIR on the CLI
+# still take precedence.
+DAT_DIR ?=
+ifneq ($(strip $(DAT_DIR)),)
+DATA_DIR ?= $(DAT_DIR)
+FEATHER_DIR ?= $(DAT_DIR)
+endif
 DATA_DIR ?= ./user_data
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
 OI_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/open_interest

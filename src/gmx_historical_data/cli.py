@@ -1344,6 +1344,7 @@ class DataCollector:
                         timeframe,
                         oracle_df,
                         gmx_df,
+                        merge_with_existing=True,
                     )
                     if count > 0:
                         sources = []
@@ -2373,6 +2374,8 @@ def export_freqtrade_command(
         )
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
+        console.print("[red]Traceback:[/red]")
+        console.print(traceback.format_exc())
         raise typer.Exit(1)
 
     # Summary

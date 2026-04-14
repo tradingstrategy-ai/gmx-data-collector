@@ -196,8 +196,13 @@ class FreqtradeExporter:
         """
         if not self.funding_dir.exists():
             return []
+        # Skip macOS AppleDouble sidecars (._*.parquet) and other dotfiles.
         return sorted(
-            d.name for d in self.funding_dir.iterdir() if d.is_dir() and list(d.glob("*.parquet"))
+            d.name
+            for d in self.funding_dir.iterdir()
+            if d.is_dir()
+            and not d.name.startswith(".")
+            and any(not p.name.startswith(".") for p in d.glob("*.parquet"))
         )
 
     def list_funding_timeframes(self, symbol: str) -> list[str]:
@@ -209,7 +214,9 @@ class FreqtradeExporter:
         symbol_dir = self.funding_dir / symbol
         if not symbol_dir.exists():
             return []
-        return sorted(f.stem for f in symbol_dir.glob("*.parquet"))
+        return sorted(
+            f.stem for f in symbol_dir.glob("*.parquet") if not f.name.startswith(".")
+        )
 
     # ------------------------------------------------------------------
     # Data readers
@@ -315,19 +322,60 @@ class FreqtradeExporter:
         """
         if not overwrite and path.exists():
             try:
+                file_size = path.stat().st_size
                 existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
+                existing_rows = existing.height
+                new_rows = df.height
                 df = (
                     pl.concat([existing, df])
                     .unique(subset=["date"], keep="last", maintain_order=False)
                     .sort("date")
                 )
-            except (OSError, pl.exceptions.InvalidOperationError) as exc:
-                logger.warning("Could not read existing %s, overwriting: %s", path, exc)
+                logger.debug(
+                    "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
+                    path,
+                    existing_rows,
+                    file_size / 1024,
+                    new_rows,
+                    df.height,
+                )
+            except Exception as exc:
+                # Broad catch: surface ANY merge failure with full traceback instead
+                # of silently overwriting history. Previously only OSError and
+                # pl.exceptions.InvalidOperationError were caught, which dropped
+                # schema mismatches, column errors, and other polars errors onto
+                # the warning path. We now log at ERROR with exc_info and include
+                # file stat context so the cause is visible.
+                try:
+                    size_info = f"{path.stat().st_size} bytes"
+                except OSError:
+                    size_info = "stat failed"
+                logger.error(
+                    "Merge FAILED for %s (fmt=%s, %s, new_rows=%d): %s — "
+                    "HISTORY WILL BE OVERWRITTEN with new-only data",
+                    path,
+                    fmt,
+                    size_info,
+                    df.height,
+                    exc,
+                    exc_info=True,
+                )
 
-        if fmt == "feather":
-            df.write_ipc(path)
-        else:
-            df.write_parquet(str(path))
+        try:
+            if fmt == "feather":
+                df.write_ipc(path)
+            else:
+                df.write_parquet(str(path))
+        except Exception as exc:
+            logger.error(
+                "Write FAILED for %s (fmt=%s, rows=%d): %s",
+                path,
+                fmt,
+                df.height,
+                exc,
+                exc_info=True,
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Filename generation

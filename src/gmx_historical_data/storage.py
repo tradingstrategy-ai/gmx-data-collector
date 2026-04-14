@@ -4,6 +4,7 @@ Uses partitioned Parquet files with zstd compression for efficient storage
 and fast querying.
 """
 
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -13,6 +14,8 @@ import pyarrow as pa
 from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
+
+logger = logging.getLogger(__name__)
 
 # Raw events schema
 RAW_EVENTS_SCHEMA = pa.schema(
@@ -192,37 +195,68 @@ class ParquetStorage:
         df: pd.DataFrame,
         timeframe: str,
         symbol: str,
+        overwrite: bool = False,
     ) -> Path:
         """Save OHLCV candles to Parquet file.
 
-        :param df: DataFrame with OHLCV data
-        :param timeframe: Timeframe string (e.g., '1min', '1h', '1d')
-        :param symbol: Token symbol (e.g., 'ETH')
-        :return: Path to saved Parquet file
+        By default existing rows are preserved (merge-by-default). Overlapping
+        timestamps resolve to the newer value (``keep='last'`` after
+        ``[existing, new]`` concat). Pass ``overwrite=True`` to replace the file
+        entirely — use only when you intentionally want to discard history.
+
+        :param df: DataFrame with OHLCV data.
+        :param timeframe: Timeframe string (e.g., ``'1h'``).
+        :param symbol: Token symbol (e.g., ``'ETH'``).
+        :param overwrite: If ``True``, replace existing file instead of merging.
+            Defaults to ``False`` (merge-by-default).
+        :return: Path to saved Parquet file.
         """
         if df.empty:
             raise ValueError("Cannot save empty DataFrame")
 
-        # Validate required columns
         required_columns = ["timestamp", "open", "high", "low", "close", "symbol"]
         missing = set(required_columns) - set(df.columns)
         if missing:
             raise ValueError(f"Missing required columns: {missing}")
 
-        # Create symbol directory
+        if pd.api.types.is_datetime64_any_dtype(df["timestamp"]) and df["timestamp"].dt.tz is None:
+            raise ValueError(
+                f"save_candles: 'timestamp' column for {symbol}/{timeframe} is timezone-naive. "
+                "Localize to UTC before calling: df['timestamp'] = df['timestamp'].dt.tz_localize('UTC')"
+            )
+
         symbol_dir = self._ensure_dir(self.candles_dir / symbol)
-
-        # Convert to Arrow table with schema
-        table = pa.Table.from_pandas(df, schema=OHLCV_SCHEMA)
-
-        # Map timeframe to filename format (e.g., '1min' -> '1m')
         filename = TIMEFRAME_TO_FILENAME.get(timeframe, timeframe)
-
-        # Write to Parquet with compression
         output_path = symbol_dir / f"{filename}.parquet"
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
+
+        # Normalise incoming to microsecond UTC to match on-disk dtype.
+        incoming = pl.from_pandas(df).with_columns(
+            pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
         )
+
+        if not overwrite and output_path.exists():
+            try:
+                existing = pl.read_parquet(output_path).with_columns(
+                    pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+                )
+                incoming = (
+                    pl.concat([existing, incoming])
+                    .unique(subset=["timestamp"], keep="last", maintain_order=True)
+                    .sort("timestamp")
+                )
+            except Exception as exc:
+                logger.error(
+                    "save_candles: merge FAILED for %s/%s (%s): %s — "
+                    "writing new data only; existing history may be lost",
+                    symbol,
+                    filename,
+                    output_path,
+                    exc,
+                    exc_info=True,
+                )
+
+        table = pa.Table.from_pandas(incoming.to_pandas(), schema=OHLCV_SCHEMA)
+        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
 
         return output_path
 
@@ -256,9 +290,12 @@ class ParquetStorage:
 
         symbols = []
         for symbol_dir in self.candles_dir.iterdir():
-            if symbol_dir.is_dir():
-                # Check if directory has any parquet files
-                parquet_files = list(symbol_dir.glob("*.parquet"))
+            if symbol_dir.is_dir() and not symbol_dir.name.startswith("."):
+                # Skip hidden / macOS AppleDouble (._*) sidecars to avoid
+                # treating filesystem metadata as parquet data.
+                parquet_files = [
+                    p for p in symbol_dir.glob("*.parquet") if not p.name.startswith(".")
+                ]
                 if parquet_files:
                     symbols.append(symbol_dir.name)
 
@@ -276,7 +313,9 @@ class ParquetStorage:
 
         timeframes = []
         for parquet_file in symbol_dir.glob("*.parquet"):
-            # Extract timeframe from filename (e.g., '1h.parquet' -> '1h')
+            # Skip macOS AppleDouble sidecars (._1h.parquet) and other dotfiles.
+            if parquet_file.name.startswith("."):
+                continue
             tf = parquet_file.stem
             timeframes.append(tf)
 
