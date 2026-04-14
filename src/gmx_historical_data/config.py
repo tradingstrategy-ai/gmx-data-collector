@@ -138,14 +138,29 @@ EXCLUDED_SYMBOLS = {
     "APE_DEPRECATED",  # Deprecated APE market (may appear as "APE_deprecated" in GMX metadata)
 }
 
+# Symbol prefixes to exclude (covers all current and future variants)
+# GLV vaults (e.g. "GLV [ETH-USDC]", "GLV [WBTC.b-USDC]") are liquidity vault
+# tokens, not tradeable perpetual markets — they have no price feed suitable for
+# OHLCV candle generation.
+EXCLUDED_SYMBOL_PREFIXES = (
+    "GLV",
+)
+
 
 def is_excluded_symbol(symbol: str) -> bool:
     """Check if a symbol is in the excluded list (case-insensitive).
 
-    :param symbol: Token symbol to check
-    :return: True if the symbol should be excluded
+    Returns ``True`` for exact matches against :data:`EXCLUDED_SYMBOLS` and
+    for any symbol whose uppercase form starts with a prefix in
+    :data:`EXCLUDED_SYMBOL_PREFIXES`.
+
+    :param symbol: Token symbol to check.
+    :return: ``True`` if the symbol should be excluded from collection.
     """
-    return symbol.upper() in EXCLUDED_SYMBOLS
+    upper = symbol.upper()
+    if upper in EXCLUDED_SYMBOLS:
+        return True
+    return any(upper.startswith(prefix) for prefix in EXCLUDED_SYMBOL_PREFIXES)
 
 
 # Block-timestamp cache configuration
