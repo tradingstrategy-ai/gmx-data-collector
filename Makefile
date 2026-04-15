@@ -28,7 +28,7 @@ DATA_DIR ?= ./user_data
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
 OI_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/open_interest
 POOL_LIQUIDITY_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/pool_liquidity
-FEATHER_DIR ?= $(DATA_DIR)
+FEATHER_DIR ?= $(DATA_DIR)/data
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
 
