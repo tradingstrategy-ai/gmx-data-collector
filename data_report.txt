@@ -1,8 +1,8 @@
-# GMX Data Report — 2026-04-14
-Generated: 2026-04-14 03:16:20 UTC
+# GMX Data Report — 2026-04-15
+Generated: 2026-04-15 03:16:30 UTC
 
 ## Collection Summary
-- Snapshot date: 2026-04-14
+- Snapshot date: 2026-04-15
 - Total markets from API: 131
   - Perpetual markets: 126
   - Swap-only pools: 5
@@ -11,14 +11,14 @@ Generated: 2026-04-14 03:16:20 UTC
 - Ticker entries: 122
 - APY entries: 917
 - Volume entries: 0 markets
-- Total OI (all markets): $65,674,952
+- Total OI (all markets): $73,087,991
 - Total 24h Volume: N/A
 
 ## Data Files
-- Snapshot parquet files: 34 days
-- Ticker parquet files: 34 days
-- APY parquet files: 34 days
-- Volume parquet files: 11 days
+- Snapshot parquet files: 35 days
+- Ticker parquet files: 35 days
+- APY parquet files: 35 days
+- Volume parquet files: 12 days
 - OHLCV feather files by timeframe:
     1m: 110 symbols
     5m: 110 symbols
@@ -28,685 +28,685 @@ Generated: 2026-04-14 03:16:20 UTC
     1d: 110 symbols
 
 ## Top 10 Markets by Open Interest
-   1. BTC/USD [WBTC.b-USDC]                    $    24,779,277
-   2. ETH/USD [ETH-USDC]                       $    19,761,154
-   3. ETH/USD [ETH-ETH]                        $     3,305,069
-   4. SOL/USD [SOL-USDC]                       $     3,002,788
-   5. LINK/USD [LINK-USDC]                     $     2,935,001
-   6. BTC/USD [WBTC.b-WBTC.b]                  $     2,509,889
-   7. HYPE/USD [WBTC.b-USDC]                   $     1,720,541
-   8. SUI/USD [ETH-USDC]                       $     1,115,959
-   9. XAUT.v2/USD [WBTC.b-USDC]                $       601,806
-  10. TAO/USD [WBTC.b-USDC]                    $       492,954
+   1. BTC/USD [WBTC.b-USDC]                    $    30,797,367
+   2. ETH/USD [ETH-USDC]                       $    18,668,002
+   3. ETH/USD [ETH-ETH]                        $     6,665,253
+   4. LINK/USD [LINK-USDC]                     $     2,705,467
+   5. BTC/USD [WBTC.b-WBTC.b]                  $     2,335,567
+   6. SOL/USD [SOL-USDC]                       $     2,275,015
+   7. HYPE/USD [WBTC.b-USDC]                   $     2,167,324
+   8. SUI/USD [ETH-USDC]                       $     1,138,075
+   9. XAUT.v2/USD [WBTC.b-USDC]                $       576,277
+  10. XRP/USD [ETH-USDC]                       $       400,502
 
 ## OHLCV Coverage — 1m (rows per symbol)
-  0G: 55233 minutes (38.4 days)
-  AAVE: 55234 minutes (38.4 days)
-  ADA: 55236 minutes (38.4 days)
-  AERO: 55234 minutes (38.4 days)
-  AI16Z: 55236 minutes (38.4 days)
-  AIXBT: 55235 minutes (38.4 days)
-  ALGO: 55235 minutes (38.4 days)
-  ANIME: 55236 minutes (38.4 days)
-  APE: 55235 minutes (38.4 days)
-  APT: 55234 minutes (38.4 days)
-  ARB: 55234 minutes (38.4 days)
-  AR: 55233 minutes (38.4 days)
-  ASTER: 55232 minutes (38.4 days)
-  ATOM: 55235 minutes (38.4 days)
-  AVAX: 55236 minutes (38.4 days)
-  AVNT: 55234 minutes (38.4 days)
-  BCH: 55235 minutes (38.4 days)
-  BERA: 55235 minutes (38.4 days)
-  BNB: 55234 minutes (38.4 days)
-  BOME: 55233 minutes (38.4 days)
-  BONK: 55231 minutes (38.4 days)
-  BRETT: 55233 minutes (38.4 days)
-  BTC: 55234 minutes (38.4 days)
-  CAKE: 55236 minutes (38.4 days)
-  CC: 55236 minutes (38.4 days)
-  CHZ: 55234 minutes (38.4 days)
-  CRO: 55234 minutes (38.4 days)
-  CRV: 55238 minutes (38.4 days)
-  CVX: 55236 minutes (38.4 days)
-  DASH: 55235 minutes (38.4 days)
-  DOGE: 55235 minutes (38.4 days)
-  DOLO: 55234 minutes (38.4 days)
-  DOT: 55234 minutes (38.4 days)
-  DYDX: 55233 minutes (38.4 days)
-  EIGEN: 55232 minutes (38.4 days)
-  ENA: 55233 minutes (38.4 days)
-  ETH: 55234 minutes (38.4 days)
-  FARTCOIN: 55233 minutes (38.4 days)
-  FET: 55233 minutes (38.4 days)
-  FIL: 55234 minutes (38.4 days)
-  FLOKI: 55231 minutes (38.4 days)
-  GMX: 55233 minutes (38.4 days)
-  GOLD: 6765 minutes (4.7 days)
-  HBAR: 55233 minutes (38.4 days)
-  HYPE: 55235 minutes (38.4 days)
-  ICP: 55233 minutes (38.4 days)
-  INJ: 55234 minutes (38.4 days)
-  IP: 55235 minutes (38.4 days)
-  JTO: 55235 minutes (38.4 days)
-  JUP: 55234 minutes (38.4 days)
-  KAS: 55233 minutes (38.4 days)
-  KTA: 55233 minutes (38.4 days)
-  LDO: 55233 minutes (38.4 days)
-  LINEA: 55233 minutes (38.4 days)
-  LINK: 55233 minutes (38.4 days)
-  LIT: 55230 minutes (38.4 days)
-  LTC: 55234 minutes (38.4 days)
-  MELANIA: 55230 minutes (38.4 days)
-  MEME: 55235 minutes (38.4 days)
-  MET: 55233 minutes (38.4 days)
-  MEW: 55233 minutes (38.4 days)
-  MKR: 55231 minutes (38.4 days)
-  MNT: 55232 minutes (38.4 days)
-  MON: 55232 minutes (38.4 days)
-  MOODENG: 55233 minutes (38.4 days)
-  MORPHO: 55234 minutes (38.4 days)
-  NEAR: 55232 minutes (38.4 days)
-  OKB: 55232 minutes (38.4 days)
-  OM: 55231 minutes (38.4 days)
-  ONDO: 55231 minutes (38.4 days)
-  OP: 55230 minutes (38.4 days)
-  ORDI: 55231 minutes (38.4 days)
-  PENDLE: 55231 minutes (38.4 days)
-  PENGU: 55230 minutes (38.4 days)
-  PEPE: 55232 minutes (38.4 days)
-  PI: 55231 minutes (38.4 days)
-  POL: 55232 minutes (38.4 days)
-  PUMP: 55233 minutes (38.4 days)
-  RENDER: 55233 minutes (38.4 days)
-  SATS: 55231 minutes (38.4 days)
-  SEI: 55230 minutes (38.4 days)
-  SHIB: 55230 minutes (38.4 days)
-  SILVER: 6753 minutes (4.7 days)
-  SKY: 55229 minutes (38.4 days)
-  SOL: 55231 minutes (38.4 days)
-  SPX6900: 55230 minutes (38.4 days)
-  STX: 55230 minutes (38.4 days)
-  SUI: 55230 minutes (38.4 days)
-  SYRUP: 55231 minutes (38.4 days)
-  S: 55231 minutes (38.4 days)
-  TAO: 55231 minutes (38.4 days)
-  TIA: 55231 minutes (38.4 days)
-  TON: 55232 minutes (38.4 days)
-  TRUMP: 55232 minutes (38.4 days)
-  TRX: 55232 minutes (38.4 days)
-  UNI: 55232 minutes (38.4 days)
-  VIRTUAL: 55231 minutes (38.4 days)
-  VVV: 55231 minutes (38.4 days)
-  WELL: 55228 minutes (38.4 days)
-  WIF: 55229 minutes (38.4 days)
-  WLD: 55229 minutes (38.4 days)
-  WLFI: 55229 minutes (38.4 days)
-  XAUT.v2: 55229 minutes (38.4 days)
-  XLM: 55227 minutes (38.4 days)
-  XMR: 55228 minutes (38.4 days)
-  XPL: 55230 minutes (38.4 days)
-  XRP: 55228 minutes (38.4 days)
-  ZEC: 55230 minutes (38.4 days)
-  ZORA: 55230 minutes (38.4 days)
-  ZRO: 55230 minutes (38.4 days)
+  0G: 56673 minutes (39.4 days)
+  AAVE: 56674 minutes (39.4 days)
+  ADA: 56676 minutes (39.4 days)
+  AERO: 56674 minutes (39.4 days)
+  AI16Z: 56676 minutes (39.4 days)
+  AIXBT: 56675 minutes (39.4 days)
+  ALGO: 56675 minutes (39.4 days)
+  ANIME: 56676 minutes (39.4 days)
+  APE: 56675 minutes (39.4 days)
+  APT: 56674 minutes (39.4 days)
+  ARB: 56674 minutes (39.4 days)
+  AR: 56673 minutes (39.4 days)
+  ASTER: 56672 minutes (39.4 days)
+  ATOM: 56675 minutes (39.4 days)
+  AVAX: 56676 minutes (39.4 days)
+  AVNT: 56674 minutes (39.4 days)
+  BCH: 56675 minutes (39.4 days)
+  BERA: 56675 minutes (39.4 days)
+  BNB: 56674 minutes (39.4 days)
+  BOME: 56673 minutes (39.4 days)
+  BONK: 56671 minutes (39.4 days)
+  BRETT: 56672 minutes (39.4 days)
+  BTC: 56673 minutes (39.4 days)
+  CAKE: 56676 minutes (39.4 days)
+  CC: 56676 minutes (39.4 days)
+  CHZ: 56674 minutes (39.4 days)
+  CRO: 56674 minutes (39.4 days)
+  CRV: 56678 minutes (39.4 days)
+  CVX: 56676 minutes (39.4 days)
+  DASH: 56675 minutes (39.4 days)
+  DOGE: 56675 minutes (39.4 days)
+  DOLO: 56674 minutes (39.4 days)
+  DOT: 56674 minutes (39.4 days)
+  DYDX: 56673 minutes (39.4 days)
+  EIGEN: 56672 minutes (39.4 days)
+  ENA: 56673 minutes (39.4 days)
+  ETH: 56674 minutes (39.4 days)
+  FARTCOIN: 56673 minutes (39.4 days)
+  FET: 56673 minutes (39.4 days)
+  FIL: 56674 minutes (39.4 days)
+  FLOKI: 56671 minutes (39.4 days)
+  GMX: 56672 minutes (39.4 days)
+  GOLD: 8204 minutes (5.7 days)
+  HBAR: 56672 minutes (39.4 days)
+  HYPE: 56674 minutes (39.4 days)
+  ICP: 56673 minutes (39.4 days)
+  INJ: 56674 minutes (39.4 days)
+  IP: 56675 minutes (39.4 days)
+  JTO: 56675 minutes (39.4 days)
+  JUP: 56674 minutes (39.4 days)
+  KAS: 56673 minutes (39.4 days)
+  KTA: 56673 minutes (39.4 days)
+  LDO: 56673 minutes (39.4 days)
+  LINEA: 56673 minutes (39.4 days)
+  LINK: 56673 minutes (39.4 days)
+  LIT: 56670 minutes (39.4 days)
+  LTC: 56674 minutes (39.4 days)
+  MELANIA: 56670 minutes (39.4 days)
+  MEME: 56675 minutes (39.4 days)
+  MET: 56673 minutes (39.4 days)
+  MEW: 56673 minutes (39.4 days)
+  MKR: 56671 minutes (39.4 days)
+  MNT: 56672 minutes (39.4 days)
+  MON: 56671 minutes (39.4 days)
+  MOODENG: 56672 minutes (39.4 days)
+  MORPHO: 56674 minutes (39.4 days)
+  NEAR: 56672 minutes (39.4 days)
+  OKB: 56672 minutes (39.4 days)
+  OM: 56671 minutes (39.4 days)
+  ONDO: 56671 minutes (39.4 days)
+  OP: 56670 minutes (39.4 days)
+  ORDI: 56671 minutes (39.4 days)
+  PENDLE: 56671 minutes (39.4 days)
+  PENGU: 56670 minutes (39.4 days)
+  PEPE: 56672 minutes (39.4 days)
+  PI: 56671 minutes (39.4 days)
+  POL: 56672 minutes (39.4 days)
+  PUMP: 56673 minutes (39.4 days)
+  RENDER: 56673 minutes (39.4 days)
+  SATS: 56671 minutes (39.4 days)
+  SEI: 56670 minutes (39.4 days)
+  SHIB: 56670 minutes (39.4 days)
+  SILVER: 8193 minutes (5.7 days)
+  SKY: 56669 minutes (39.4 days)
+  SOL: 56670 minutes (39.4 days)
+  SPX6900: 56669 minutes (39.4 days)
+  STX: 56670 minutes (39.4 days)
+  SUI: 56670 minutes (39.4 days)
+  SYRUP: 56671 minutes (39.4 days)
+  S: 56671 minutes (39.4 days)
+  TAO: 56671 minutes (39.4 days)
+  TIA: 56671 minutes (39.4 days)
+  TON: 56672 minutes (39.4 days)
+  TRUMP: 56672 minutes (39.4 days)
+  TRX: 56672 minutes (39.4 days)
+  UNI: 56672 minutes (39.4 days)
+  VIRTUAL: 56671 minutes (39.4 days)
+  VVV: 56671 minutes (39.4 days)
+  WELL: 56668 minutes (39.4 days)
+  WIF: 56669 minutes (39.4 days)
+  WLD: 56669 minutes (39.4 days)
+  WLFI: 56669 minutes (39.4 days)
+  XAUT.v2: 56669 minutes (39.4 days)
+  XLM: 56667 minutes (39.4 days)
+  XMR: 56668 minutes (39.4 days)
+  XPL: 56670 minutes (39.4 days)
+  XRP: 56668 minutes (39.4 days)
+  ZEC: 56669 minutes (39.4 days)
+  ZORA: 56669 minutes (39.4 days)
+  ZRO: 56670 minutes (39.4 days)
 
 ## OHLCV Coverage — 5m (rows per symbol)
-  0G: 19343 5-min bars (67.2 days)
-  AAVE: 19343 5-min bars (67.2 days)
-  ADA: 19343 5-min bars (67.2 days)
-  AERO: 19343 5-min bars (67.2 days)
-  AI16Z: 19343 5-min bars (67.2 days)
-  AIXBT: 19343 5-min bars (67.2 days)
-  ALGO: 19343 5-min bars (67.2 days)
-  ANIME: 19343 5-min bars (67.2 days)
-  APE: 19343 5-min bars (67.2 days)
-  APT: 19343 5-min bars (67.2 days)
-  ARB: 19343 5-min bars (67.2 days)
-  AR: 19343 5-min bars (67.2 days)
-  ASTER: 19343 5-min bars (67.2 days)
-  ATOM: 19343 5-min bars (67.2 days)
-  AVAX: 19343 5-min bars (67.2 days)
-  AVNT: 19343 5-min bars (67.2 days)
-  BCH: 19343 5-min bars (67.2 days)
-  BERA: 19343 5-min bars (67.2 days)
-  BNB: 19343 5-min bars (67.2 days)
-  BOME: 19343 5-min bars (67.2 days)
-  BONK: 19343 5-min bars (67.2 days)
-  BRETT: 19343 5-min bars (67.2 days)
-  BTC: 19343 5-min bars (67.2 days)
-  CAKE: 19343 5-min bars (67.2 days)
-  CC: 17437 5-min bars (60.5 days)
-  CHZ: 19343 5-min bars (67.2 days)
-  CRO: 19343 5-min bars (67.2 days)
-  CRV: 19343 5-min bars (67.2 days)
-  CVX: 19343 5-min bars (67.2 days)
-  DASH: 19343 5-min bars (67.2 days)
-  DOGE: 19343 5-min bars (67.2 days)
-  DOLO: 19343 5-min bars (67.2 days)
-  DOT: 19343 5-min bars (67.2 days)
-  DYDX: 19343 5-min bars (67.2 days)
-  EIGEN: 19343 5-min bars (67.2 days)
-  ENA: 19343 5-min bars (67.2 days)
-  ETH: 19343 5-min bars (67.2 days)
-  FARTCOIN: 19343 5-min bars (67.2 days)
-  FET: 19343 5-min bars (67.2 days)
-  FIL: 19343 5-min bars (67.2 days)
-  FLOKI: 19343 5-min bars (67.2 days)
-  GMX: 19343 5-min bars (67.2 days)
-  GOLD: 1356 5-min bars (4.7 days)
-  HBAR: 19343 5-min bars (67.2 days)
-  HYPE: 19343 5-min bars (67.2 days)
-  ICP: 19343 5-min bars (67.2 days)
-  INJ: 19343 5-min bars (67.2 days)
-  IP: 19343 5-min bars (67.2 days)
-  JTO: 19343 5-min bars (67.2 days)
-  JUP: 19343 5-min bars (67.2 days)
-  KAS: 19343 5-min bars (67.2 days)
-  KTA: 19343 5-min bars (67.2 days)
-  LDO: 19343 5-min bars (67.2 days)
-  LINEA: 19343 5-min bars (67.2 days)
-  LINK: 19343 5-min bars (67.2 days)
-  LIT: 19343 5-min bars (67.2 days)
-  LTC: 19343 5-min bars (67.2 days)
-  MELANIA: 19343 5-min bars (67.2 days)
-  MEME: 19343 5-min bars (67.2 days)
-  MET: 17437 5-min bars (60.5 days)
-  MEW: 19343 5-min bars (67.2 days)
-  MKR: 19343 5-min bars (67.2 days)
-  MNT: 19343 5-min bars (67.2 days)
-  MON: 19343 5-min bars (67.2 days)
-  MOODENG: 19343 5-min bars (67.2 days)
-  MORPHO: 19343 5-min bars (67.2 days)
-  NEAR: 19343 5-min bars (67.2 days)
-  OKB: 19343 5-min bars (67.2 days)
-  OM: 19343 5-min bars (67.2 days)
-  ONDO: 19343 5-min bars (67.2 days)
-  OP: 19342 5-min bars (67.2 days)
-  ORDI: 19342 5-min bars (67.2 days)
-  PENDLE: 19342 5-min bars (67.2 days)
-  PENGU: 19342 5-min bars (67.2 days)
-  PEPE: 19342 5-min bars (67.2 days)
-  PI: 19342 5-min bars (67.2 days)
-  POL: 19342 5-min bars (67.2 days)
-  PUMP: 19342 5-min bars (67.2 days)
-  RENDER: 19342 5-min bars (67.2 days)
-  SATS: 19342 5-min bars (67.2 days)
-  SEI: 19342 5-min bars (67.2 days)
-  SHIB: 19342 5-min bars (67.2 days)
-  SILVER: 1356 5-min bars (4.7 days)
-  SKY: 19342 5-min bars (67.2 days)
-  SOL: 19343 5-min bars (67.2 days)
-  SPX6900: 19343 5-min bars (67.2 days)
-  STX: 19343 5-min bars (67.2 days)
-  SUI: 19343 5-min bars (67.2 days)
-  SYRUP: 19343 5-min bars (67.2 days)
-  S: 19342 5-min bars (67.2 days)
-  TAO: 19344 5-min bars (67.2 days)
-  TIA: 19344 5-min bars (67.2 days)
-  TON: 19344 5-min bars (67.2 days)
-  TRUMP: 19344 5-min bars (67.2 days)
-  TRX: 19344 5-min bars (67.2 days)
-  UNI: 19344 5-min bars (67.2 days)
-  VIRTUAL: 19344 5-min bars (67.2 days)
-  VVV: 19344 5-min bars (67.2 days)
-  WELL: 19344 5-min bars (67.2 days)
-  WIF: 19344 5-min bars (67.2 days)
-  WLD: 19344 5-min bars (67.2 days)
-  WLFI: 19344 5-min bars (67.2 days)
-  XAUT.v2: 19344 5-min bars (67.2 days)
-  XLM: 19344 5-min bars (67.2 days)
-  XMR: 19344 5-min bars (67.2 days)
-  XPL: 19344 5-min bars (67.2 days)
-  XRP: 19344 5-min bars (67.2 days)
-  ZEC: 19344 5-min bars (67.2 days)
-  ZORA: 19344 5-min bars (67.2 days)
-  ZRO: 19344 5-min bars (67.2 days)
+  0G: 19631 5-min bars (68.2 days)
+  AAVE: 19631 5-min bars (68.2 days)
+  ADA: 19631 5-min bars (68.2 days)
+  AERO: 19631 5-min bars (68.2 days)
+  AI16Z: 19631 5-min bars (68.2 days)
+  AIXBT: 19631 5-min bars (68.2 days)
+  ALGO: 19631 5-min bars (68.2 days)
+  ANIME: 19631 5-min bars (68.2 days)
+  APE: 19631 5-min bars (68.2 days)
+  APT: 19631 5-min bars (68.2 days)
+  ARB: 19631 5-min bars (68.2 days)
+  AR: 19631 5-min bars (68.2 days)
+  ASTER: 19631 5-min bars (68.2 days)
+  ATOM: 19631 5-min bars (68.2 days)
+  AVAX: 19631 5-min bars (68.2 days)
+  AVNT: 19631 5-min bars (68.2 days)
+  BCH: 19631 5-min bars (68.2 days)
+  BERA: 19631 5-min bars (68.2 days)
+  BNB: 19631 5-min bars (68.2 days)
+  BOME: 19631 5-min bars (68.2 days)
+  BONK: 19631 5-min bars (68.2 days)
+  BRETT: 19631 5-min bars (68.2 days)
+  BTC: 19631 5-min bars (68.2 days)
+  CAKE: 19631 5-min bars (68.2 days)
+  CC: 17725 5-min bars (61.5 days)
+  CHZ: 19631 5-min bars (68.2 days)
+  CRO: 19631 5-min bars (68.2 days)
+  CRV: 19631 5-min bars (68.2 days)
+  CVX: 19631 5-min bars (68.2 days)
+  DASH: 19631 5-min bars (68.2 days)
+  DOGE: 19631 5-min bars (68.2 days)
+  DOLO: 19631 5-min bars (68.2 days)
+  DOT: 19631 5-min bars (68.2 days)
+  DYDX: 19631 5-min bars (68.2 days)
+  EIGEN: 19631 5-min bars (68.2 days)
+  ENA: 19631 5-min bars (68.2 days)
+  ETH: 19631 5-min bars (68.2 days)
+  FARTCOIN: 19631 5-min bars (68.2 days)
+  FET: 19631 5-min bars (68.2 days)
+  FIL: 19631 5-min bars (68.2 days)
+  FLOKI: 19631 5-min bars (68.2 days)
+  GMX: 19631 5-min bars (68.2 days)
+  GOLD: 1644 5-min bars (5.7 days)
+  HBAR: 19631 5-min bars (68.2 days)
+  HYPE: 19631 5-min bars (68.2 days)
+  ICP: 19631 5-min bars (68.2 days)
+  INJ: 19631 5-min bars (68.2 days)
+  IP: 19631 5-min bars (68.2 days)
+  JTO: 19631 5-min bars (68.2 days)
+  JUP: 19631 5-min bars (68.2 days)
+  KAS: 19631 5-min bars (68.2 days)
+  KTA: 19631 5-min bars (68.2 days)
+  LDO: 19631 5-min bars (68.2 days)
+  LINEA: 19631 5-min bars (68.2 days)
+  LINK: 19631 5-min bars (68.2 days)
+  LIT: 19631 5-min bars (68.2 days)
+  LTC: 19631 5-min bars (68.2 days)
+  MELANIA: 19631 5-min bars (68.2 days)
+  MEME: 19631 5-min bars (68.2 days)
+  MET: 17725 5-min bars (61.5 days)
+  MEW: 19631 5-min bars (68.2 days)
+  MKR: 19631 5-min bars (68.2 days)
+  MNT: 19631 5-min bars (68.2 days)
+  MON: 19631 5-min bars (68.2 days)
+  MOODENG: 19631 5-min bars (68.2 days)
+  MORPHO: 19631 5-min bars (68.2 days)
+  NEAR: 19631 5-min bars (68.2 days)
+  OKB: 19631 5-min bars (68.2 days)
+  OM: 19631 5-min bars (68.2 days)
+  ONDO: 19631 5-min bars (68.2 days)
+  OP: 19630 5-min bars (68.2 days)
+  ORDI: 19630 5-min bars (68.2 days)
+  PENDLE: 19630 5-min bars (68.2 days)
+  PENGU: 19630 5-min bars (68.2 days)
+  PEPE: 19630 5-min bars (68.2 days)
+  PI: 19630 5-min bars (68.2 days)
+  POL: 19630 5-min bars (68.2 days)
+  PUMP: 19630 5-min bars (68.2 days)
+  RENDER: 19630 5-min bars (68.2 days)
+  SATS: 19630 5-min bars (68.2 days)
+  SEI: 19630 5-min bars (68.2 days)
+  SHIB: 19630 5-min bars (68.2 days)
+  SILVER: 1644 5-min bars (5.7 days)
+  SKY: 19630 5-min bars (68.2 days)
+  SOL: 19630 5-min bars (68.2 days)
+  SPX6900: 19630 5-min bars (68.2 days)
+  STX: 19631 5-min bars (68.2 days)
+  SUI: 19631 5-min bars (68.2 days)
+  SYRUP: 19631 5-min bars (68.2 days)
+  S: 19630 5-min bars (68.2 days)
+  TAO: 19632 5-min bars (68.2 days)
+  TIA: 19632 5-min bars (68.2 days)
+  TON: 19632 5-min bars (68.2 days)
+  TRUMP: 19632 5-min bars (68.2 days)
+  TRX: 19632 5-min bars (68.2 days)
+  UNI: 19632 5-min bars (68.2 days)
+  VIRTUAL: 19632 5-min bars (68.2 days)
+  VVV: 19632 5-min bars (68.2 days)
+  WELL: 19632 5-min bars (68.2 days)
+  WIF: 19632 5-min bars (68.2 days)
+  WLD: 19632 5-min bars (68.2 days)
+  WLFI: 19632 5-min bars (68.2 days)
+  XAUT.v2: 19632 5-min bars (68.2 days)
+  XLM: 19632 5-min bars (68.2 days)
+  XMR: 19632 5-min bars (68.2 days)
+  XPL: 19632 5-min bars (68.2 days)
+  XRP: 19632 5-min bars (68.2 days)
+  ZEC: 19632 5-min bars (68.2 days)
+  ZORA: 19632 5-min bars (68.2 days)
+  ZRO: 19632 5-min bars (68.2 days)
 
 ## OHLCV Coverage — 15m (rows per symbol)
-  0G: 8894 15-min bars (92.6 days)
-  AAVE: 8895 15-min bars (92.7 days)
-  ADA: 8894 15-min bars (92.6 days)
-  AERO: 8892 15-min bars (92.6 days)
-  AI16Z: 8892 15-min bars (92.6 days)
-  AIXBT: 8894 15-min bars (92.6 days)
-  ALGO: 8895 15-min bars (92.7 days)
-  ANIME: 8894 15-min bars (92.6 days)
-  APE: 8895 15-min bars (92.7 days)
-  APT: 8894 15-min bars (92.6 days)
-  ARB: 8894 15-min bars (92.6 days)
-  AR: 8894 15-min bars (92.6 days)
-  ASTER: 8894 15-min bars (92.6 days)
-  ATOM: 8894 15-min bars (92.6 days)
-  AVAX: 8894 15-min bars (92.6 days)
-  AVNT: 8894 15-min bars (92.6 days)
-  BCH: 8894 15-min bars (92.6 days)
-  BERA: 8894 15-min bars (92.6 days)
-  BNB: 8894 15-min bars (92.6 days)
-  BOME: 8894 15-min bars (92.6 days)
-  BONK: 8894 15-min bars (92.6 days)
-  BRETT: 8892 15-min bars (92.6 days)
-  BTC: 8894 15-min bars (92.6 days)
-  CAKE: 8894 15-min bars (92.6 days)
-  CC: 5833 15-min bars (60.8 days)
-  CHZ: 8894 15-min bars (92.6 days)
-  CRO: 8892 15-min bars (92.6 days)
-  CRV: 8894 15-min bars (92.6 days)
-  CVX: 8894 15-min bars (92.6 days)
-  DASH: 8894 15-min bars (92.6 days)
-  DOGE: 8894 15-min bars (92.6 days)
-  DOLO: 8894 15-min bars (92.6 days)
-  DOT: 8894 15-min bars (92.6 days)
-  DYDX: 8894 15-min bars (92.6 days)
-  EIGEN: 8894 15-min bars (92.6 days)
-  ENA: 8894 15-min bars (92.6 days)
-  ETH: 8894 15-min bars (92.6 days)
-  FARTCOIN: 8892 15-min bars (92.6 days)
-  FET: 8894 15-min bars (92.6 days)
-  FIL: 8894 15-min bars (92.6 days)
-  FLOKI: 8894 15-min bars (92.6 days)
-  GMX: 8894 15-min bars (92.6 days)
-  GOLD: 453 15-min bars (4.7 days)
-  HBAR: 8894 15-min bars (92.6 days)
-  HYPE: 8892 15-min bars (92.6 days)
-  ICP: 8894 15-min bars (92.6 days)
-  INJ: 8894 15-min bars (92.6 days)
-  IP: 7842 15-min bars (81.7 days)
-  JTO: 8894 15-min bars (92.6 days)
-  JUP: 8894 15-min bars (92.6 days)
-  KAS: 8892 15-min bars (92.6 days)
-  KTA: 8892 15-min bars (92.6 days)
-  LDO: 8894 15-min bars (92.6 days)
-  LINEA: 8894 15-min bars (92.6 days)
-  LINK: 8894 15-min bars (92.6 days)
-  LIT: 7843 15-min bars (81.7 days)
-  LTC: 8894 15-min bars (92.6 days)
-  MELANIA: 8892 15-min bars (92.6 days)
-  MEME: 8894 15-min bars (92.6 days)
-  MET: 5833 15-min bars (60.8 days)
-  MEW: 8892 15-min bars (92.6 days)
-  MKR: 8892 15-min bars (92.6 days)
-  MNT: 8892 15-min bars (92.6 days)
-  MON: 8892 15-min bars (92.6 days)
-  MOODENG: 8892 15-min bars (92.6 days)
-  MORPHO: 8894 15-min bars (92.6 days)
-  NEAR: 8894 15-min bars (92.6 days)
-  OKB: 8892 15-min bars (92.6 days)
-  OM: 8894 15-min bars (92.6 days)
-  ONDO: 8894 15-min bars (92.6 days)
-  OP: 8894 15-min bars (92.6 days)
-  ORDI: 8894 15-min bars (92.6 days)
-  PENDLE: 8894 15-min bars (92.6 days)
-  PENGU: 8894 15-min bars (92.6 days)
-  PEPE: 8894 15-min bars (92.6 days)
-  PI: 8892 15-min bars (92.6 days)
-  POL: 8894 15-min bars (92.6 days)
-  PUMP: 8894 15-min bars (92.6 days)
-  RENDER: 8894 15-min bars (92.6 days)
-  SATS: 8892 15-min bars (92.6 days)
-  SEI: 8894 15-min bars (92.6 days)
-  SHIB: 8894 15-min bars (92.6 days)
-  SILVER: 453 15-min bars (4.7 days)
-  SKY: 8894 15-min bars (92.6 days)
-  SOL: 8894 15-min bars (92.6 days)
-  SPX6900: 8893 15-min bars (92.6 days)
-  STX: 8895 15-min bars (92.7 days)
-  SUI: 8895 15-min bars (92.7 days)
-  SYRUP: 8895 15-min bars (92.7 days)
-  S: 8894 15-min bars (92.6 days)
-  TAO: 8895 15-min bars (92.7 days)
-  TIA: 8895 15-min bars (92.7 days)
-  TON: 8895 15-min bars (92.7 days)
-  TRUMP: 8895 15-min bars (92.7 days)
-  TRX: 8894 15-min bars (92.6 days)
-  UNI: 8895 15-min bars (92.7 days)
-  VIRTUAL: 8895 15-min bars (92.7 days)
-  VVV: 8893 15-min bars (92.6 days)
-  WELL: 8893 15-min bars (92.6 days)
-  WIF: 8894 15-min bars (92.6 days)
-  WLD: 8895 15-min bars (92.7 days)
-  WLFI: 8895 15-min bars (92.7 days)
-  XAUT.v2: 7759 15-min bars (80.8 days)
-  XLM: 8895 15-min bars (92.7 days)
-  XMR: 8893 15-min bars (92.6 days)
-  XPL: 8895 15-min bars (92.7 days)
-  XRP: 8895 15-min bars (92.7 days)
-  ZEC: 8895 15-min bars (92.7 days)
-  ZORA: 8893 15-min bars (92.6 days)
-  ZRO: 8895 15-min bars (92.7 days)
+  0G: 8990 15-min bars (93.6 days)
+  AAVE: 8991 15-min bars (93.7 days)
+  ADA: 8990 15-min bars (93.6 days)
+  AERO: 8988 15-min bars (93.6 days)
+  AI16Z: 8988 15-min bars (93.6 days)
+  AIXBT: 8990 15-min bars (93.6 days)
+  ALGO: 8991 15-min bars (93.7 days)
+  ANIME: 8990 15-min bars (93.6 days)
+  APE: 8991 15-min bars (93.7 days)
+  APT: 8990 15-min bars (93.6 days)
+  ARB: 8990 15-min bars (93.6 days)
+  AR: 8990 15-min bars (93.6 days)
+  ASTER: 8990 15-min bars (93.6 days)
+  ATOM: 8990 15-min bars (93.6 days)
+  AVAX: 8990 15-min bars (93.6 days)
+  AVNT: 8990 15-min bars (93.6 days)
+  BCH: 8990 15-min bars (93.6 days)
+  BERA: 8990 15-min bars (93.6 days)
+  BNB: 8990 15-min bars (93.6 days)
+  BOME: 8990 15-min bars (93.6 days)
+  BONK: 8990 15-min bars (93.6 days)
+  BRETT: 8988 15-min bars (93.6 days)
+  BTC: 8990 15-min bars (93.6 days)
+  CAKE: 8990 15-min bars (93.6 days)
+  CC: 5929 15-min bars (61.8 days)
+  CHZ: 8990 15-min bars (93.6 days)
+  CRO: 8988 15-min bars (93.6 days)
+  CRV: 8990 15-min bars (93.6 days)
+  CVX: 8990 15-min bars (93.6 days)
+  DASH: 8990 15-min bars (93.6 days)
+  DOGE: 8990 15-min bars (93.6 days)
+  DOLO: 8990 15-min bars (93.6 days)
+  DOT: 8990 15-min bars (93.6 days)
+  DYDX: 8990 15-min bars (93.6 days)
+  EIGEN: 8990 15-min bars (93.6 days)
+  ENA: 8990 15-min bars (93.6 days)
+  ETH: 8990 15-min bars (93.6 days)
+  FARTCOIN: 8988 15-min bars (93.6 days)
+  FET: 8990 15-min bars (93.6 days)
+  FIL: 8990 15-min bars (93.6 days)
+  FLOKI: 8990 15-min bars (93.6 days)
+  GMX: 8990 15-min bars (93.6 days)
+  GOLD: 549 15-min bars (5.7 days)
+  HBAR: 8990 15-min bars (93.6 days)
+  HYPE: 8988 15-min bars (93.6 days)
+  ICP: 8990 15-min bars (93.6 days)
+  INJ: 8990 15-min bars (93.6 days)
+  IP: 7938 15-min bars (82.7 days)
+  JTO: 8990 15-min bars (93.6 days)
+  JUP: 8990 15-min bars (93.6 days)
+  KAS: 8988 15-min bars (93.6 days)
+  KTA: 8988 15-min bars (93.6 days)
+  LDO: 8990 15-min bars (93.6 days)
+  LINEA: 8990 15-min bars (93.6 days)
+  LINK: 8990 15-min bars (93.6 days)
+  LIT: 7939 15-min bars (82.7 days)
+  LTC: 8990 15-min bars (93.6 days)
+  MELANIA: 8988 15-min bars (93.6 days)
+  MEME: 8990 15-min bars (93.6 days)
+  MET: 5929 15-min bars (61.8 days)
+  MEW: 8988 15-min bars (93.6 days)
+  MKR: 8988 15-min bars (93.6 days)
+  MNT: 8988 15-min bars (93.6 days)
+  MON: 8988 15-min bars (93.6 days)
+  MOODENG: 8988 15-min bars (93.6 days)
+  MORPHO: 8990 15-min bars (93.6 days)
+  NEAR: 8990 15-min bars (93.6 days)
+  OKB: 8988 15-min bars (93.6 days)
+  OM: 8990 15-min bars (93.6 days)
+  ONDO: 8990 15-min bars (93.6 days)
+  OP: 8990 15-min bars (93.6 days)
+  ORDI: 8990 15-min bars (93.6 days)
+  PENDLE: 8990 15-min bars (93.6 days)
+  PENGU: 8990 15-min bars (93.6 days)
+  PEPE: 8990 15-min bars (93.6 days)
+  PI: 8988 15-min bars (93.6 days)
+  POL: 8990 15-min bars (93.6 days)
+  PUMP: 8990 15-min bars (93.6 days)
+  RENDER: 8990 15-min bars (93.6 days)
+  SATS: 8988 15-min bars (93.6 days)
+  SEI: 8990 15-min bars (93.6 days)
+  SHIB: 8990 15-min bars (93.6 days)
+  SILVER: 549 15-min bars (5.7 days)
+  SKY: 8990 15-min bars (93.6 days)
+  SOL: 8990 15-min bars (93.6 days)
+  SPX6900: 8988 15-min bars (93.6 days)
+  STX: 8990 15-min bars (93.6 days)
+  SUI: 8991 15-min bars (93.7 days)
+  SYRUP: 8990 15-min bars (93.6 days)
+  S: 8990 15-min bars (93.6 days)
+  TAO: 8991 15-min bars (93.7 days)
+  TIA: 8991 15-min bars (93.7 days)
+  TON: 8991 15-min bars (93.7 days)
+  TRUMP: 8991 15-min bars (93.7 days)
+  TRX: 8991 15-min bars (93.7 days)
+  UNI: 8991 15-min bars (93.7 days)
+  VIRTUAL: 8990 15-min bars (93.6 days)
+  VVV: 8989 15-min bars (93.6 days)
+  WELL: 8989 15-min bars (93.6 days)
+  WIF: 8991 15-min bars (93.7 days)
+  WLD: 8991 15-min bars (93.7 days)
+  WLFI: 8991 15-min bars (93.7 days)
+  XAUT.v2: 7855 15-min bars (81.8 days)
+  XLM: 8991 15-min bars (93.7 days)
+  XMR: 8989 15-min bars (93.6 days)
+  XPL: 8991 15-min bars (93.7 days)
+  XRP: 8991 15-min bars (93.7 days)
+  ZEC: 8991 15-min bars (93.7 days)
+  ZORA: 8989 15-min bars (93.6 days)
+  ZRO: 8991 15-min bars (93.7 days)
 
 ## OHLCV Coverage — 1h (rows per symbol)
-  0G: 4503 hours (187.6 days)
-  AAVE: 5104 hours (212.7 days)
-  ADA: 5104 hours (212.7 days)
-  AERO: 5104 hours (212.7 days)
-  AI16Z: 5104 hours (212.7 days)
-  AIXBT: 5104 hours (212.7 days)
-  ALGO: 5104 hours (212.7 days)
-  ANIME: 5104 hours (212.7 days)
-  APE: 5104 hours (212.7 days)
-  APT: 5104 hours (212.7 days)
-  ARB: 5104 hours (212.7 days)
-  AR: 3149 hours (131.2 days)
-  ASTER: 4503 hours (187.6 days)
-  ATOM: 5104 hours (212.7 days)
-  AVAX: 5104 hours (212.7 days)
-  AVNT: 4503 hours (187.6 days)
-  BCH: 5104 hours (212.7 days)
-  BERA: 5104 hours (212.7 days)
-  BNB: 5104 hours (212.7 days)
-  BOME: 5104 hours (212.7 days)
-  BONK: 5104 hours (212.7 days)
-  BRETT: 5104 hours (212.7 days)
-  BTC: 5104 hours (212.7 days)
-  CAKE: 5104 hours (212.7 days)
-  CC: 1459 hours (60.8 days)
-  CHZ: 3149 hours (131.2 days)
-  CRO: 5104 hours (212.7 days)
-  CRV: 5104 hours (212.7 days)
-  CVX: 5104 hours (212.7 days)
-  DASH: 3150 hours (131.2 days)
-  DOGE: 5104 hours (212.7 days)
-  DOLO: 5104 hours (212.7 days)
-  DOT: 5104 hours (212.7 days)
-  DYDX: 5104 hours (212.7 days)
-  EIGEN: 5104 hours (212.7 days)
-  ENA: 5104 hours (212.7 days)
-  ETH: 5104 hours (212.7 days)
-  FARTCOIN: 5104 hours (212.7 days)
-  FET: 5104 hours (212.7 days)
-  FIL: 5104 hours (212.7 days)
-  FLOKI: 5104 hours (212.7 days)
-  GMX: 5104 hours (212.7 days)
-  GOLD: 114 hours (4.8 days)
-  HBAR: 5104 hours (212.7 days)
-  HYPE: 5104 hours (212.7 days)
-  ICP: 5104 hours (212.7 days)
-  INJ: 5104 hours (212.7 days)
-  IP: 1962 hours (81.8 days)
-  JTO: 3150 hours (131.2 days)
-  JUP: 5104 hours (212.7 days)
-  KAS: 5104 hours (212.7 days)
-  KTA: 4988 hours (207.8 days)
-  LDO: 5104 hours (212.7 days)
-  LINEA: 4503 hours (187.6 days)
-  LINK: 5104 hours (212.7 days)
-  LIT: 1962 hours (81.8 days)
-  LTC: 5104 hours (212.7 days)
-  MELANIA: 5104 hours (212.7 days)
-  MEME: 5104 hours (212.7 days)
-  MET: 1459 hours (60.8 days)
-  MEW: 5104 hours (212.7 days)
-  MKR: 5104 hours (212.7 days)
-  MNT: 5104 hours (212.7 days)
-  MON: 2706 hours (112.8 days)
-  MOODENG: 5104 hours (212.7 days)
-  MORPHO: 5104 hours (212.7 days)
-  NEAR: 5104 hours (212.7 days)
-  OKB: 5104 hours (212.7 days)
-  OM: 5104 hours (212.7 days)
-  ONDO: 5104 hours (212.7 days)
-  OP: 5104 hours (212.7 days)
-  ORDI: 5104 hours (212.7 days)
-  PENDLE: 5104 hours (212.7 days)
-  PENGU: 5104 hours (212.7 days)
-  PEPE: 5104 hours (212.7 days)
-  PI: 5104 hours (212.7 days)
-  POL: 5104 hours (212.7 days)
-  PUMP: 5104 hours (212.7 days)
-  RENDER: 5104 hours (212.7 days)
-  SATS: 5104 hours (212.7 days)
-  SEI: 5104 hours (212.7 days)
-  SHIB: 5104 hours (212.7 days)
-  SILVER: 114 hours (4.8 days)
-  SKY: 3149 hours (131.2 days)
-  SOL: 5104 hours (212.7 days)
-  SPX6900: 5104 hours (212.7 days)
-  STX: 5104 hours (212.7 days)
-  SUI: 5104 hours (212.7 days)
-  SYRUP: 3150 hours (131.2 days)
-  S: 5104 hours (212.7 days)
-  TAO: 5104 hours (212.7 days)
-  TIA: 5104 hours (212.7 days)
-  TON: 5104 hours (212.7 days)
-  TRUMP: 5104 hours (212.7 days)
-  TRX: 5104 hours (212.7 days)
-  UNI: 5104 hours (212.7 days)
-  VIRTUAL: 5104 hours (212.7 days)
-  VVV: 5104 hours (212.7 days)
-  WELL: 5104 hours (212.7 days)
-  WIF: 5104 hours (212.7 days)
-  WLD: 5104 hours (212.7 days)
-  WLFI: 5104 hours (212.7 days)
-  XAUT.v2: 1941 hours (80.9 days)
-  XLM: 5104 hours (212.7 days)
-  XMR: 5104 hours (212.7 days)
-  XPL: 4813 hours (200.5 days)
-  XRP: 5104 hours (212.7 days)
-  ZEC: 3149 hours (131.2 days)
-  ZORA: 4988 hours (207.8 days)
-  ZRO: 5104 hours (212.7 days)
+  0G: 4527 hours (188.6 days)
+  AAVE: 5128 hours (213.7 days)
+  ADA: 5128 hours (213.7 days)
+  AERO: 5128 hours (213.7 days)
+  AI16Z: 5128 hours (213.7 days)
+  AIXBT: 5128 hours (213.7 days)
+  ALGO: 5128 hours (213.7 days)
+  ANIME: 5128 hours (213.7 days)
+  APE: 5128 hours (213.7 days)
+  APT: 5128 hours (213.7 days)
+  ARB: 5128 hours (213.7 days)
+  AR: 3173 hours (132.2 days)
+  ASTER: 4527 hours (188.6 days)
+  ATOM: 5128 hours (213.7 days)
+  AVAX: 5128 hours (213.7 days)
+  AVNT: 4527 hours (188.6 days)
+  BCH: 5128 hours (213.7 days)
+  BERA: 5128 hours (213.7 days)
+  BNB: 5128 hours (213.7 days)
+  BOME: 5128 hours (213.7 days)
+  BONK: 5128 hours (213.7 days)
+  BRETT: 5128 hours (213.7 days)
+  BTC: 5128 hours (213.7 days)
+  CAKE: 5128 hours (213.7 days)
+  CC: 1483 hours (61.8 days)
+  CHZ: 3173 hours (132.2 days)
+  CRO: 5128 hours (213.7 days)
+  CRV: 5128 hours (213.7 days)
+  CVX: 5128 hours (213.7 days)
+  DASH: 3174 hours (132.2 days)
+  DOGE: 5128 hours (213.7 days)
+  DOLO: 5128 hours (213.7 days)
+  DOT: 5128 hours (213.7 days)
+  DYDX: 5128 hours (213.7 days)
+  EIGEN: 5128 hours (213.7 days)
+  ENA: 5128 hours (213.7 days)
+  ETH: 5128 hours (213.7 days)
+  FARTCOIN: 5128 hours (213.7 days)
+  FET: 5128 hours (213.7 days)
+  FIL: 5128 hours (213.7 days)
+  FLOKI: 5128 hours (213.7 days)
+  GMX: 5128 hours (213.7 days)
+  GOLD: 138 hours (5.8 days)
+  HBAR: 5128 hours (213.7 days)
+  HYPE: 5128 hours (213.7 days)
+  ICP: 5128 hours (213.7 days)
+  INJ: 5128 hours (213.7 days)
+  IP: 1986 hours (82.8 days)
+  JTO: 3174 hours (132.2 days)
+  JUP: 5128 hours (213.7 days)
+  KAS: 5128 hours (213.7 days)
+  KTA: 5012 hours (208.8 days)
+  LDO: 5128 hours (213.7 days)
+  LINEA: 4527 hours (188.6 days)
+  LINK: 5128 hours (213.7 days)
+  LIT: 1986 hours (82.8 days)
+  LTC: 5128 hours (213.7 days)
+  MELANIA: 5128 hours (213.7 days)
+  MEME: 5128 hours (213.7 days)
+  MET: 1483 hours (61.8 days)
+  MEW: 5128 hours (213.7 days)
+  MKR: 5128 hours (213.7 days)
+  MNT: 5128 hours (213.7 days)
+  MON: 2730 hours (113.8 days)
+  MOODENG: 5128 hours (213.7 days)
+  MORPHO: 5128 hours (213.7 days)
+  NEAR: 5128 hours (213.7 days)
+  OKB: 5128 hours (213.7 days)
+  OM: 5128 hours (213.7 days)
+  ONDO: 5128 hours (213.7 days)
+  OP: 5128 hours (213.7 days)
+  ORDI: 5128 hours (213.7 days)
+  PENDLE: 5128 hours (213.7 days)
+  PENGU: 5128 hours (213.7 days)
+  PEPE: 5128 hours (213.7 days)
+  PI: 5128 hours (213.7 days)
+  POL: 5128 hours (213.7 days)
+  PUMP: 5128 hours (213.7 days)
+  RENDER: 5128 hours (213.7 days)
+  SATS: 5128 hours (213.7 days)
+  SEI: 5128 hours (213.7 days)
+  SHIB: 5128 hours (213.7 days)
+  SILVER: 138 hours (5.8 days)
+  SKY: 3173 hours (132.2 days)
+  SOL: 5128 hours (213.7 days)
+  SPX6900: 5128 hours (213.7 days)
+  STX: 5128 hours (213.7 days)
+  SUI: 5128 hours (213.7 days)
+  SYRUP: 3174 hours (132.2 days)
+  S: 5128 hours (213.7 days)
+  TAO: 5128 hours (213.7 days)
+  TIA: 5128 hours (213.7 days)
+  TON: 5128 hours (213.7 days)
+  TRUMP: 5128 hours (213.7 days)
+  TRX: 5128 hours (213.7 days)
+  UNI: 5128 hours (213.7 days)
+  VIRTUAL: 5128 hours (213.7 days)
+  VVV: 5128 hours (213.7 days)
+  WELL: 5128 hours (213.7 days)
+  WIF: 5128 hours (213.7 days)
+  WLD: 5128 hours (213.7 days)
+  WLFI: 5128 hours (213.7 days)
+  XAUT.v2: 1965 hours (81.9 days)
+  XLM: 5128 hours (213.7 days)
+  XMR: 5128 hours (213.7 days)
+  XPL: 4837 hours (201.5 days)
+  XRP: 5128 hours (213.7 days)
+  ZEC: 3173 hours (132.2 days)
+  ZORA: 5012 hours (208.8 days)
+  ZRO: 5128 hours (213.7 days)
 
 ## OHLCV Coverage — 4h (rows per symbol)
-  0G: 1126 4-hour bars (187.7 days)
-  AAVE: 4655 4-hour bars (775.8 days)
-  ADA: 4008 4-hour bars (668.0 days)
-  AERO: 1379 4-hour bars (229.8 days)
-  AI16Z: 2632 4-hour bars (438.7 days)
-  AIXBT: 2750 4-hour bars (458.3 days)
-  ALGO: 1463 4-hour bars (243.8 days)
-  ANIME: 2673 4-hour bars (445.5 days)
-  APE: 4192 4-hour bars (698.7 days)
-  APT: 4175 4-hour bars (695.8 days)
-  ARB: 5991 4-hour bars (998.5 days)
-  AR: 569 4-hour bars (94.8 days)
-  ASTER: 1126 4-hour bars (187.7 days)
-  ATOM: 4793 4-hour bars (798.8 days)
-  AVAX: 4791 4-hour bars (798.5 days)
-  AVNT: 1126 4-hour bars (187.7 days)
-  BCH: 3984 4-hour bars (664.0 days)
-  BERA: 2589 4-hour bars (431.5 days)
-  BNB: 4864 4-hour bars (810.7 days)
-  BOME: 4050 4-hour bars (675.0 days)
-  BONK: 4093 4-hour bars (682.2 days)
-  BRETT: 1379 4-hour bars (229.8 days)
-  BTC: 5992 4-hour bars (998.7 days)
-  CAKE: 3464 4-hour bars (577.3 days)
-  CC: 365 4-hour bars (60.8 days)
-  CHZ: 569 4-hour bars (94.8 days)
-  CRO: 1463 4-hour bars (243.8 days)
-  CRV: 1911 4-hour bars (318.5 days)
-  CVX: 2413 4-hour bars (402.2 days)
-  DASH: 569 4-hour bars (94.8 days)
-  DOGE: 5991 4-hour bars (998.5 days)
-  DOLO: 2126 4-hour bars (354.3 days)
-  DOT: 4008 4-hour bars (668.0 days)
-  DYDX: 3852 4-hour bars (642.0 days)
-  EIGEN: 3360 4-hour bars (560.0 days)
-  ENA: 3674 4-hour bars (612.3 days)
-  ETH: 5993 4-hour bars (998.8 days)
-  FARTCOIN: 2631 4-hour bars (438.5 days)
-  FET: 3504 4-hour bars (584.0 days)
-  FIL: 3925 4-hour bars (654.2 days)
-  FLOKI: 4052 4-hour bars (675.3 days)
-  GMX: 4793 4-hour bars (798.8 days)
-  GOLD: 29 4-hour bars (4.8 days)
-  HBAR: 2413 4-hour bars (402.2 days)
-  HYPE: 2427 4-hour bars (404.5 days)
-  ICP: 4010 4-hour bars (668.3 days)
-  INJ: 3854 4-hour bars (642.3 days)
-  IP: 491 4-hour bars (81.8 days)
-  JTO: 569 4-hour bars (94.8 days)
-  JUP: 3426 4-hour bars (571.0 days)
-  KAS: 1420 4-hour bars (236.7 days)
-  KTA: 1247 4-hour bars (207.8 days)
-  LDO: 3585 4-hour bars (597.5 days)
-  LINEA: 1126 4-hour bars (187.7 days)
-  LINK: 5991 4-hour bars (998.5 days)
-  LIT: 491 4-hour bars (81.8 days)
-  LTC: 5991 4-hour bars (998.5 days)
-  MELANIA: 2675 4-hour bars (445.8 days)
-  MEME: 4051 4-hour bars (675.2 days)
-  MET: 365 4-hour bars (60.8 days)
-  MEW: 3051 4-hour bars (508.5 days)
-  MKR: 3387 4-hour bars (564.5 days)
-  MNT: 1506 4-hour bars (251.0 days)
-  MON: 677 4-hour bars (112.8 days)
-  MOODENG: 1913 4-hour bars (318.8 days)
-  MORPHO: 1331 4-hour bars (221.8 days)
-  NEAR: 4791 4-hour bars (798.5 days)
-  OKB: 1420 4-hour bars (236.7 days)
-  OM: 3386 4-hour bars (564.3 days)
-  ONDO: 2507 4-hour bars (417.8 days)
-  OP: 4793 4-hour bars (798.8 days)
-  ORDI: 4192 4-hour bars (698.7 days)
-  PENDLE: 4046 4-hour bars (674.3 days)
-  PENGU: 2896 4-hour bars (482.7 days)
-  PEPE: 4791 4-hour bars (798.5 days)
-  PI: 1912 4-hour bars (318.7 days)
-  POL: 3465 4-hour bars (577.5 days)
-  PUMP: 1638 4-hour bars (273.0 days)
-  RENDER: 3759 4-hour bars (626.5 days)
-  SATS: 3302 4-hour bars (550.3 days)
-  SEI: 4194 4-hour bars (699.0 days)
-  SHIB: 3695 4-hour bars (615.8 days)
-  SILVER: 29 4-hour bars (4.8 days)
-  SKY: 677 4-hour bars (112.8 days)
-  SOL: 5991 4-hour bars (998.5 days)
-  SPX6900: 1506 4-hour bars (251.0 days)
-  STX: 3650 4-hour bars (608.3 days)
-  SUI: 4192 4-hour bars (698.7 days)
-  SYRUP: 569 4-hour bars (94.8 days)
-  S: 2717 4-hour bars (452.8 days)
-  TAO: 4094 4-hour bars (682.3 days)
-  TIA: 4177 4-hour bars (696.2 days)
-  TON: 3683 4-hour bars (613.8 days)
-  TRUMP: 2699 4-hour bars (449.8 days)
-  TRX: 4136 4-hour bars (689.3 days)
-  UNI: 5993 4-hour bars (998.8 days)
-  VIRTUAL: 2547 4-hour bars (424.5 days)
-  VVV: 1331 4-hour bars (221.8 days)
-  WELL: 1331 4-hour bars (221.8 days)
-  WIF: 4616 4-hour bars (769.3 days)
-  WLD: 4093 4-hour bars (682.2 days)
-  WLFI: 1348 4-hour bars (224.7 days)
-  XAUT.v2: 486 4-hour bars (81.0 days)
-  XLM: 4010 4-hour bars (668.3 days)
-  XMR: 1913 4-hour bars (318.8 days)
-  XPL: 1204 4-hour bars (200.7 days)
-  XRP: 5993 4-hour bars (998.8 days)
-  ZEC: 677 4-hour bars (112.8 days)
-  ZORA: 1247 4-hour bars (207.8 days)
-  ZRO: 2055 4-hour bars (342.5 days)
+  0G: 1132 4-hour bars (188.7 days)
+  AAVE: 4661 4-hour bars (776.8 days)
+  ADA: 4014 4-hour bars (669.0 days)
+  AERO: 1385 4-hour bars (230.8 days)
+  AI16Z: 2638 4-hour bars (439.7 days)
+  AIXBT: 2756 4-hour bars (459.3 days)
+  ALGO: 1469 4-hour bars (244.8 days)
+  ANIME: 2679 4-hour bars (446.5 days)
+  APE: 4198 4-hour bars (699.7 days)
+  APT: 4181 4-hour bars (696.8 days)
+  ARB: 5997 4-hour bars (999.5 days)
+  AR: 575 4-hour bars (95.8 days)
+  ASTER: 1132 4-hour bars (188.7 days)
+  ATOM: 4799 4-hour bars (799.8 days)
+  AVAX: 4797 4-hour bars (799.5 days)
+  AVNT: 1132 4-hour bars (188.7 days)
+  BCH: 3990 4-hour bars (665.0 days)
+  BERA: 2595 4-hour bars (432.5 days)
+  BNB: 4870 4-hour bars (811.7 days)
+  BOME: 4056 4-hour bars (676.0 days)
+  BONK: 4099 4-hour bars (683.2 days)
+  BRETT: 1385 4-hour bars (230.8 days)
+  BTC: 5998 4-hour bars (999.7 days)
+  CAKE: 3470 4-hour bars (578.3 days)
+  CC: 371 4-hour bars (61.8 days)
+  CHZ: 575 4-hour bars (95.8 days)
+  CRO: 1469 4-hour bars (244.8 days)
+  CRV: 1917 4-hour bars (319.5 days)
+  CVX: 2419 4-hour bars (403.2 days)
+  DASH: 575 4-hour bars (95.8 days)
+  DOGE: 5997 4-hour bars (999.5 days)
+  DOLO: 2132 4-hour bars (355.3 days)
+  DOT: 4014 4-hour bars (669.0 days)
+  DYDX: 3858 4-hour bars (643.0 days)
+  EIGEN: 3366 4-hour bars (561.0 days)
+  ENA: 3680 4-hour bars (613.3 days)
+  ETH: 5999 4-hour bars (999.8 days)
+  FARTCOIN: 2637 4-hour bars (439.5 days)
+  FET: 3510 4-hour bars (585.0 days)
+  FIL: 3931 4-hour bars (655.2 days)
+  FLOKI: 4058 4-hour bars (676.3 days)
+  GMX: 4799 4-hour bars (799.8 days)
+  GOLD: 35 4-hour bars (5.8 days)
+  HBAR: 2419 4-hour bars (403.2 days)
+  HYPE: 2433 4-hour bars (405.5 days)
+  ICP: 4016 4-hour bars (669.3 days)
+  INJ: 3860 4-hour bars (643.3 days)
+  IP: 497 4-hour bars (82.8 days)
+  JTO: 575 4-hour bars (95.8 days)
+  JUP: 3432 4-hour bars (572.0 days)
+  KAS: 1426 4-hour bars (237.7 days)
+  KTA: 1253 4-hour bars (208.8 days)
+  LDO: 3591 4-hour bars (598.5 days)
+  LINEA: 1132 4-hour bars (188.7 days)
+  LINK: 5997 4-hour bars (999.5 days)
+  LIT: 497 4-hour bars (82.8 days)
+  LTC: 5997 4-hour bars (999.5 days)
+  MELANIA: 2681 4-hour bars (446.8 days)
+  MEME: 4057 4-hour bars (676.2 days)
+  MET: 371 4-hour bars (61.8 days)
+  MEW: 3057 4-hour bars (509.5 days)
+  MKR: 3393 4-hour bars (565.5 days)
+  MNT: 1512 4-hour bars (252.0 days)
+  MON: 683 4-hour bars (113.8 days)
+  MOODENG: 1919 4-hour bars (319.8 days)
+  MORPHO: 1337 4-hour bars (222.8 days)
+  NEAR: 4797 4-hour bars (799.5 days)
+  OKB: 1426 4-hour bars (237.7 days)
+  OM: 3392 4-hour bars (565.3 days)
+  ONDO: 2513 4-hour bars (418.8 days)
+  OP: 4799 4-hour bars (799.8 days)
+  ORDI: 4198 4-hour bars (699.7 days)
+  PENDLE: 4052 4-hour bars (675.3 days)
+  PENGU: 2902 4-hour bars (483.7 days)
+  PEPE: 4797 4-hour bars (799.5 days)
+  PI: 1918 4-hour bars (319.7 days)
+  POL: 3471 4-hour bars (578.5 days)
+  PUMP: 1644 4-hour bars (274.0 days)
+  RENDER: 3765 4-hour bars (627.5 days)
+  SATS: 3308 4-hour bars (551.3 days)
+  SEI: 4200 4-hour bars (700.0 days)
+  SHIB: 3701 4-hour bars (616.8 days)
+  SILVER: 35 4-hour bars (5.8 days)
+  SKY: 683 4-hour bars (113.8 days)
+  SOL: 5997 4-hour bars (999.5 days)
+  SPX6900: 1512 4-hour bars (252.0 days)
+  STX: 3656 4-hour bars (609.3 days)
+  SUI: 4198 4-hour bars (699.7 days)
+  SYRUP: 575 4-hour bars (95.8 days)
+  S: 2723 4-hour bars (453.8 days)
+  TAO: 4100 4-hour bars (683.3 days)
+  TIA: 4183 4-hour bars (697.2 days)
+  TON: 3689 4-hour bars (614.8 days)
+  TRUMP: 2705 4-hour bars (450.8 days)
+  TRX: 4142 4-hour bars (690.3 days)
+  UNI: 5999 4-hour bars (999.8 days)
+  VIRTUAL: 2553 4-hour bars (425.5 days)
+  VVV: 1337 4-hour bars (222.8 days)
+  WELL: 1337 4-hour bars (222.8 days)
+  WIF: 4622 4-hour bars (770.3 days)
+  WLD: 4099 4-hour bars (683.2 days)
+  WLFI: 1354 4-hour bars (225.7 days)
+  XAUT.v2: 492 4-hour bars (82.0 days)
+  XLM: 4016 4-hour bars (669.3 days)
+  XMR: 1919 4-hour bars (319.8 days)
+  XPL: 1210 4-hour bars (201.7 days)
+  XRP: 5999 4-hour bars (999.8 days)
+  ZEC: 683 4-hour bars (113.8 days)
+  ZORA: 1253 4-hour bars (208.8 days)
+  ZRO: 2061 4-hour bars (343.5 days)
 
 ## OHLCV Coverage — 1d (rows per symbol)
-  0G: 38 days
-  AAVE: 38 days
-  ADA: 38 days
-  AERO: 38 days
-  AI16Z: 38 days
-  AIXBT: 38 days
-  ALGO: 38 days
-  ANIME: 38 days
-  APE: 38 days
-  APT: 38 days
-  ARB: 38 days
-  AR: 38 days
-  ASTER: 38 days
-  ATOM: 38 days
-  AVAX: 38 days
-  AVNT: 38 days
-  BCH: 38 days
-  BERA: 38 days
-  BNB: 38 days
-  BOME: 38 days
-  BONK: 38 days
-  BRETT: 38 days
-  BTC: 38 days
-  CAKE: 38 days
-  CC: 38 days
-  CHZ: 38 days
-  CRO: 38 days
-  CRV: 38 days
-  CVX: 38 days
-  DASH: 38 days
-  DOGE: 38 days
-  DOLO: 38 days
-  DOT: 38 days
-  DYDX: 38 days
-  EIGEN: 38 days
-  ENA: 38 days
-  ETH: 38 days
-  FARTCOIN: 38 days
-  FET: 38 days
-  FIL: 38 days
-  FLOKI: 38 days
-  GMX: 38 days
-  GOLD: 6 days
-  HBAR: 38 days
-  HYPE: 38 days
-  ICP: 38 days
-  INJ: 38 days
-  IP: 38 days
-  JTO: 38 days
-  JUP: 38 days
-  KAS: 38 days
-  KTA: 38 days
-  LDO: 38 days
-  LINEA: 38 days
-  LINK: 38 days
-  LIT: 38 days
-  LTC: 38 days
-  MELANIA: 38 days
-  MEME: 38 days
-  MET: 38 days
-  MEW: 38 days
-  MKR: 38 days
-  MNT: 38 days
-  MON: 38 days
-  MOODENG: 38 days
-  MORPHO: 38 days
-  NEAR: 38 days
-  OKB: 38 days
-  OM: 38 days
-  ONDO: 38 days
-  OP: 38 days
-  ORDI: 38 days
-  PENDLE: 38 days
-  PENGU: 38 days
-  PEPE: 38 days
-  PI: 38 days
-  POL: 38 days
-  PUMP: 38 days
-  RENDER: 38 days
-  SATS: 38 days
-  SEI: 38 days
-  SHIB: 38 days
-  SILVER: 6 days
-  SKY: 38 days
-  SOL: 38 days
-  SPX6900: 38 days
-  STX: 38 days
-  SUI: 38 days
-  SYRUP: 38 days
-  S: 38 days
-  TAO: 38 days
-  TIA: 38 days
-  TON: 38 days
-  TRUMP: 38 days
-  TRX: 38 days
-  UNI: 38 days
-  VIRTUAL: 38 days
-  VVV: 38 days
-  WELL: 38 days
-  WIF: 38 days
-  WLD: 38 days
-  WLFI: 38 days
-  XAUT.v2: 38 days
-  XLM: 38 days
-  XMR: 38 days
-  XPL: 38 days
-  XRP: 38 days
-  ZEC: 38 days
-  ZORA: 38 days
-  ZRO: 38 days
+  0G: 39 days
+  AAVE: 39 days
+  ADA: 39 days
+  AERO: 39 days
+  AI16Z: 39 days
+  AIXBT: 39 days
+  ALGO: 39 days
+  ANIME: 39 days
+  APE: 39 days
+  APT: 39 days
+  ARB: 39 days
+  AR: 39 days
+  ASTER: 39 days
+  ATOM: 39 days
+  AVAX: 39 days
+  AVNT: 39 days
+  BCH: 39 days
+  BERA: 39 days
+  BNB: 39 days
+  BOME: 39 days
+  BONK: 39 days
+  BRETT: 39 days
+  BTC: 39 days
+  CAKE: 39 days
+  CC: 39 days
+  CHZ: 39 days
+  CRO: 39 days
+  CRV: 39 days
+  CVX: 39 days
+  DASH: 39 days
+  DOGE: 39 days
+  DOLO: 39 days
+  DOT: 39 days
+  DYDX: 39 days
+  EIGEN: 39 days
+  ENA: 39 days
+  ETH: 39 days
+  FARTCOIN: 39 days
+  FET: 39 days
+  FIL: 39 days
+  FLOKI: 39 days
+  GMX: 39 days
+  GOLD: 7 days
+  HBAR: 39 days
+  HYPE: 39 days
+  ICP: 39 days
+  INJ: 39 days
+  IP: 39 days
+  JTO: 39 days
+  JUP: 39 days
+  KAS: 39 days
+  KTA: 39 days
+  LDO: 39 days
+  LINEA: 39 days
+  LINK: 39 days
+  LIT: 39 days
+  LTC: 39 days
+  MELANIA: 39 days
+  MEME: 39 days
+  MET: 39 days
+  MEW: 39 days
+  MKR: 39 days
+  MNT: 39 days
+  MON: 39 days
+  MOODENG: 39 days
+  MORPHO: 39 days
+  NEAR: 39 days
+  OKB: 39 days
+  OM: 39 days
+  ONDO: 39 days
+  OP: 39 days
+  ORDI: 39 days
+  PENDLE: 39 days
+  PENGU: 39 days
+  PEPE: 39 days
+  PI: 39 days
+  POL: 39 days
+  PUMP: 39 days
+  RENDER: 39 days
+  SATS: 39 days
+  SEI: 39 days
+  SHIB: 39 days
+  SILVER: 7 days
+  SKY: 39 days
+  SOL: 39 days
+  SPX6900: 39 days
+  STX: 39 days
+  SUI: 39 days
+  SYRUP: 39 days
+  S: 39 days
+  TAO: 39 days
+  TIA: 39 days
+  TON: 39 days
+  TRUMP: 39 days
+  TRX: 39 days
+  UNI: 39 days
+  VIRTUAL: 39 days
+  VVV: 39 days
+  WELL: 39 days
+  WIF: 39 days
+  WLD: 39 days
+  WLFI: 39 days
+  XAUT.v2: 39 days
+  XLM: 39 days
+  XMR: 39 days
+  XPL: 39 days
+  XRP: 39 days
+  ZEC: 39 days
+  ZORA: 39 days
+  ZRO: 39 days
