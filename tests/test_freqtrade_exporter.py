@@ -149,11 +149,16 @@ def test_export_preserves_existing_longer_history(tmp_path):
     storage = ParquetStorage(storage_dir)
 
     # Save candles that start in 2024 (the "older" data)
-    older_data = pd.DataFrame({
-        "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
-        "open": [1.0, 2.0], "high": [1.0, 2.0], "low": [1.0, 2.0], "close": [1.0, 2.0],
-        "symbol": ["ETH", "ETH"],
-    })
+    older_data = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"], utc=True),
+            "open": [1.0, 2.0],
+            "high": [1.0, 2.0],
+            "low": [1.0, 2.0],
+            "close": [1.0, 2.0],
+            "symbol": ["ETH", "ETH"],
+        }
+    )
     storage.save_candles(older_data, "1h", "ETH")
 
     output_dir = tmp_path / "output"
@@ -164,11 +169,16 @@ def test_export_preserves_existing_longer_history(tmp_path):
     exporter.export(symbols=["ETH"], timeframes=["1h"])
 
     # Now add newer candles to storage
-    newer_data = pd.DataFrame({
-        "timestamp": pd.to_datetime(["2024-01-03", "2024-01-04"], utc=True),
-        "open": [3.0, 4.0], "high": [3.0, 4.0], "low": [3.0, 4.0], "close": [3.0, 4.0],
-        "symbol": ["ETH", "ETH"],
-    })
+    newer_data = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-03", "2024-01-04"], utc=True),
+            "open": [3.0, 4.0],
+            "high": [3.0, 4.0],
+            "low": [3.0, 4.0],
+            "close": [3.0, 4.0],
+            "symbol": ["ETH", "ETH"],
+        }
+    )
     storage.save_candles(newer_data, "1h", "ETH")
 
     # Second export — should merge with existing feather, not replace it
@@ -191,11 +201,16 @@ def test_export_raises_when_existing_feather_cannot_be_read(tmp_path, monkeypatc
     storage_dir.mkdir()
     storage = ParquetStorage(storage_dir)
 
-    df = pd.DataFrame({
-        "timestamp": pd.to_datetime(["2024-01-01"], utc=True),
-        "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
-        "symbol": ["ETH"],
-    })
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"], utc=True),
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "symbol": ["ETH"],
+        }
+    )
     storage.save_candles(df, "1h", "ETH")
 
     output_dir = tmp_path / "output"

@@ -309,7 +309,9 @@ class ParquetStorage:
             incoming = merged
 
         table = pa.Table.from_pandas(incoming.to_pandas(), schema=OHLCV_SCHEMA)
-        pl.from_arrow(table).write_parquet(str(output_path), compression="zstd", compression_level=3)
+        pl.from_arrow(table).write_parquet(
+            str(output_path), compression="zstd", compression_level=3
+        )
 
         return output_path
 

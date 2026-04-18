@@ -79,9 +79,7 @@ def test_save_candles_merges_existing_by_default():
 
         historic = pd.DataFrame(
             {
-                "timestamp": pd.to_datetime(
-                    ["2022-01-01", "2022-01-02", "2022-01-03"], utc=True
-                ),
+                "timestamp": pd.to_datetime(["2022-01-01", "2022-01-02", "2022-01-03"], utc=True),
                 "open": [100.0, 101.0, 102.0],
                 "high": [105.0, 106.0, 107.0],
                 "low": [99.0, 100.0, 101.0],
@@ -122,9 +120,7 @@ def test_save_candles_overwrite_flag_replaces_data():
 
         historic = pd.DataFrame(
             {
-                "timestamp": pd.to_datetime(
-                    ["2022-01-01", "2022-01-02", "2022-01-03"], utc=True
-                ),
+                "timestamp": pd.to_datetime(["2022-01-01", "2022-01-02", "2022-01-03"], utc=True),
                 "open": [100.0, 101.0, 102.0],
                 "high": [105.0, 106.0, 107.0],
                 "low": [99.0, 100.0, 101.0],

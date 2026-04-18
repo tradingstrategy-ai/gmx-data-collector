@@ -227,9 +227,7 @@ class FreqtradeExporter:
         symbol_dir = self.funding_dir / symbol
         if not symbol_dir.exists():
             return []
-        return sorted(
-            f.stem for f in symbol_dir.glob("*.parquet") if not f.name.startswith(".")
-        )
+        return sorted(f.stem for f in symbol_dir.glob("*.parquet") if not f.name.startswith("."))
 
     # ------------------------------------------------------------------
     # Data readers

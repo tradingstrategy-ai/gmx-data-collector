@@ -18,14 +18,16 @@ def _make_candles(symbols, dates):
     rows = []
     for sym in symbols:
         for d in dates:
-            rows.append({
-                "timestamp": pd.Timestamp(d, tz="UTC"),
-                "open": 1.0,
-                "high": 1.0,
-                "low": 1.0,
-                "close": 1.0,
-                "symbol": sym,
-            })
+            rows.append(
+                {
+                    "timestamp": pd.Timestamp(d, tz="UTC"),
+                    "open": 1.0,
+                    "high": 1.0,
+                    "low": 1.0,
+                    "close": 1.0,
+                    "symbol": sym,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -75,4 +77,6 @@ def test_makefile_export_supports_keep_flag():
     makefile = Path(__file__).parent.parent / "Makefile"
     content = makefile.read_text()
     assert "KEEP ?=" in content, "Makefile must declare KEEP variable with default"
-    assert "$(KEEP)" in content, "Makefile must wire $(KEEP) into the export-freqtrade CLI invocation"
+    assert "$(KEEP)" in content, (
+        "Makefile must wire $(KEEP) into the export-freqtrade CLI invocation"
+    )

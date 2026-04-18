@@ -704,9 +704,7 @@ class ChainlinkRPCCollector:
                         address=Web3.to_checksum_address(agg_address),
                         abi=self.AGGREGATOR_OLD_ABI,
                     )
-                    agg_latest_round = self._call_with_retry(
-                        agg_contract.functions.latestRound()
-                    )
+                    agg_latest_round = self._call_with_retry(agg_contract.functions.latestRound())
                     # Encode back to proxy round ID space
                     last_round_id = (phase_id << 64) + int(agg_latest_round)
                 except Exception as exc:

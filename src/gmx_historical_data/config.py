@@ -138,23 +138,21 @@ EXCLUDED_SYMBOLS = {
     "APE_DEPRECATED",  # Deprecated APE market (may appear as "APE_deprecated" in GMX metadata)
     # Stablecoins — fixed at $1, no OHLCV value
     "USDC",
-    "USDC.E",   # bridged USDC (USDC.e)
+    "USDC.E",  # bridged USDC (USDC.e)
     "USDT",
     "DAI",
     # Collateral-only tokens — not tradeable perp markets
-    "WBTC.B",   # wrapped BTC (WBTC.b)
+    "WBTC.B",  # wrapped BTC (WBTC.b)
     "STETH",
     # Synthetic stablecoins — pegged to $1, no OHLCV value
-    "USDE",     # Ethena USDe
+    "USDE",  # Ethena USDe
 }
 
 # Symbol prefixes to exclude (covers all current and future variants)
 # GLV vaults (e.g. "GLV [ETH-USDC]", "GLV [WBTC.b-USDC]") are liquidity vault
 # tokens, not tradeable perpetual markets — they have no price feed suitable for
 # OHLCV candle generation.
-EXCLUDED_SYMBOL_PREFIXES = (
-    "GLV",
-)
+EXCLUDED_SYMBOL_PREFIXES = ("GLV",)
 
 
 def is_excluded_symbol(symbol: str) -> bool:
