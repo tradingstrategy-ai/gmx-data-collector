@@ -58,7 +58,7 @@ KEEP ?=
 
 .PHONY: help install show-config monitor \
         refresh-data full-data full-data-nn \
-        collect-update collect-full collect-full-nn export-freqtrade \
+        collect-update collect-update-nn collect-full collect-full-nn export-freqtrade \
         funding-unified funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         oi oi-resume \
@@ -76,6 +76,7 @@ help:
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
+	@echo "  collect-update-nn    Candles: incremental, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  collect-full         Candles: full historical from genesis, nice+10 (enable quickstart with QUICKSTART=--quickstart)"
 	@echo "  collect-full-nn      Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
@@ -150,6 +151,21 @@ endef
 
 collect-update:
 	$(call COLLECT_CMD,incremental,update,)
+
+# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency 10.
+collect-update-nn:
+	@echo "Starting incremental candle collection (no-nice, concurrency 10)..."
+	@echo "  Output:      $(DATA_DIR)"
+	@echo "  Concurrency: 10"
+	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
+	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
+	@echo ""
+	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
+	poetry run python -m gmx_historical_data.cli collect --update \
+		--output-dir "$(DATA_DIR)" \
+		--concurrency 10 \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(ARGS)
 
 # --quickstart is OFF BY DEFAULT. Enable with QUICKSTART=--quickstart when
 # invoking: `make collect-full QUICKSTART=--quickstart`.
