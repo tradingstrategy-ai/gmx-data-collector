@@ -60,7 +60,9 @@ def reindex_and_mark_missing(df: pl.DataFrame, tf_minutes: int) -> tuple[pl.Data
     if df.is_empty():
         return df, pl.Series("missing", [], dtype=pl.Boolean)
 
-    sorted_df = df.sort("timestamp")
+    sorted_df = df.sort("timestamp").with_columns(
+        pl.col("timestamp").dt.cast_time_unit("us")
+    )
     start = sorted_df["timestamp"][0]
     end = sorted_df["timestamp"][-1]
     grid = pl.datetime_range(

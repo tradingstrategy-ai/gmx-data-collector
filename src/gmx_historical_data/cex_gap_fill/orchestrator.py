@@ -115,6 +115,8 @@ def fill_gaps_from_cex(
                 continue
 
             gmx_df = pl.read_parquet(parquet_path)
+            if "volume" not in gmx_df.columns:
+                gmx_df = gmx_df.with_columns(pl.lit(0.0).alias("volume"))
             cex_path = _resolve_cex_feather(cex_datadir, route.exchange, route.pair, tf)
             cex_df = _load_cex_feather(cex_path, gmx_df)
 
