@@ -6,9 +6,6 @@ using Binance/Bybit data downloaded via the ./freqtrade-gmx wrapper.
 Entry point: :func:`fill_gaps_from_cex`. Never imported by legacy code paths.
 """
 
+from .orchestrator import fill_gaps_from_cex  # noqa: F401
+
 __all__ = ["fill_gaps_from_cex"]
-
-
-def fill_gaps_from_cex(*args, **kwargs):
-    """Placeholder — filled in Task 16."""
-    raise NotImplementedError

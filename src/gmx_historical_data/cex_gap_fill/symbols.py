@@ -5,6 +5,8 @@ Copied verbatim from ``gmx-strategies/scripts/merge_gmx_binance.py`` and
 manually when those change.
 """
 
+# GMX symbol names from the GMX registry are always uppercase (e.g. "BONK", "ETH").
+# These mappings assume uppercase input.
 GMX_TO_BINANCE_NAME: dict[str, str] = {
     "BONK": "1000BONK",
     "FLOKI": "1000FLOKI",
@@ -36,6 +38,19 @@ def normalize_k_prefix(ticker: str) -> str:
 CEX_QUOTE_SETTLE = "USDT"  # Both Binance & Bybit linear perps.
 
 
+def _bare_symbol(normalized: str) -> str:
+    """Strip the leading K from a K-prefixed symbol, leaving the bare name.
+
+    Used internally to look up 1000x mappings.
+
+    :param normalized: Already-normalized ticker (K-prefix uppercased), e.g. ``KPEPE``.
+    :returns: Bare symbol, e.g. ``PEPE``; unchanged if not K-prefixed.
+    """
+    if normalized.startswith("K") and len(normalized) > 1 and normalized[1].isupper():
+        return normalized[1:]
+    return normalized
+
+
 def gmx_symbol_to_cex_base(gmx_symbol: str) -> str:
     """Resolve GMX symbol to CEX base (no quote/settle).
 
@@ -46,11 +61,7 @@ def gmx_symbol_to_cex_base(gmx_symbol: str) -> str:
     :returns: e.g. ``1000BONK``, ``1000PEPE``, ``BTC``.
     """
     normalized = normalize_k_prefix(gmx_symbol)
-    # Strip leading K if present and look up bare name for 1000x mapping.
-    if normalized.startswith("K") and len(normalized) > 1 and normalized[1].isupper():
-        bare = normalized[1:]
-    else:
-        bare = normalized
+    bare = _bare_symbol(normalized)
     if bare in GMX_TO_BINANCE_NAME:
         return GMX_TO_BINANCE_NAME[bare]
     return normalized
@@ -71,10 +82,7 @@ def price_scale_for(gmx_symbol: str) -> float:
     :returns: Scale factor; 1.0 for standard tokens.
     """
     normalized = normalize_k_prefix(gmx_symbol)
-    if normalized.startswith("K") and len(normalized) > 1 and normalized[1].isupper():
-        bare = normalized[1:]
-    else:
-        bare = normalized
+    bare = _bare_symbol(normalized)
     if bare in PRICE_DIVISORS:
         return 1.0 / PRICE_DIVISORS[bare]
     return 1.0
