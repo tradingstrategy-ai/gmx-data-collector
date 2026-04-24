@@ -1,0 +1,420 @@
+{
+  "auto": {},
+  "defaults": {
+    "fallback": "bybit",
+    "primary": "binance",
+    "skip_unresolved": true
+  },
+  "overrides": {
+    "0G": {
+      "exchange": "skip"
+    },
+    "AAVE": {
+      "exchange": "binance",
+      "pair": "AAVE/USDT:USDT"
+    },
+    "ADA": {
+      "exchange": "binance",
+      "pair": "ADA/USDT:USDT"
+    },
+    "AERO": {
+      "exchange": "skip"
+    },
+    "AI16Z": {
+      "exchange": "skip"
+    },
+    "AIXBT": {
+      "exchange": "skip"
+    },
+    "ALGO": {
+      "exchange": "binance",
+      "pair": "ALGO/USDT:USDT"
+    },
+    "ANIME": {
+      "exchange": "skip"
+    },
+    "APE": {
+      "exchange": "binance",
+      "pair": "APE/USDT:USDT"
+    },
+    "APT": {
+      "exchange": "binance",
+      "pair": "APT/USDT:USDT"
+    },
+    "AR": {
+      "exchange": "binance",
+      "pair": "AR/USDT:USDT"
+    },
+    "ARB": {
+      "exchange": "binance",
+      "pair": "ARB/USDT:USDT"
+    },
+    "ASTER": {
+      "exchange": "skip"
+    },
+    "ATOM": {
+      "exchange": "binance",
+      "pair": "ATOM/USDT:USDT"
+    },
+    "AVAX": {
+      "exchange": "binance",
+      "pair": "AVAX/USDT:USDT"
+    },
+    "AVNT": {
+      "exchange": "skip"
+    },
+    "BCH": {
+      "exchange": "binance",
+      "pair": "BCH/USDT:USDT"
+    },
+    "BERA": {
+      "exchange": "binance",
+      "pair": "BERA/USDT:USDT"
+    },
+    "BNB": {
+      "exchange": "binance",
+      "pair": "BNB/USDT:USDT"
+    },
+    "BOME": {
+      "exchange": "binance",
+      "pair": "BOME/USDT:USDT"
+    },
+    "BONK": {
+      "exchange": "binance",
+      "pair": "1000BONK/USDT:USDT"
+    },
+    "BRETT": {
+      "exchange": "skip"
+    },
+    "BTC": {
+      "exchange": "binance",
+      "pair": "BTC/USDT:USDT"
+    },
+    "CAKE": {
+      "exchange": "skip"
+    },
+    "CC": {
+      "exchange": "skip"
+    },
+    "CHZ": {
+      "exchange": "binance",
+      "pair": "CHZ/USDT:USDT"
+    },
+    "CRO": {
+      "exchange": "skip"
+    },
+    "CRV": {
+      "exchange": "binance",
+      "pair": "CRV/USDT:USDT"
+    },
+    "CVX": {
+      "exchange": "skip"
+    },
+    "DASH": {
+      "exchange": "skip"
+    },
+    "DOGE": {
+      "exchange": "binance",
+      "pair": "DOGE/USDT:USDT"
+    },
+    "DOLO": {
+      "exchange": "skip"
+    },
+    "DOT": {
+      "exchange": "binance",
+      "pair": "DOT/USDT:USDT"
+    },
+    "DYDX": {
+      "exchange": "binance",
+      "pair": "DYDX/USDT:USDT"
+    },
+    "EIGEN": {
+      "exchange": "bybit",
+      "pair": "EIGEN/USDT:USDT"
+    },
+    "ENA": {
+      "exchange": "binance",
+      "pair": "ENA/USDT:USDT"
+    },
+    "ETH": {
+      "exchange": "binance",
+      "pair": "ETH/USDT:USDT"
+    },
+    "FARTCOIN": {
+      "exchange": "skip"
+    },
+    "FET": {
+      "exchange": "binance",
+      "pair": "FET/USDT:USDT"
+    },
+    "FIL": {
+      "exchange": "binance",
+      "pair": "FIL/USDT:USDT"
+    },
+    "FLOKI": {
+      "exchange": "binance",
+      "pair": "1000FLOKI/USDT:USDT"
+    },
+    "GMX": {
+      "exchange": "skip"
+    },
+    "GOLD": {
+      "exchange": "skip"
+    },
+    "HBAR": {
+      "exchange": "binance",
+      "pair": "HBAR/USDT:USDT"
+    },
+    "HYPE": {
+      "exchange": "skip"
+    },
+    "ICP": {
+      "exchange": "binance",
+      "pair": "ICP/USDT:USDT"
+    },
+    "INJ": {
+      "exchange": "binance",
+      "pair": "INJ/USDT:USDT"
+    },
+    "IP": {
+      "exchange": "skip"
+    },
+    "JTO": {
+      "exchange": "binance",
+      "pair": "JTO/USDT:USDT"
+    },
+    "JUP": {
+      "exchange": "binance",
+      "pair": "JUP/USDT:USDT"
+    },
+    "KAS": {
+      "exchange": "bybit",
+      "pair": "KAS/USDT:USDT"
+    },
+    "KTA": {
+      "exchange": "skip"
+    },
+    "LDO": {
+      "exchange": "binance",
+      "pair": "LDO/USDT:USDT"
+    },
+    "LINEA": {
+      "exchange": "skip"
+    },
+    "LINK": {
+      "exchange": "binance",
+      "pair": "LINK/USDT:USDT"
+    },
+    "LIT": {
+      "exchange": "skip"
+    },
+    "LTC": {
+      "exchange": "binance",
+      "pair": "LTC/USDT:USDT"
+    },
+    "MELANIA": {
+      "exchange": "skip"
+    },
+    "MEME": {
+      "exchange": "skip"
+    },
+    "MET": {
+      "exchange": "skip"
+    },
+    "MEW": {
+      "exchange": "binance",
+      "pair": "MEW/USDT:USDT"
+    },
+    "MKR": {
+      "exchange": "binance",
+      "pair": "MKR/USDT:USDT"
+    },
+    "MNT": {
+      "exchange": "bybit",
+      "pair": "MNT/USDT:USDT"
+    },
+    "MON": {
+      "exchange": "skip"
+    },
+    "MOODENG": {
+      "exchange": "skip"
+    },
+    "MORPHO": {
+      "exchange": "bybit",
+      "pair": "MORPHO/USDT:USDT"
+    },
+    "NEAR": {
+      "exchange": "binance",
+      "pair": "NEAR/USDT:USDT"
+    },
+    "OKB": {
+      "exchange": "skip"
+    },
+    "OM": {
+      "exchange": "binance",
+      "pair": "OM/USDT:USDT"
+    },
+    "ONDO": {
+      "exchange": "binance",
+      "pair": "ONDO/USDT:USDT"
+    },
+    "OP": {
+      "exchange": "binance",
+      "pair": "OP/USDT:USDT"
+    },
+    "ORDI": {
+      "exchange": "binance",
+      "pair": "ORDI/USDT:USDT"
+    },
+    "PENDLE": {
+      "exchange": "binance",
+      "pair": "PENDLE/USDT:USDT"
+    },
+    "PENGU": {
+      "exchange": "binance",
+      "pair": "PENGU/USDT:USDT"
+    },
+    "PEPE": {
+      "exchange": "binance",
+      "pair": "1000PEPE/USDT:USDT"
+    },
+    "PI": {
+      "exchange": "skip"
+    },
+    "POL": {
+      "exchange": "binance",
+      "pair": "POL/USDT:USDT"
+    },
+    "PUMP": {
+      "exchange": "skip"
+    },
+    "RENDER": {
+      "exchange": "binance",
+      "pair": "RENDER/USDT:USDT"
+    },
+    "S": {
+      "exchange": "bybit",
+      "pair": "S/USDT:USDT"
+    },
+    "SATS": {
+      "exchange": "binance",
+      "pair": "1000SATS/USDT:USDT"
+    },
+    "SEI": {
+      "exchange": "binance",
+      "pair": "SEI/USDT:USDT"
+    },
+    "SHIB": {
+      "exchange": "binance",
+      "pair": "1000SHIB/USDT:USDT"
+    },
+    "SILVER": {
+      "exchange": "skip"
+    },
+    "SKY": {
+      "exchange": "binance",
+      "pair": "SKY/USDT:USDT"
+    },
+    "SOL": {
+      "exchange": "binance",
+      "pair": "SOL/USDT:USDT"
+    },
+    "SPX6900": {
+      "exchange": "skip"
+    },
+    "STX": {
+      "exchange": "binance",
+      "pair": "STX/USDT:USDT"
+    },
+    "SUI": {
+      "exchange": "binance",
+      "pair": "SUI/USDT:USDT"
+    },
+    "SYRUP": {
+      "exchange": "skip"
+    },
+    "TAO": {
+      "exchange": "binance",
+      "pair": "TAO/USDT:USDT"
+    },
+    "TIA": {
+      "exchange": "binance",
+      "pair": "TIA/USDT:USDT"
+    },
+    "TON": {
+      "exchange": "binance",
+      "pair": "TON/USDT:USDT"
+    },
+    "TRUMP": {
+      "exchange": "binance",
+      "pair": "TRUMP/USDT:USDT"
+    },
+    "TRX": {
+      "exchange": "binance",
+      "pair": "TRX/USDT:USDT"
+    },
+    "UNI": {
+      "exchange": "binance",
+      "pair": "UNI/USDT:USDT"
+    },
+    "VIRTUAL": {
+      "exchange": "binance",
+      "pair": "VIRTUAL/USDT:USDT"
+    },
+    "VVV": {
+      "exchange": "skip"
+    },
+    "WELL": {
+      "exchange": "skip"
+    },
+    "WIF": {
+      "exchange": "binance",
+      "pair": "WIF/USDT:USDT"
+    },
+    "WLD": {
+      "exchange": "binance",
+      "pair": "WLD/USDT:USDT"
+    },
+    "WLFI": {
+      "exchange": "skip"
+    },
+    "XAUT": {
+      "exchange": "skip"
+    },
+    "XAUT.v2": {
+      "exchange": "skip"
+    },
+    "XLM": {
+      "exchange": "binance",
+      "pair": "XLM/USDT:USDT"
+    },
+    "XMR": {
+      "exchange": "skip"
+    },
+    "XPL": {
+      "exchange": "skip"
+    },
+    "XRP": {
+      "exchange": "binance",
+      "pair": "XRP/USDT:USDT"
+    },
+    "ZEC": {
+      "exchange": "binance",
+      "pair": "ZEC/USDT:USDT"
+    },
+    "ZORA": {
+      "exchange": "skip"
+    },
+    "ZRO": {
+      "exchange": "binance",
+      "pair": "ZRO/USDT:USDT"
+    },
+    "tBTC": {
+      "exchange": "skip"
+    },
+    "wstETH": {
+      "exchange": "skip"
+    }
+  },
+  "version": 1
+}

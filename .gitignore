@@ -100,6 +100,7 @@ $RECYCLE.BIN/
 # Config files (may contain credentials, but allow examples)
 configs/*.json
 !configs/*.example.json
+!configs/cex_routing.json
 
 # Data directories (GMX historical data)
 data/
