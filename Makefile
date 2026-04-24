@@ -52,6 +52,14 @@ INCLUDE_DATASTORE ?=
 # Pass --keep to export-freqtrade to preserve source parquet after export (default: delete)
 KEEP ?=
 
+# CEX gap-fill knobs (additive, optional)
+GAP_THRESHOLD    ?= 0.20
+MERGE_GAP_BARS   ?= 2
+CEX_DATADIR      ?=
+CEX_EXCHANGES    ?= binance,bybit
+CEX_ROUTING_FILE ?= configs/cex_routing.json
+SKIP_DOWNLOAD    ?=
+
 # ==============================================================================
 # Targets
 # ==============================================================================
@@ -63,7 +71,8 @@ KEEP ?=
         funding-feather funding-full \
         oi oi-resume \
         pool-liquidity pool-liquidity-resume \
-        extract-all extract-all-resume
+        extract-all extract-all-resume \
+        fill-gaps-cex refresh-data-cex full-data-cex full-data-nn-cex
 
 # Default target
 help:
@@ -73,6 +82,9 @@ help:
 	@echo "  refresh-data    Incremental update (daily use): candles + funding + OI + liquidity + export"
 	@echo "  full-data       Full historical download from genesis + export"
 	@echo "  full-data-nn    Full historical download, no nice, concurrency 10 + export"
+	@echo "  refresh-data-cex   Incremental + CEX gap-fill (Binance/Bybit) + export"
+	@echo "  full-data-cex      Full historical + CEX gap-fill + export"
+	@echo "  full-data-nn-cex   Full historical no-nice + CEX gap-fill + export"
 	@echo ""
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
@@ -89,6 +101,7 @@ help:
 	@echo "  pool-liquidity       Pool Liquidity: full historical from genesis"
 	@echo "  pool-liquidity-resume  Pool Liquidity: incremental (resume from checkpoint)"
 	@echo "  export-freqtrade     Export candles + funding to FreqTrade format"
+	@echo "  fill-gaps-cex        Run CEX gap-fill stage on existing parquet"
 	@echo ""
 	@echo "Utility:"
 	@echo "  install         Install dependencies with Poetry"
@@ -389,3 +402,42 @@ show-config:
 	@echo "  MARKET                    = $(MARKET)"
 	@echo "  SYMBOL                    = $(SYMBOL)"
 	@echo "  ARGS                      = $(ARGS)"
+	@echo "  GAP_THRESHOLD             = $(GAP_THRESHOLD)"
+	@echo "  MERGE_GAP_BARS            = $(MERGE_GAP_BARS)"
+	@echo "  CEX_EXCHANGES             = $(CEX_EXCHANGES)"
+	@echo "  CEX_ROUTING_FILE          = $(CEX_ROUTING_FILE)"
+	@echo "  CEX_DATADIR               = $(CEX_DATADIR)"
+
+# ==============================================================================
+# CEX Gap-Fill (additive — runs between collect and export-freqtrade)
+# ==============================================================================
+
+fill-gaps-cex:
+	@echo "Filling GMX price gaps with CEX data..."
+	@echo "  Data dir:    $(DATA_DIR)"
+	@echo "  Threshold:   $(GAP_THRESHOLD)"
+	@echo "  Exchanges:   $(CEX_EXCHANGES)"
+	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
+	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
+	$(NICE) poetry run python -m gmx_historical_data.cli fill-gaps-cex \
+		--data-dir "$(DATA_DIR)" \
+		--gap-threshold $(GAP_THRESHOLD) \
+		--merge-gap-bars $(MERGE_GAP_BARS) \
+		--exchanges $(CEX_EXCHANGES) \
+		--routing-file "$(CEX_ROUTING_FILE)" \
+		$(if $(CEX_DATADIR),--cex-datadir "$(CEX_DATADIR)",) \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(if $(SKIP_DOWNLOAD),--skip-download,) \
+		$(ARGS)
+
+refresh-data-cex: collect-update funding-unified-resume extract-all-resume fill-gaps-cex export-freqtrade
+	@echo ""
+	@echo "Incremental refresh (with CEX gap-fill) complete"
+
+full-data-cex: collect-full funding-unified extract-all fill-gaps-cex export-freqtrade
+	@echo ""
+	@echo "Full data download (with CEX gap-fill) complete"
+
+full-data-nn-cex: collect-full-nn funding-unified extract-all fill-gaps-cex export-freqtrade
+	@echo ""
+	@echo "Full data download no-nice (with CEX gap-fill) complete"
