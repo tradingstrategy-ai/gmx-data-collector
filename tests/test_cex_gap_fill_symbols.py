@@ -1,6 +1,11 @@
 """Tests for cex_gap_fill.symbols module."""
 
-from gmx_historical_data.cex_gap_fill.symbols import normalize_k_prefix
+from gmx_historical_data.cex_gap_fill.symbols import (
+    normalize_k_prefix,
+    gmx_symbol_to_cex_pair,
+    gmx_symbol_to_cex_base,
+    price_scale_for,
+)
 
 
 def test_normalize_k_prefix_lowercase_k_prepended_uppercase_base():
@@ -21,13 +26,6 @@ def test_normalize_k_prefix_lowercase_k_lowercase_base_unchanged():
 
 def test_normalize_k_prefix_empty_string_unchanged():
     assert normalize_k_prefix("") == ""
-
-
-from gmx_historical_data.cex_gap_fill.symbols import (
-    gmx_symbol_to_cex_pair,
-    gmx_symbol_to_cex_base,
-    price_scale_for,
-)
 
 
 def test_gmx_symbol_to_cex_base_plain_symbol_unchanged():
