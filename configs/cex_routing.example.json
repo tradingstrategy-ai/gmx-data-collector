@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "defaults": {
+    "primary": "binance",
+    "fallback": "bybit",
+    "skip_unresolved": true
+  },
+  "overrides": {},
+  "auto": {}
+}
