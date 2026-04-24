@@ -22,7 +22,7 @@ from .router import RoutingTable, load_routing, save_routing
 
 log = logging.getLogger(__name__)
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_TIMEFRAMES = ["1min", "5min", "15min", "1h", "4h", "1d"]
 
 
