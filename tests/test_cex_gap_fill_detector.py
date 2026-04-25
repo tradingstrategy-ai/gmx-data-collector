@@ -17,7 +17,9 @@ from gmx_historical_data.cex_gap_fill.detector import (
 )
 
 
-def _build_df(prices: list[float], volumes: list[float] | None = None, tf_minutes: int = 60) -> pl.DataFrame:
+def _build_df(
+    prices: list[float], volumes: list[float] | None = None, tf_minutes: int = 60
+) -> pl.DataFrame:
     assert volumes is None or len(prices) == len(volumes)
     start = datetime(2026, 1, 1, tzinfo=UTC)
     ts = [start + timedelta(minutes=tf_minutes * i) for i in range(len(prices))]
@@ -34,6 +36,7 @@ def _build_df(prices: list[float], volumes: list[float] | None = None, tf_minute
 
 
 # ── Task 4 tests ──────────────────────────────────────────────────────────────
+
 
 def test_price_jump_mask_detects_100pct_jump():
     df = _build_df([100, 100, 200, 200, 200])
@@ -60,6 +63,7 @@ def test_price_jump_mask_negative_jump_detected():
 
 
 # ── Task 5 tests ──────────────────────────────────────────────────────────────
+
 
 def test_zero_volume_mask_flags_zeros():
     df = _build_df([100, 100, 100], volumes=[10, 0, 5])
@@ -95,11 +99,13 @@ def test_minutes_for_timeframe_1min():
 
 def test_minutes_for_timeframe_invalid_raises():
     import pytest
+
     with pytest.raises(ValueError):
         minutes_for_timeframe("2h")
 
 
 # ── Task 6 tests ──────────────────────────────────────────────────────────────
+
 
 def test_cluster_ranges_merges_contiguous_trues():
     mask = pl.Series("m", [False, True, True, False, True, False])
@@ -130,3 +136,23 @@ def test_detect_gaps_full_pipeline():
     assert result.full_ranges[0].kind == RangeKind.FULL
     assert len(result.volume_ranges) == 1
     assert result.volume_ranges[0].kind == RangeKind.VOLUME_ONLY
+
+
+def test_detect_gaps_extends_full_range_backward_across_stale_flat_run_before_jump():
+    df = _build_df(
+        prices=[100, 100, 100, 200, 200],
+        volumes=[1, 1, 1, 1, 1],
+    )
+    config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
+    result = detect_gaps(df, tf="1h", config=config)
+    assert result.full_ranges == [GapRange(1, 3, RangeKind.FULL)]
+
+
+def test_detect_gaps_extends_full_range_backward_across_stale_flat_run_before_downward_jump():
+    df = _build_df(
+        prices=[200, 200, 200, 100, 100],
+        volumes=[1, 1, 1, 1, 1],
+    )
+    config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
+    result = detect_gaps(df, tf="1h", config=config)
+    assert result.full_ranges == [GapRange(1, 3, RangeKind.FULL)]

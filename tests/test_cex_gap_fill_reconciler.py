@@ -19,11 +19,16 @@ from gmx_historical_data.cex_gap_fill.reconciler import (
 def _df(prices: list[float], volumes: list[float], start_hour: int = 0) -> pl.DataFrame:
     start = datetime(2026, 1, 1, start_hour, tzinfo=UTC)
     ts = [start + timedelta(hours=i) for i in range(len(prices))]
-    return pl.DataFrame({
-        "timestamp": ts,
-        "open": prices, "high": prices, "low": prices, "close": prices,
-        "volume": volumes,
-    })
+    return pl.DataFrame(
+        {
+            "timestamp": ts,
+            "open": prices,
+            "high": prices,
+            "low": prices,
+            "close": prices,
+            "volume": volumes,
+        }
+    )
 
 
 # ── Task 12: price scaling ────────────────────────────────────────────────────
@@ -66,11 +71,28 @@ def test_reconcile_keeps_full_range_when_cex_confirms():
     assert stats.kept >= 1
 
 
+def test_reconcile_keeps_full_range_when_cex_confirms_using_cex_prior_close():
+    gmx = _df([90, 100, 200, 200], [1, 1, 1, 1])
+    cex = _df([140, 150, 300, 300], [10, 10, 10, 10])
+    config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
+    det = detect_gaps(gmx, tf="1h", config=config)
+    out, stats = reconcile(gmx, cex, det, gmx_symbol="BTC", config=config)
+    assert out["close"][2] == pytest.approx(200)
+    assert stats.kept >= 1
+
+
 def test_reconcile_empty_cex_leaves_gmx_untouched():
     gmx = _df([100, 100, 200, 200], [1, 1, 1, 1])
-    cex = pl.DataFrame(schema={"timestamp": pl.Datetime("us", "UTC"), "open": pl.Float64,
-                                "high": pl.Float64, "low": pl.Float64, "close": pl.Float64,
-                                "volume": pl.Float64})
+    cex = pl.DataFrame(
+        schema={
+            "timestamp": pl.Datetime("us", "UTC"),
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+            "volume": pl.Float64,
+        }
+    )
     config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
     det = detect_gaps(gmx, tf="1h", config=config)
     out, stats = reconcile(gmx, cex, det, gmx_symbol="BTC", config=config)
@@ -87,6 +109,26 @@ def test_reconcile_volume_only_replace():
     assert out["volume"][1] == pytest.approx(50)
     assert out["close"][1] == pytest.approx(101)
     assert stats.volume_replaced >= 1
+
+
+def test_reconcile_volume_only_keeps_zero_volume_when_cex_price_disagrees():
+    gmx = _df([100, 101, 102], [1, 0, 1])
+    cex = _df([100, 130, 102], [10, 50, 10])
+    config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
+    det = detect_gaps(gmx, tf="1h", config=config)
+    out, stats = reconcile(gmx, cex, det, gmx_symbol="BTC", config=config)
+    assert out["volume"][1] == pytest.approx(0)
+    assert stats.volume_replaced == 0
+
+
+def test_reconcile_volume_only_keeps_zero_volume_at_exact_plausibility_boundary():
+    gmx = _df([100, 100, 100], [1, 0, 1])
+    cex = _df([100, 110, 100], [10, 50, 10])
+    config = DetectorConfig(gap_pct_threshold=0.20, merge_gap_bars=0, min_range_bars=1)
+    det = detect_gaps(gmx, tf="1h", config=config)
+    out, stats = reconcile(gmx, cex, det, gmx_symbol="BTC", config=config)
+    assert out["volume"][1] == pytest.approx(0)
+    assert stats.volume_replaced == 0
 
 
 # ── Task 14: history-preservation + seam warning ─────────────────────────────
@@ -107,6 +149,7 @@ def test_assert_history_preserved_raises_when_corrected_starts_later():
 
 def test_warn_seam_discontinuities_returns_count(caplog):
     import logging
+
     df = _df([100, 200, 201], [1, 1, 1])
     with caplog.at_level(logging.WARNING, logger="gmx_historical_data.cex_gap_fill"):
         count = warn_seam_discontinuities(df, threshold=0.20, gmx_symbol="BTC")

@@ -36,7 +36,12 @@ def price_jump_mask(df: pl.DataFrame, threshold: float) -> pl.Series:
 
 
 _TF_TO_MINUTES: dict[str, int] = {
-    "1min": 1, "5min": 5, "15min": 15, "1h": 60, "4h": 240, "1d": 1440,
+    "1min": 1,
+    "5min": 5,
+    "15min": 15,
+    "1h": 60,
+    "4h": 240,
+    "1d": 1440,
 }
 
 
@@ -47,6 +52,36 @@ def zero_volume_mask(df: pl.DataFrame) -> pl.Series:
     :returns: Boolean Series.
     """
     return df["volume"] == 0
+
+
+def expand_backward_stale_runs(price_jump: pl.Series, reindexed: pl.DataFrame) -> pl.Series:
+    """Extend jump markers backward across flat stale bars while keeping one anchor bar.
+
+    When GMX resumes after an outage, the visible jump is usually on the first
+    fresh bar, but the stale window is the flat run immediately before it. This
+    marks that flat run without consuming the earliest anchor bar.
+    """
+    expanded = price_jump.to_list()
+    closes = reindexed["close"].to_list()
+    missing = reindexed["close"].is_null().to_list()
+
+    for idx, is_jump in enumerate(expanded):
+        if not is_jump or idx == 0 or missing[idx]:
+            continue
+
+        baseline = closes[idx - 1]
+        j = idx - 1
+        while (
+            j > 0
+            and not missing[j]
+            and not missing[j - 1]
+            and closes[j] == baseline
+            and closes[j - 1] == baseline
+        ):
+            expanded[j] = True
+            j -= 1
+
+    return pl.Series("price_bad_expanded", expanded, dtype=pl.Boolean)
 
 
 def reindex_and_mark_missing(df: pl.DataFrame, tf_minutes: int) -> tuple[pl.DataFrame, pl.Series]:
@@ -60,9 +95,7 @@ def reindex_and_mark_missing(df: pl.DataFrame, tf_minutes: int) -> tuple[pl.Data
     if df.is_empty():
         return df, pl.Series("missing", [], dtype=pl.Boolean)
 
-    sorted_df = df.sort("timestamp").with_columns(
-        pl.col("timestamp").dt.cast_time_unit("us")
-    )
+    sorted_df = df.sort("timestamp").with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
     start = sorted_df["timestamp"][0]
     end = sorted_df["timestamp"][-1]
     grid = pl.datetime_range(
@@ -152,9 +185,7 @@ def cluster_ranges(
     return result
 
 
-def detect_gaps(
-    df: pl.DataFrame, tf: str, config: DetectorConfig
-) -> DetectionResult:
+def detect_gaps(df: pl.DataFrame, tf: str, config: DetectorConfig) -> DetectionResult:
     """Run the full detection pipeline on a single ``(symbol, timeframe)`` frame.
 
     :param df: GMX OHLCV DataFrame.
@@ -166,7 +197,7 @@ def detect_gaps(
     reindexed, missing = reindex_and_mark_missing(df, tf_minutes=tf_minutes)
 
     price_jump = price_jump_mask(reindexed, threshold=config.gap_pct_threshold)
-    price_bad = price_jump | missing
+    price_bad = expand_backward_stale_runs(price_jump, reindexed) | missing
 
     vol_null_or_zero = reindexed["volume"].is_null() | (reindexed["volume"] == 0)
     vol_bad = vol_null_or_zero

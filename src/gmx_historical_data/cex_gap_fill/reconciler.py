@@ -60,6 +60,13 @@ def _pct_change_across(df: pl.DataFrame, start_idx: int, end_idx: int) -> float 
     return (last - prev) / prev
 
 
+def _relative_close_delta(left: float | None, right: float | None) -> float | None:
+    """Return the absolute fractional delta between two close prices."""
+    if left is None or right is None or left == 0:
+        return None
+    return abs(right - left) / abs(left)
+
+
 def reconcile(
     gmx_df: pl.DataFrame,
     cex_df: pl.DataFrame,
@@ -99,11 +106,20 @@ def reconcile(
 
         gmx_pct = _pct_change_across(df, gap.start_idx, gap.end_idx)
         cex_slice = scaled_cex.filter(pl.col("timestamp").is_in(ts_range))
-        cex_prev = new_rows[gap.start_idx - 1]["close"] if gap.start_idx > 0 else None
+        prev_ts = new_rows[gap.start_idx - 1]["timestamp"] if gap.start_idx > 0 else None
+        cex_prev = cex_by_ts.get(prev_ts, {}).get("close") if prev_ts is not None else None
         cex_last = cex_slice["close"][-1] if cex_slice.height > 0 else None
-        cex_pct = (cex_last - cex_prev) / cex_prev if (cex_prev and cex_prev != 0 and cex_last is not None) else None
+        cex_pct = (
+            (cex_last - cex_prev) / cex_prev
+            if (cex_prev and cex_prev != 0 and cex_last is not None)
+            else None
+        )
 
-        if gmx_pct is not None and cex_pct is not None and abs(cex_pct - gmx_pct) < config.gap_pct_threshold / 2:
+        if (
+            gmx_pct is not None
+            and cex_pct is not None
+            and abs(cex_pct - gmx_pct) < config.gap_pct_threshold / 2
+        ):
             stats.kept += 1
             continue
 
@@ -118,8 +134,10 @@ def reconcile(
         for i in range(gap.start_idx, gap.end_idx + 1):
             ts = new_rows[i]["timestamp"]
             if ts in cex_by_ts:
-                new_rows[i]["volume"] = cex_by_ts[ts]["volume"]
-                stats.volume_replaced += 1
+                delta = _relative_close_delta(new_rows[i]["close"], cex_by_ts[ts]["close"])
+                if delta is not None and delta < config.gap_pct_threshold / 2:
+                    new_rows[i]["volume"] = cex_by_ts[ts]["volume"]
+                    stats.volume_replaced += 1
 
     return pl.DataFrame(new_rows, schema=df.schema), stats
 
@@ -156,6 +174,8 @@ def warn_seam_discontinuities(df: pl.DataFrame, threshold: float, gmx_symbol: st
     if n > 0:
         log.warning(
             "seam discontinuities after reconcile for %s: %d bars > %.2f",
-            gmx_symbol, n, threshold,
+            gmx_symbol,
+            n,
+            threshold,
         )
     return n
