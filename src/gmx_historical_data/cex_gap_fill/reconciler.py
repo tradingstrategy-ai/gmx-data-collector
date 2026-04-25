@@ -7,8 +7,12 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from .detector import DetectionResult
-from .symbols import PRICE_DIVISORS, _bare_symbol, normalize_k_prefix
+from gmx_historical_data.cex_gap_fill.detector import DetectionResult
+from gmx_historical_data.cex_gap_fill.symbols import (
+    PRICE_DIVISORS,
+    _bare_symbol,
+    normalize_k_prefix,
+)
 
 log = logging.getLogger(__name__)
 
