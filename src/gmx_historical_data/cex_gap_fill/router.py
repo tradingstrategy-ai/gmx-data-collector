@@ -116,7 +116,15 @@ def save_routing(table: RoutingTable, path: Path) -> None:
     """
 
     def _route_dict(r: Route) -> dict:
-        return {k: v for k, v in {"exchange": r.exchange, "pair": r.pair, "resolved_at": r.resolved_at}.items() if v != ""}
+        return {
+            k: v
+            for k, v in {
+                "exchange": r.exchange,
+                "pair": r.pair,
+                "resolved_at": r.resolved_at,
+            }.items()
+            if v != ""
+        }
 
     payload = {
         "version": 1,

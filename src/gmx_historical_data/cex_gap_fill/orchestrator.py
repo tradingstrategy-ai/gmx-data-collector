@@ -131,7 +131,12 @@ def fill_gaps_from_cex(
 
             log.info(
                 "SYMBOL=%s TF=%s exchange=%s full_replaced=%d vol_replaced=%d kept=%d",
-                sym, tf, route.exchange, stats.full_replaced, stats.volume_replaced, stats.kept,
+                sym,
+                tf,
+                route.exchange,
+                stats.full_replaced,
+                stats.volume_replaced,
+                stats.kept,
             )
 
             if not dry_run:
@@ -156,9 +161,7 @@ def _build_download_plan(
     return plan
 
 
-def _resolve_cex_feather(
-    datadir: Path | None, exchange: str, pair: str, tf: str
-) -> Path:
+def _resolve_cex_feather(datadir: Path | None, exchange: str, pair: str, tf: str) -> Path:
     if datadir is None:
         datadir = REPO_ROOT / "user_data" / "data"
     return resolve_feather_path(datadir=datadir, exchange=exchange, pair=pair, timeframe=tf)

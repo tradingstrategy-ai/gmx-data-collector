@@ -15,12 +15,16 @@ from gmx_historical_data.cex_gap_fill.router import (
 
 def test_load_routing_returns_defaults_for_empty_file(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({
-        "version": 1,
-        "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
-        "overrides": {},
-        "auto": {},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
+                "overrides": {},
+                "auto": {},
+            }
+        )
+    )
     table = load_routing(p)
     assert table.defaults.primary == "binance"
     assert table.defaults.fallback == "bybit"
@@ -29,12 +33,22 @@ def test_load_routing_returns_defaults_for_empty_file(tmp_path: Path):
 
 def test_load_routing_overrides_precedence(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({
-        "version": 1,
-        "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
-        "overrides": {"BTC": {"exchange": "binance", "pair": "BTC/USDT:USDT"}},
-        "auto": {"BTC": {"exchange": "bybit", "pair": "BTC/USDT:USDT", "resolved_at": "2026-01-01"}},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
+                "overrides": {"BTC": {"exchange": "binance", "pair": "BTC/USDT:USDT"}},
+                "auto": {
+                    "BTC": {
+                        "exchange": "bybit",
+                        "pair": "BTC/USDT:USDT",
+                        "resolved_at": "2026-01-01",
+                    }
+                },
+            }
+        )
+    )
     table = load_routing(p)
     route = table.resolve("BTC")
     assert route.exchange == "binance"  # override wins over auto
@@ -42,12 +56,22 @@ def test_load_routing_overrides_precedence(tmp_path: Path):
 
 def test_load_routing_auto_cache_hit(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({
-        "version": 1,
-        "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
-        "overrides": {},
-        "auto": {"ETH": {"exchange": "bybit", "pair": "ETH/USDT:USDT", "resolved_at": "2026-01-01"}},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
+                "overrides": {},
+                "auto": {
+                    "ETH": {
+                        "exchange": "bybit",
+                        "pair": "ETH/USDT:USDT",
+                        "resolved_at": "2026-01-01",
+                    }
+                },
+            }
+        )
+    )
     table = load_routing(p)
     route = table.resolve("ETH")
     assert route.exchange == "bybit"
@@ -61,12 +85,16 @@ def test_load_routing_unresolved_returns_none():
 
 def test_route_skip_sentinel(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({
-        "version": 1,
-        "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
-        "overrides": {"FART": {"exchange": "skip"}},
-        "auto": {},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
+                "overrides": {"FART": {"exchange": "skip"}},
+                "auto": {},
+            }
+        )
+    )
     table = load_routing(p)
     route = table.resolve("FART")
     assert route.exchange == "skip"
@@ -78,14 +106,20 @@ def test_route_skip_sentinel(tmp_path: Path):
 
 def test_record_auto_roundtrips_through_disk(tmp_path: Path):
     p = tmp_path / "r.json"
-    p.write_text(json.dumps({
-        "version": 1,
-        "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
-        "overrides": {},
-        "auto": {},
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "defaults": {"primary": "binance", "fallback": "bybit", "skip_unresolved": True},
+                "overrides": {},
+                "auto": {},
+            }
+        )
+    )
     table = load_routing(p)
-    table.record_auto("SUI", Route(exchange="bybit", pair="SUI/USDT:USDT", resolved_at="2026-04-24"))
+    table.record_auto(
+        "SUI", Route(exchange="bybit", pair="SUI/USDT:USDT", resolved_at="2026-04-24")
+    )
     save_routing(table, p)
 
     reloaded = load_routing(p)

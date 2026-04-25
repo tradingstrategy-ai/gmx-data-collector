@@ -13,11 +13,16 @@ from gmx_historical_data.cex_gap_fill import fill_gaps_from_cex
 def _write_gmx_parquet(path: Path, prices: list[float], volumes: list[float]) -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     ts = [start + timedelta(hours=i) for i in range(len(prices))]
-    df = pl.DataFrame({
-        "timestamp": ts,
-        "open": prices, "high": prices, "low": prices, "close": prices,
-        "volume": volumes,
-    })
+    df = pl.DataFrame(
+        {
+            "timestamp": ts,
+            "open": prices,
+            "high": prices,
+            "low": prices,
+            "close": prices,
+            "volume": volumes,
+        }
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     df.write_parquet(path)
 
@@ -25,11 +30,16 @@ def _write_gmx_parquet(path: Path, prices: list[float], volumes: list[float]) ->
 def _write_cex_feather(path: Path, prices: list[float], volumes: list[float]) -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
     ts = [start + timedelta(hours=i) for i in range(len(prices))]
-    df = pl.DataFrame({
-        "date": ts,
-        "open": prices, "high": prices, "low": prices, "close": prices,
-        "volume": volumes,
-    })
+    df = pl.DataFrame(
+        {
+            "date": ts,
+            "open": prices,
+            "high": prices,
+            "low": prices,
+            "close": prices,
+            "volume": volumes,
+        }
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     df.write_ipc(path, compression=None)
 
@@ -115,24 +125,28 @@ def test_fill_gaps_from_cex_no_volume_column_in_parquet(tmp_path: Path):
     ts = [start + timedelta(hours=i) for i in range(5)]
     parquet_path = data_dir / "candles" / "arbitrum" / "BTC" / "1h.parquet"
     parquet_path.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "timestamp": ts,
-        "open": [100.0, 100.0, 200.0, 200.0, 200.0],
-        "high": [100.0, 100.0, 200.0, 200.0, 200.0],
-        "low":  [100.0, 100.0, 200.0, 200.0, 200.0],
-        "close":[100.0, 100.0, 200.0, 200.0, 200.0],
-    }).write_parquet(parquet_path)
+    pl.DataFrame(
+        {
+            "timestamp": ts,
+            "open": [100.0, 100.0, 200.0, 200.0, 200.0],
+            "high": [100.0, 100.0, 200.0, 200.0, 200.0],
+            "low": [100.0, 100.0, 200.0, 200.0, 200.0],
+            "close": [100.0, 100.0, 200.0, 200.0, 200.0],
+        }
+    ).write_parquet(parquet_path)
 
     cex_feather = cex_datadir / "binance" / "futures" / "BTC_USDT_USDT-1h-futures.feather"
     cex_feather.parent.mkdir(parents=True, exist_ok=True)
-    pl.DataFrame({
-        "date": ts,
-        "open": [100.0, 101.0, 102.0, 103.0, 104.0],
-        "high": [100.0, 101.0, 102.0, 103.0, 104.0],
-        "low":  [100.0, 101.0, 102.0, 103.0, 104.0],
-        "close":[100.0, 101.0, 102.0, 103.0, 104.0],
-        "volume":[10.0, 10.0, 10.0, 10.0, 10.0],
-    }).write_ipc(cex_feather, compression=None)
+    pl.DataFrame(
+        {
+            "date": ts,
+            "open": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "high": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "low": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "volume": [10.0, 10.0, 10.0, 10.0, 10.0],
+        }
+    ).write_ipc(cex_feather, compression=None)
 
     routing_file = tmp_path / "cex_routing.json"
     routing_file.write_text(

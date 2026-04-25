@@ -2482,7 +2482,9 @@ app.command(name="export-freqtrade")(export_freqtrade_command)
 def fill_gaps_cex(
     data_dir: Path = typer.Option(Path("./user_data"), "--data-dir", help="Root data dir"),
     symbol: str = typer.Option("", "--symbol", help="Comma-separated whitelist; empty = all"),
-    timeframe: str = typer.Option("", "--timeframe", help="Comma-separated whitelist; empty = all six"),
+    timeframe: str = typer.Option(
+        "", "--timeframe", help="Comma-separated whitelist; empty = all six"
+    ),
     gap_threshold: float = typer.Option(0.20, "--gap-threshold"),
     merge_gap_bars: int = typer.Option(2, "--merge-gap-bars"),
     cex_datadir: Path | None = typer.Option(None, "--cex-datadir"),

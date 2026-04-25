@@ -19,14 +19,16 @@ def _sha(p: Path) -> str:
 
 def _seed_parquet(path: Path) -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
-    df = pl.DataFrame({
-        "timestamp": [start + timedelta(hours=i) for i in range(10)],
-        "open":   [float(100 + i) for i in range(10)],
-        "high":   [float(101 + i) for i in range(10)],
-        "low":    [float( 99 + i) for i in range(10)],
-        "close":  [float(100 + i) + 0.5 for i in range(10)],
-        "volume": [float(i + 1) for i in range(10)],
-    })
+    df = pl.DataFrame(
+        {
+            "timestamp": [start + timedelta(hours=i) for i in range(10)],
+            "open": [float(100 + i) for i in range(10)],
+            "high": [float(101 + i) for i in range(10)],
+            "low": [float(99 + i) for i in range(10)],
+            "close": [float(100 + i) + 0.5 for i in range(10)],
+            "volume": [float(i + 1) for i in range(10)],
+        }
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     df.write_parquet(path)
 

@@ -35,13 +35,20 @@ def build_download_argv(
     :returns: Argv list ready for :func:`subprocess.run`.
     """
     argv: list[str] = [
-        "./freqtrade-gmx", "download-data",
-        "--exchange", exchange,
-        "--pairs", *pairs,
-        "--timeframes", *timeframes,
-        "--timerange", f"{timerange_start}-",
-        "--data-format-ohlcv", "feather",
-        "--trading-mode", trading_mode,
+        "./freqtrade-gmx",
+        "download-data",
+        "--exchange",
+        exchange,
+        "--pairs",
+        *pairs,
+        "--timeframes",
+        *timeframes,
+        "--timerange",
+        f"{timerange_start}-",
+        "--data-format-ohlcv",
+        "feather",
+        "--trading-mode",
+        trading_mode,
     ]
     if datadir is not None:
         argv += ["--datadir", str(datadir)]
@@ -79,8 +86,7 @@ def run_download(
     if result.returncode != 0:
         tail = result.stderr.decode(errors="replace").strip().splitlines()[-10:]
         raise CEXDownloadError(
-            f"freqtrade download-data exit={result.returncode} for {exchange}: "
-            + "\n".join(tail)
+            f"freqtrade download-data exit={result.returncode} for {exchange}: " + "\n".join(tail)
         )
     return result
 
