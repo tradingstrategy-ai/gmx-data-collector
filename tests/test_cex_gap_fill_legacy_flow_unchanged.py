@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import polars as pl
-import pytest
 
 
 def _sha(p: Path) -> str:

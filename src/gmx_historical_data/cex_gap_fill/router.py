@@ -58,7 +58,7 @@ class RoutingTable:
     auto: dict[str, Route] = field(default_factory=dict)
 
     @classmethod
-    def empty(cls) -> "RoutingTable":
+    def empty(cls) -> RoutingTable:
         """Return an empty routing table with sensible defaults."""
         return cls(defaults=Defaults("binance", "bybit", True))
 

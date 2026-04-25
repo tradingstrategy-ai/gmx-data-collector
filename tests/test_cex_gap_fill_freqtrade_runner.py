@@ -13,7 +13,6 @@ from gmx_historical_data.cex_gap_fill.freqtrade_runner import (
     run_download,
 )
 
-
 # ── Task 9: argv builder ──────────────────────────────────────────────────────
 
 

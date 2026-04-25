@@ -7,7 +7,6 @@ import traceback
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 import polars as pl
@@ -18,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from web3 import Web3
 
+from gmx_historical_data.cex_gap_fill import fill_gaps_from_cex
 from gmx_historical_data.chainlink_feeds_complete import (
     find_chainlink_symbol,
     get_feed_address_for_gmx_symbol,
@@ -55,7 +55,6 @@ from gmx_historical_data.quickstart import (
     print_coverage_summary,
     seed_from_branch,
 )
-from gmx_historical_data.cex_gap_fill import fill_gaps_from_cex
 from gmx_historical_data.resampler import OHLCVResampler
 from gmx_historical_data.storage import ParquetStorage
 
@@ -2486,7 +2485,7 @@ def fill_gaps_cex(
     timeframe: str = typer.Option("", "--timeframe", help="Comma-separated whitelist; empty = all six"),
     gap_threshold: float = typer.Option(0.20, "--gap-threshold"),
     merge_gap_bars: int = typer.Option(2, "--merge-gap-bars"),
-    cex_datadir: Optional[Path] = typer.Option(None, "--cex-datadir"),
+    cex_datadir: Path | None = typer.Option(None, "--cex-datadir"),
     exchanges: str = typer.Option("binance,bybit", "--exchanges"),
     routing_file: Path = typer.Option(Path("configs/cex_routing.json"), "--routing-file"),
     skip_download: bool = typer.Option(False, "--skip-download"),

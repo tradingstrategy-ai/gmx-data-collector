@@ -8,7 +8,6 @@ import pytest
 from gmx_historical_data.cex_gap_fill.detector import DetectorConfig, detect_gaps
 from gmx_historical_data.cex_gap_fill.reconciler import (
     HistoryTruncationError,
-    ReconcileStats,
     apply_price_scale,
     assert_history_preserved,
     reconcile,

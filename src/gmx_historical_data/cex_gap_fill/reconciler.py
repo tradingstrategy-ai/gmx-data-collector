@@ -7,8 +7,8 @@ from dataclasses import dataclass
 
 import polars as pl
 
-from .detector import DetectionResult, GapRange, RangeKind
-from .symbols import PRICE_DIVISORS, normalize_k_prefix, _bare_symbol
+from .detector import DetectionResult
+from .symbols import PRICE_DIVISORS, _bare_symbol, normalize_k_prefix
 
 log = logging.getLogger(__name__)
 

@@ -1,9 +1,9 @@
 """Tests for cex_gap_fill.symbols module."""
 
 from gmx_historical_data.cex_gap_fill.symbols import (
-    normalize_k_prefix,
-    gmx_symbol_to_cex_pair,
     gmx_symbol_to_cex_base,
+    gmx_symbol_to_cex_pair,
+    normalize_k_prefix,
     price_scale_for,
 )
 

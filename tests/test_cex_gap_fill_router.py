@@ -3,16 +3,12 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from gmx_historical_data.cex_gap_fill.router import (
-    Defaults,
     Route,
     RoutingTable,
     load_routing,
     save_routing,
 )
-
 
 # ── Task 7 tests ──────────────────────────────────────────────────────────────
 

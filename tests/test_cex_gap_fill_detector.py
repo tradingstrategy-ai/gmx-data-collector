@@ -1,19 +1,19 @@
 """Tests for cex_gap_fill.detector."""
 
+from datetime import UTC, datetime, timedelta
+
 import polars as pl
-from datetime import datetime, timedelta, UTC
 
 from gmx_historical_data.cex_gap_fill.detector import (
-    price_jump_mask,
-    zero_volume_mask,
-    reindex_and_mark_missing,
-    minutes_for_timeframe,
-    cluster_ranges,
-    detect_gaps,
+    DetectorConfig,
     GapRange,
     RangeKind,
-    DetectorConfig,
-    DetectionResult,
+    cluster_ranges,
+    detect_gaps,
+    minutes_for_timeframe,
+    price_jump_mask,
+    reindex_and_mark_missing,
+    zero_volume_mask,
 )
 
 
