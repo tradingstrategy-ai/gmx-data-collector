@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from web3 import Web3
 
+from gmx_historical_data.cex_gap_fill import fill_gaps_from_cex
 from gmx_historical_data.chainlink_feeds_complete import (
     find_chainlink_symbol,
     get_feed_address_for_gmx_symbol,
@@ -2476,6 +2477,45 @@ app.command(name="collect")(cli)
 app.command(name="verify")(verify_command)
 app.command(name="debug-oracle")(debug_oracle_command)
 app.command(name="export-freqtrade")(export_freqtrade_command)
+
+
+def fill_gaps_cex(
+    data_dir: Path = typer.Option(Path("./user_data"), "--data-dir", help="Root data dir"),
+    symbol: str = typer.Option("", "--symbol", help="Comma-separated whitelist; empty = all"),
+    timeframe: str = typer.Option(
+        "", "--timeframe", help="Comma-separated whitelist; empty = all six"
+    ),
+    gap_threshold: float = typer.Option(0.20, "--gap-threshold"),
+    merge_gap_bars: int = typer.Option(2, "--merge-gap-bars"),
+    cex_datadir: Path | None = typer.Option(None, "--cex-datadir"),
+    exchanges: str = typer.Option("binance,bybit", "--exchanges"),
+    routing_file: Path = typer.Option(Path("configs/cex_routing.json"), "--routing-file"),
+    skip_download: bool = typer.Option(False, "--skip-download"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    log_dir: Path = typer.Option(Path("./logs"), "--log-dir"),
+    network: str = typer.Option("arbitrum", "--network"),
+) -> None:
+    """Fill GMX OHLCV price gaps using Binance/Bybit via freqtrade download-data."""
+    symbols = [s.strip() for s in symbol.split(",") if s.strip()] or None
+    tfs = [t.strip() for t in timeframe.split(",") if t.strip()] or None
+    exch = [e.strip() for e in exchanges.split(",") if e.strip()]
+    fill_gaps_from_cex(
+        data_dir=data_dir,
+        symbols=symbols,
+        timeframes=tfs,
+        routing_file=routing_file,
+        cex_datadir=cex_datadir,
+        exchanges=exch,
+        gap_threshold=gap_threshold,
+        merge_gap_bars=merge_gap_bars,
+        log_dir=log_dir,
+        dry_run=dry_run,
+        skip_download=skip_download,
+        network=network,
+    )
+
+
+app.command(name="fill-gaps-cex")(fill_gaps_cex)
 
 
 def main() -> None:
