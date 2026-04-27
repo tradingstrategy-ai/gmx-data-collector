@@ -50,9 +50,9 @@ from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
 from gmx_historical_data.quickstart import (
-    DEFAULT_BRANCH,
+    DEFAULT_RELEASE_TAG,
     print_coverage_summary,
-    seed_from_branch,
+    seed_from_release,
 )
 
 console = Console()
@@ -692,15 +692,15 @@ Examples:
     )
     parser.add_argument(
         "--quickstart-ref",
-        default=DEFAULT_BRANCH,
-        help=f"Remote branch to seed from (default: {DEFAULT_BRANCH}).",
+        default=DEFAULT_RELEASE_TAG,
+        help=f"Release tag to seed from (default: {DEFAULT_RELEASE_TAG} = most recent).",
     )
 
     args = parser.parse_args()
 
     if args.quickstart:
         console.print("\n[bold]Quickstart: seeding from data branch[/bold]")
-        summary = seed_from_branch(args.output_dir, args.quickstart_ref, console)
+        summary = seed_from_release(args.output_dir, args.quickstart_ref, console)
         if "error" not in summary:
             console.print(
                 f"  Copied {summary['copied']} new files "
