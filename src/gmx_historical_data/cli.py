@@ -1567,7 +1567,7 @@ def cli(
     """
     if quickstart:
         seed_dir = Path("./user_data")
-        console.print("\n[bold]Quickstart: seeding from data branch[/bold]")
+        console.print("\n[bold]Quickstart: seeding from GitHub Release[/bold]")
         summary = seed_from_release(seed_dir, quickstart_ref, console)
         if "error" not in summary:
             console.print(

@@ -97,3 +97,42 @@ def test_seed_from_release_handles_gh_failure(tmp_path):
 
     assert "error" in result
     assert result["copied"] == 0
+
+
+def test_seed_from_release_asset_missing_after_download(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    def success_but_no_file(cmd, *args, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("gmx_historical_data.quickstart.subprocess.run", side_effect=success_but_no_file):
+        result = seed_from_release(output_dir, DEFAULT_RELEASE_TAG, Console(quiet=True))
+
+    assert "error" in result
+    assert result["error"] == "asset missing"
+    assert result["copied"] == 0
+
+
+def test_seed_from_release_tarball_missing_user_data_root(tmp_path):
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    tarball_path = tmp_path / "gmx-full.tar.gz"
+    with tarfile.open(tarball_path, "w:gz") as tf:
+        dummy = tmp_path / "dummy.txt"
+        dummy.write_bytes(b"no user_data here")
+        tf.add(dummy, arcname="dummy.txt")
+
+    def download_bad_tarball(cmd, *args, **kwargs):
+        if "--dir" in cmd:
+            dest = Path(cmd[cmd.index("--dir") + 1])
+            shutil.copy2(tarball_path, dest / "gmx-full.tar.gz")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("gmx_historical_data.quickstart.subprocess.run", side_effect=download_bad_tarball):
+        result = seed_from_release(output_dir, DEFAULT_RELEASE_TAG, Console(quiet=True))
+
+    assert "error" in result
+    assert result["error"] == "no user_data"
+    assert result["copied"] == 0

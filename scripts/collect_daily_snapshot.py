@@ -699,7 +699,7 @@ Examples:
     args = parser.parse_args()
 
     if args.quickstart:
-        console.print("\n[bold]Quickstart: seeding from data branch[/bold]")
+        console.print("\n[bold]Quickstart: seeding from GitHub Release[/bold]")
         summary = seed_from_release(args.output_dir, args.quickstart_ref, console)
         if "error" not in summary:
             console.print(
