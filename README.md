@@ -35,13 +35,31 @@ make collect-update
 
 All data is written to `./user_data` by default. Override with `DATA_DIR=./my_path`.
 
-### Quickstart from the data branch
+## Downloading GMX historical data
+
+Daily snapshots are published as **GitHub Releases**. Use the helper script:
+
+```bash
+# Latest, full snapshot (apy, snapshots, tickers, volumes, futures feathers)
+./scripts/download_gmx_data.sh
+
+# Latest, light snapshot (skip futures/ feathers — faster download)
+./scripts/download_gmx_data.sh --asset light
+
+# Specific historical release
+./scripts/download_gmx_data.sh --release data-2026-04-27
+```
+
+Requires `gh` CLI authenticated (`gh auth login`). Releases are kept for 14 days.
+
+> **Note (2026-04-27):** The previous `data/daily-collection` branch is deprecated.
+> It will not receive further updates. New consumers should use the Releases path above.
+
+### Quickstart from a release
 
 If you want to skip waiting for the first full collection, the `-q` flag on
-`collect_daily_snapshot.py` seeds `user_data/` from the
-[`data/daily-collection`](https://github.com/tradingstrategy-ai/gmx-data-collector/tree/data/daily-collection)
-branch (a sibling data-only branch of this repo that CI updates daily), then
-runs today's snapshot on top:
+`collect_daily_snapshot.py` seeds `user_data/` from the latest GitHub Release,
+then runs today's snapshot on top:
 
 ```bash
 # Seed + collect today in one shot
@@ -49,9 +67,6 @@ poetry run python scripts/collect_daily_snapshot.py -q
 
 # Only seed, don't collect today
 poetry run python scripts/collect_daily_snapshot.py -q --seed-only
-
-# Seed from a different branch
-poetry run python scripts/collect_daily_snapshot.py -q --quickstart-ref some/other-branch
 ```
 
 The seed is merge-only — existing local files are never overwritten, only
