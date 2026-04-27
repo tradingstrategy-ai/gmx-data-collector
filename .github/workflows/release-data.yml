@@ -55,6 +55,7 @@ jobs:
               --dir "${TMPDIR}" \
               --clobber 2>/dev/null; then
             tar -xzf "${TMPDIR}/gmx-full.tar.gz" -C .
+            find user_data -name '._*' -delete 2>/dev/null || true
             COUNT=$(find user_data -type f 2>/dev/null | wc -l | tr -d ' ')
             echo "Restored ${COUNT} files from previous release."
           else
