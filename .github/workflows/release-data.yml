@@ -141,6 +141,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           DATE=$(date -u +%Y-%m-%d)
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           TAG="data-${DATE}"
           COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
 
@@ -151,6 +152,8 @@ jobs:
           NOTES_FILE=$(mktemp)
           cat > "$NOTES_FILE" <<NOTES
           Daily automated GMX data snapshot.
+
+          **Generated:** ${TIMESTAMP} UTC
 
           Contents (${COUNT} files total):
           - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, futures/
