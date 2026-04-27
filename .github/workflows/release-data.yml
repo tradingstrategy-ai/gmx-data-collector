@@ -43,7 +43,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv pip install --system pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
+          uv pip install pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
 
       - name: Restore previous release data
         env:
