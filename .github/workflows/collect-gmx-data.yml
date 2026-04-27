@@ -1,9 +1,12 @@
 name: Daily GMX Data Collection
 
+# DEPRECATED 2026-04-27: schedule disabled. Data now ships via GitHub Releases
+# (release-data.yml). Keep workflow_dispatch for emergency rollback to branch-based collection.
+
 on:
-  schedule:
-    - cron: '0 2 * * *'  # 02:00 UTC daily (after GMX daily candle close)
-  workflow_dispatch:       # Manual trigger
+  # schedule:
+  #   - cron: '0 2 * * *'  # DISABLED — superseded by release-data.yml
+  workflow_dispatch:       # Manual trigger (emergency rollback only)
     inputs:
       date:
         description: 'Snapshot date (YYYY-MM-DD). Defaults to today UTC.'

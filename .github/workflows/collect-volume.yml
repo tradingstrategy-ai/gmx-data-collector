@@ -1,9 +1,12 @@
 name: Daily GMX Volume Collection
 
+# DEPRECATED 2026-04-27: schedule disabled. Volume data now collected inside
+# release-data.yml. Keep workflow_dispatch for emergency rollback.
+
 on:
-  schedule:
-    - cron: '30 2 * * *'  # 02:30 UTC daily (30 min after main snapshot)
-  workflow_dispatch:       # Manual trigger
+  # schedule:
+  #   - cron: '30 2 * * *'  # DISABLED — superseded by release-data.yml
+  workflow_dispatch:       # Manual trigger (emergency rollback only)
 
 permissions:
   contents: write
