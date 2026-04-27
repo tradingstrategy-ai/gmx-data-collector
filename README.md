@@ -13,6 +13,26 @@ Collect historical price data for all 118 GMX V2 tokens with smart incremental u
 - **Historical OI & Pool Liquidity** — Full on-chain history of open interest and LP pool depth via HyperSync
 - **Analysis Notebooks** — Interactive Plotly notebooks for OI trends, pool utilisation, cross-exchange validation, and CEX/GMX correlation
 
+## Changelog
+
+### 2026-04-27 — GitHub Releases migration
+
+Daily data collection now ships as **GitHub Releases** instead of the `data/daily-collection` git branch.
+
+**What changed:**
+
+| Area | Before | After |
+|------|--------|-------|
+| Daily data storage | `data/daily-collection` git branch (rewrote feather files every day → 8.7 GB repo) | `data-YYYY-MM-DD` GitHub Release tags (14-day rolling window) |
+| Consumer download | `git clone --depth 1 --branch data/daily-collection` | `scripts/download_gmx_data.sh` or `gh release download` |
+| Quickstart (`-q` flag) | `seed_from_branch()` — shallow git clone | `seed_from_release()` — `gh release download` + tar extract |
+| CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
+| Release assets | — | `gmx-full.tar.gz` (~100 MB), `gmx-light.tar.gz` (no futures/), `data_report.txt` |
+
+**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. New consumers should use the Releases path (see [Downloading GMX historical data](#downloading-gmx-historical-data) below).
+
+---
+
 ## Quick Start
 
 ```bash
