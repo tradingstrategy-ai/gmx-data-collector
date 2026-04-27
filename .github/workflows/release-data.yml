@@ -1,17 +1,14 @@
 name: Release GMX Daily Data
 
-# IMPORTANT: starts as workflow_dispatch only. The schedule trigger is enabled
-# in Task 8 after a successful manual dispatch verifies the pipeline end-to-end.
-
 on:
+  schedule:
+    - cron: '0 2 * * *'  # 02:00 UTC daily
   workflow_dispatch:
     inputs:
       retention_days:
         description: 'Delete releases older than this many days (default: 14).'
         required: false
         default: '14'
-  # schedule:
-  #   - cron: '0 2 * * *'  # 02:00 UTC daily — UNCOMMENTED IN TASK 8
 
 permissions:
   contents: write
