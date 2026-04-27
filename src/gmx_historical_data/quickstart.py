@@ -60,10 +60,7 @@ def seed_from_release(
             cmd.append(tag)
         cmd += ["--repo", repo, "--pattern", asset, "--dir", str(tmp), "--clobber"]
 
-        console.print(
-            f"  Downloading [cyan]{asset}[/cyan] from "
-            f"{repo}@{tag}..."
-        )
+        console.print(f"  Downloading [cyan]{asset}[/cyan] from {repo}@{tag}...")
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:

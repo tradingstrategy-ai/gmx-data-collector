@@ -41,6 +41,7 @@ def _fake_gh_download(dl_dir: Path, src_tarball: Path):
     ``gh release download`` command, so the production code finds the
     asset exactly where it expects it.
     """
+
     def runner(cmd, *args, **kwargs):
         if cmd[:3] == ["gh", "release", "download"]:
             # Extract the --dir argument from the command
@@ -50,6 +51,7 @@ def _fake_gh_download(dl_dir: Path, src_tarball: Path):
             shutil.copy2(src_tarball, dest_dir / src_tarball.name)
             return subprocess.CompletedProcess(cmd, 0, "", "")
         raise AssertionError(f"unexpected command: {cmd}")
+
     return runner
 
 
@@ -57,8 +59,10 @@ def test_seed_from_release_copies_missing_files(tmp_path, fake_release_tarball):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
 
-    with patch("gmx_historical_data.quickstart.subprocess.run",
-               side_effect=_fake_gh_download(fake_release_tarball.parent, fake_release_tarball)):
+    with patch(
+        "gmx_historical_data.quickstart.subprocess.run",
+        side_effect=_fake_gh_download(fake_release_tarball.parent, fake_release_tarball),
+    ):
         result = seed_from_release(
             output_dir, DEFAULT_RELEASE_TAG, Console(quiet=True), asset="gmx-light.tar.gz"
         )
@@ -74,8 +78,10 @@ def test_seed_from_release_skips_existing(tmp_path, fake_release_tarball):
     existing.parent.mkdir(parents=True)
     existing.write_bytes(b"original")
 
-    with patch("gmx_historical_data.quickstart.subprocess.run",
-               side_effect=_fake_gh_download(fake_release_tarball.parent, fake_release_tarball)):
+    with patch(
+        "gmx_historical_data.quickstart.subprocess.run",
+        side_effect=_fake_gh_download(fake_release_tarball.parent, fake_release_tarball),
+    ):
         result = seed_from_release(
             output_dir, DEFAULT_RELEASE_TAG, Console(quiet=True), asset="gmx-light.tar.gz"
         )
