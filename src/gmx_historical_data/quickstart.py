@@ -1,15 +1,16 @@
-"""Quickstart seeding from the data/daily-collection branch.
+"""Quickstart seeding from the latest GitHub Release.
 
 Shared helpers used by both ``scripts/collect_daily_snapshot.py`` and
-``gmx_historical_data collect --quickstart``. Shallow-clones the
-``data/daily-collection`` branch of the origin remote and merge-copies
-its ``user_data/`` tree into a local destination. Merge-only means
-files that already exist locally are skipped — never overwritten — so
-the operation is idempotent and reversible (``rm -rf user_data/``).
+``gmx_historical_data collect --quickstart``. Downloads ``gmx-full.tar.gz``
+from a GitHub Release of this repo and merge-copies its ``user_data/`` tree
+into a local destination. Merge-only means files that already exist locally
+are skipped — never overwritten — so the operation is idempotent and
+reversible (``rm -rf user_data/``).
 """
 
 import shutil
 import subprocess
+import tarfile
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,80 +18,72 @@ from pathlib import Path
 import pandas as pd
 from rich.console import Console
 
-#: Public HTTPS fallback when no ``origin`` remote is resolvable.
-DEFAULT_REMOTE_URL = "https://github.com/tradingstrategy-ai/gmx-data-collector.git"
+#: GitHub repository serving the releases.
+DEFAULT_REPO = "tradingstrategy-ai/gmx-data-collector"
 
-#: Default branch seeded by the quickstart flow.
-DEFAULT_BRANCH = "data/daily-collection"
+#: Sentinel meaning "the latest release" — passed to ``gh release download``
+#: as no ``--tag`` argument.
+DEFAULT_RELEASE_TAG = "latest"
 
-
-def resolve_origin_url(search_from: Path | None = None) -> str:
-    """Return the git ``origin`` URL of the repo containing ``search_from``.
-
-    Prefers the user's configured remote so SSH vs HTTPS matches their
-    existing clone. Falls back to the public HTTPS URL when the caller
-    is outside a git working tree.
-
-    :param search_from: Directory to search upward from. Defaults to the
-        directory containing this module.
-    :return: Remote URL suitable for ``git clone``.
-    """
-    if search_from is None:
-        search_from = Path(__file__).resolve().parent
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(search_from), "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return result.stdout.strip() or DEFAULT_REMOTE_URL
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return DEFAULT_REMOTE_URL
+#: Asset name to download. ``full`` includes ``futures/`` feathers; ``light``
+#: omits them. The seed flow uses full so freqtrade backtests work end-to-end.
+DEFAULT_ASSET = "gmx-full.tar.gz"
 
 
-def seed_from_branch(output_dir: Path, ref: str, console: Console) -> dict:
-    """Seed ``output_dir`` from the remote data branch.
+def seed_from_release(
+    output_dir: Path,
+    tag: str,
+    console: Console,
+    asset: str = DEFAULT_ASSET,
+    repo: str = DEFAULT_REPO,
+) -> dict:
+    """Seed ``output_dir`` from a GitHub Release asset.
 
-    Shallow-clones ``ref`` into a temp directory, then merge-copies
-    ``user_data/`` into ``output_dir``. Existing local files are never
-    overwritten; only missing files are copied.
+    Downloads ``asset`` from ``repo``'s release ``tag`` (or the latest release
+    if ``tag == DEFAULT_RELEASE_TAG``), extracts it to a temp directory, then
+    merge-copies the contained ``user_data/`` tree into ``output_dir``.
+    Existing local files are never overwritten; only missing files are copied.
 
     :param output_dir: Local destination root (e.g. ``./user_data``).
-    :param ref: Remote branch to seed from.
+    :param tag: Release tag, or ``DEFAULT_RELEASE_TAG`` for the latest release.
     :param console: Rich console used for progress output.
+    :param asset: Release asset filename (``gmx-full.tar.gz`` or
+        ``gmx-light.tar.gz``).
+    :param repo: GitHub ``owner/name`` to pull from.
     :return: Summary dict with keys ``copied``, ``skipped``, ``bytes``.
         On failure the dict also contains ``error``.
     """
-    url = resolve_origin_url()
     tmp = Path(tempfile.mkdtemp(prefix="gmx-quickstart-"))
     try:
-        console.print(f"  Cloning [cyan]{ref}[/cyan] from {url} (shallow)...")
+        cmd = ["gh", "release", "download"]
+        if tag != DEFAULT_RELEASE_TAG:
+            cmd.append(tag)
+        cmd += ["--repo", repo, "--pattern", asset, "--dir", str(tmp), "--clobber"]
+
+        console.print(
+            f"  Downloading [cyan]{asset}[/cyan] from "
+            f"{repo}@{tag}..."
+        )
         try:
-            subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--branch",
-                    ref,
-                    "--single-branch",
-                    url,
-                    str(tmp),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
-            console.print(f"  [yellow]Warning:[/yellow] git clone failed: {stderr}")
+            console.print(f"  [yellow]Warning:[/yellow] gh release download failed: {stderr}")
             return {"copied": 0, "skipped": 0, "bytes": 0, "error": stderr}
 
-        src_root = tmp / "user_data"
+        tarball = tmp / asset
+        if not tarball.is_file():
+            console.print(f"  [yellow]Warning:[/yellow] asset {asset} not found in release")
+            return {"copied": 0, "skipped": 0, "bytes": 0, "error": "asset missing"}
+
+        extract_root = tmp / "extracted"
+        extract_root.mkdir()
+        with tarfile.open(tarball, "r:gz") as tf:
+            tf.extractall(extract_root)  # noqa: S202 — trusted source
+
+        src_root = extract_root / "user_data"
         if not src_root.is_dir():
-            console.print("  [yellow]Warning:[/yellow] branch has no user_data/ directory")
+            console.print("  [yellow]Warning:[/yellow] tarball has no user_data/ root")
             return {"copied": 0, "skipped": 0, "bytes": 0, "error": "no user_data"}
 
         copied = 0

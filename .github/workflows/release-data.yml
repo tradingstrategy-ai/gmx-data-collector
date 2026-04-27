@@ -1,0 +1,203 @@
+name: Release GMX Daily Data
+
+# IMPORTANT: starts as workflow_dispatch only. The schedule trigger is enabled
+# in Task 8 after a successful manual dispatch verifies the pipeline end-to-end.
+
+on:
+  workflow_dispatch:
+    inputs:
+      retention_days:
+        description: 'Delete releases older than this many days (default: 14).'
+        required: false
+        default: '14'
+  # schedule:
+  #   - cron: '0 2 * * *'  # 02:00 UTC daily — UNCOMMENTED IN TASK 8
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code from master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          cache-dependency-glob: 'pyproject.toml'
+
+      - name: Install Python dependencies
+        run: |
+          uv pip install --system pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
+
+      - name: Restore previous release data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p user_data
+          TMPDIR=$(mktemp -d)
+          echo "Downloading gmx-full.tar.gz from latest release (if any)..."
+          if gh release download \
+              --repo ${{ github.repository }} \
+              --pattern "gmx-full.tar.gz" \
+              --dir "${TMPDIR}" \
+              --clobber 2>/dev/null; then
+            tar -xzf "${TMPDIR}/gmx-full.tar.gz" -C .
+            COUNT=$(find user_data -type f 2>/dev/null | wc -l | tr -d ' ')
+            echo "Restored ${COUNT} files from previous release."
+          else
+            echo "No previous release found — starting fresh."
+          fi
+          rm -rf "${TMPDIR}"
+
+      - name: Collect daily snapshot
+        env:
+          JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
+          HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+        run: |
+          PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data
+
+      - name: Collect 24h volume snapshot
+        run: |
+          PYTHONPATH=src python - <<'EOF'
+          import sys
+          from datetime import datetime, UTC
+          from pathlib import Path
+          from gmx_historical_data.subsquid_volume import fetch_daily_volumes
+          import pandas as pd
+
+          date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+          volumes_dir = Path("./user_data/data/gmx/volumes")
+          volumes_dir.mkdir(parents=True, exist_ok=True)
+
+          print(f"Fetching 24h volumes for {date_str}...")
+          volumes = fetch_daily_volumes(chain="arbitrum")
+          if not volumes:
+              print("No volume data returned.")
+              sys.exit(0)
+
+          rows = [{"date": date_str, "market_address": addr, "volume_usd": str(vol)} for addr, vol in volumes.items()]
+          df = pd.DataFrame(rows)
+          out = volumes_dir / f"{date_str}.parquet"
+          df.to_parquet(out, index=False)
+          print(f"Saved {len(df)} markets -> {out}")
+          EOF
+
+      - name: Show report in job summary
+        if: always()
+        run: |
+          if [ -f data_report.txt ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat data_report.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No report generated" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Package tarballs
+        run: |
+          set -e
+          if [ ! -d user_data/data/gmx ]; then
+            echo "user_data/data/gmx/ missing after collection — aborting" >&2
+            exit 1
+          fi
+
+          mkdir -p user_data/data/gmx/volumes
+
+          tar -czf /tmp/gmx-full.tar.gz user_data/data/gmx/
+          tar -czf /tmp/gmx-light.tar.gz \
+              user_data/data/gmx/apy/ \
+              user_data/data/gmx/snapshots/ \
+              user_data/data/gmx/tickers/ \
+              user_data/data/gmx/volumes/
+
+          ls -lh /tmp/gmx-*.tar.gz
+
+          # Asset size guardrails
+          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz; do
+            size=$(stat -c %s "$tarball")
+            limit=$((2 * 1024 * 1024 * 1024))  # 2 GB
+            if [ "$size" -ge "$limit" ]; then
+              echo "ERROR: $tarball is ${size} bytes — exceeds 2 GB GitHub asset cap" >&2
+              exit 1
+            fi
+          done
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          TAG="data-${DATE}"
+          COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
+
+          # Idempotent: if today's release already exists (re-run), delete it first
+          gh release delete "${TAG}" --repo ${{ github.repository }} --yes 2>/dev/null || true
+          git push origin --delete "${TAG}" 2>/dev/null || true
+
+          NOTES_FILE=$(mktemp)
+          cat > "$NOTES_FILE" <<NOTES
+          Daily automated GMX data snapshot.
+
+          Contents (${COUNT} files total):
+          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, futures/
+          - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/ (no futures/)
+          - \`data_report.txt\` — collection summary
+
+          Consume with \`scripts/download_gmx_data.sh\` (see repo README).
+          NOTES
+
+          ASSETS=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
+          if [ -f data_report.txt ]; then
+            ASSETS+=(data_report.txt)
+          fi
+
+          gh release create "${TAG}" \
+              --repo ${{ github.repository }} \
+              --title "GMX Data ${DATE}" \
+              --notes-file "$NOTES_FILE" \
+              --latest \
+              "${ASSETS[@]}"
+
+          rm -f "$NOTES_FILE"
+
+          echo ""
+          echo "=== Release assets ==="
+          gh release view "${TAG}" --repo ${{ github.repository }} \
+              --json assets --jq '.assets[] | "\(.name)  \(.size / 1024 / 1024 | floor)MB"'
+
+      - name: Prune old releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RETENTION_DAYS="${{ github.event.inputs.retention_days || 14 }}"
+          CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%d)
+          echo "Pruning data-* releases with tag date older than ${CUTOFF}..."
+
+          # List releases, filter data-YYYY-MM-DD tags, drop ones older than cutoff
+          gh release list --repo ${{ github.repository }} --limit 100 \
+              --json tagName --jq '.[].tagName' | \
+              grep -E '^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$' | \
+              while read -r TAG; do
+                  TAG_DATE="${TAG#data-}"
+                  if [ "$TAG_DATE" \< "$CUTOFF" ]; then
+                      echo "  Deleting ${TAG} (date: ${TAG_DATE})"
+                      gh release delete "${TAG}" --repo ${{ github.repository }} --yes --cleanup-tag
+                  fi
+              done
+          echo "Prune complete."

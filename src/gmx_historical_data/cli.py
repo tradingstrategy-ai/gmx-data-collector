@@ -51,9 +51,9 @@ from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
 from gmx_historical_data.hypersync_collector import HyperSyncCollector
 from gmx_historical_data.market_registry import fetch_markets
 from gmx_historical_data.quickstart import (
-    DEFAULT_BRANCH,
+    DEFAULT_RELEASE_TAG,
     print_coverage_summary,
-    seed_from_branch,
+    seed_from_release,
 )
 from gmx_historical_data.resampler import OHLCVResampler
 from gmx_historical_data.storage import ParquetStorage
@@ -1494,9 +1494,9 @@ def cli(
         help="With --quickstart, seed and exit without running candle collection.",
     ),
     quickstart_ref: str = typer.Option(
-        DEFAULT_BRANCH,
+        DEFAULT_RELEASE_TAG,
         "--quickstart-ref",
-        help=f"Remote branch to seed from (default: {DEFAULT_BRANCH}).",
+        help=f"Release tag to seed from (default: {DEFAULT_RELEASE_TAG} = most recent).",
     ),
 ) -> None:
     """Collect GMX historical price data.
@@ -1567,8 +1567,8 @@ def cli(
     """
     if quickstart:
         seed_dir = Path("./user_data")
-        console.print("\n[bold]Quickstart: seeding from data branch[/bold]")
-        summary = seed_from_branch(seed_dir, quickstart_ref, console)
+        console.print("\n[bold]Quickstart: seeding from GitHub Release[/bold]")
+        summary = seed_from_release(seed_dir, quickstart_ref, console)
         if "error" not in summary:
             console.print(
                 f"  Copied {summary['copied']} new files "
