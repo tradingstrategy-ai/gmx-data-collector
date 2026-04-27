@@ -94,6 +94,17 @@ jobs:
             echo "No volume data to commit"
           else
             git commit -m "data: daily GMX volume snapshot $(date -u '+%Y-%m-%d')"
-            git pull --rebase origin data/daily-collection
-            git push origin data/daily-collection
+            for attempt in 1 2 3 4 5; do
+              git pull --rebase origin data/daily-collection
+              if git push origin data/daily-collection; then
+                echo "Pushed on attempt $attempt"
+                break
+              fi
+              echo "Push attempt $attempt failed, retrying in $((attempt * 5))s..."
+              sleep $((attempt * 5))
+              if [ "$attempt" -eq 5 ]; then
+                echo "All push attempts failed"
+                exit 1
+              fi
+            done
           fi
