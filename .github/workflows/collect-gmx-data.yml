@@ -109,7 +109,7 @@ jobs:
           else
             git commit -m "data: daily GMX snapshot $(date -u '+%Y-%m-%d')"
             for attempt in 1 2 3 4 5; do
-              git pull --rebase origin data/daily-collection
+              git pull --rebase -X theirs origin data/daily-collection
               if git push origin data/daily-collection; then
                 echo "Pushed on attempt $attempt"
                 break
