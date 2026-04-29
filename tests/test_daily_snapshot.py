@@ -183,9 +183,13 @@ class TestOhlcvRetry:
                     raise RuntimeError("temporary outage")
                 return _make_ohlcv(["2026-03-10"], [100.0]).rename(columns={"date": "timestamp"})
 
-        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(
+            "scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds)
+        )
 
-        df = _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=5, initial_backoff=2.0)
+        df = _fetch_candles_with_retry(
+            FakeApi(), "BTC", "1m", 10000, max_retries=5, initial_backoff=2.0
+        )
 
         assert len(df) == 1
         assert sleeps == [2.0]
@@ -199,10 +203,16 @@ class TestOhlcvRetry:
             def get_candlesticks_dataframe(self, symbol, period, limit):
                 raise RuntimeError("temporary outage")
 
-        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(
+            "scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds)
+        )
 
-        with pytest.raises(RuntimeError, match="Failed to fetch candles for BTC/1m after 3 attempts"):
-            _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=3, initial_backoff=2.0)
+        with pytest.raises(
+            RuntimeError, match="Failed to fetch candles for BTC/1m after 3 attempts"
+        ):
+            _fetch_candles_with_retry(
+                FakeApi(), "BTC", "1m", 10000, max_retries=3, initial_backoff=2.0
+            )
 
         assert sleeps == [2.0, 4.0]
 
@@ -224,9 +234,13 @@ class TestOhlcvRetry:
                     return pd.DataFrame()  # transient empty response
                 return _make_ohlcv(["2026-03-10"], [100.0]).rename(columns={"date": "timestamp"})
 
-        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(
+            "scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds)
+        )
 
-        df = _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=5, initial_backoff=2.0)
+        df = _fetch_candles_with_retry(
+            FakeApi(), "BTC", "1m", 10000, max_retries=5, initial_backoff=2.0
+        )
 
         assert len(df) == 1, "retry should have produced non-empty data"
         assert sleeps == [2.0], "exactly one backoff sleep expected before the recovery call"
@@ -243,10 +257,16 @@ class TestOhlcvRetry:
             def get_candlesticks_dataframe(self, symbol, period, limit):
                 return pd.DataFrame()
 
-        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+        monkeypatch.setattr(
+            "scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds)
+        )
 
-        with pytest.raises(RuntimeError, match="Failed to fetch candles for BTC/1m after 3 attempts"):
-            _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=3, initial_backoff=2.0)
+        with pytest.raises(
+            RuntimeError, match="Failed to fetch candles for BTC/1m after 3 attempts"
+        ):
+            _fetch_candles_with_retry(
+                FakeApi(), "BTC", "1m", 10000, max_retries=3, initial_backoff=2.0
+            )
 
         assert sleeps == [2.0, 4.0]
 
