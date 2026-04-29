@@ -9,6 +9,10 @@ on:
         description: 'Delete releases older than this many days (default: 14).'
         required: false
         default: '14'
+      allow_fresh_seed:
+        description: 'Allow starting without a previous data release. Only use for the first seed release.'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -45,23 +49,78 @@ jobs:
       - name: Restore previous release data
         env:
           GH_TOKEN: ${{ github.token }}
+          ALLOW_FRESH_SEED: ${{ github.event.inputs.allow_fresh_seed || 'false' }}
         run: |
           mkdir -p user_data
           TMPDIR=$(mktemp -d)
-          echo "Downloading gmx-full.tar.gz from latest release (if any)..."
+
+          PREVIOUS_TAG=$(gh release list \
+              --repo ${{ github.repository }} \
+              --limit 100 \
+              --json tagName \
+              --jq '[.[].tagName | select(test("^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))] | sort | reverse | .[0] // ""')
+
+          if [ -z "${PREVIOUS_TAG}" ]; then
+            if [ "${ALLOW_FRESH_SEED}" = "true" ]; then
+              echo "No prior data release exists; allow_fresh_seed=true, continuing with an empty seed."
+              rm -rf "${TMPDIR}"
+              exit 0
+            fi
+            echo "ERROR: no prior data release found. Refusing to publish a fresh incomplete snapshot." >&2
+            echo "Use workflow_dispatch with allow_fresh_seed=true only for the first seed release." >&2
+            exit 1
+          fi
+
+          echo "Downloading gmx-full.tar.gz from ${PREVIOUS_TAG}..."
           if gh release download \
+              "${PREVIOUS_TAG}" \
               --repo ${{ github.repository }} \
               --pattern "gmx-full.tar.gz" \
               --dir "${TMPDIR}" \
-              --clobber 2>/dev/null; then
-            tar -xzf "${TMPDIR}/gmx-full.tar.gz" -C .
-            find user_data -name '._*' -delete 2>/dev/null || true
-            COUNT=$(find user_data -type f 2>/dev/null | wc -l | tr -d ' ')
-            echo "Restored ${COUNT} files from previous release."
+              --clobber; then
+              tar -xzf "${TMPDIR}/gmx-full.tar.gz" -C .
+              find user_data -name '._*' -delete 2>/dev/null || true
+              COUNT=$(find user_data -type f 2>/dev/null | wc -l | tr -d ' ')
+              echo "Restored ${COUNT} files from ${PREVIOUS_TAG}."
           else
-            echo "No previous release found — starting fresh."
+              echo "ERROR: failed to restore gmx-full.tar.gz from ${PREVIOUS_TAG}." >&2
+              exit 1
           fi
           rm -rf "${TMPDIR}"
+
+      - name: Snapshot restored candle history
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import pandas as pd
+
+          futures_dir = Path("./user_data/data/gmx/futures")
+          baseline = {}
+
+          for path in sorted(futures_dir.glob("*.feather")):
+              df = pd.read_feather(path, columns=["date"])
+              if df.empty:
+                  continue
+              dates = pd.to_datetime(df["date"], utc=True)
+              baseline[path.name] = {
+                  "rows": int(len(df)),
+                  "min_date": dates.min().isoformat(),
+                  "max_date": dates.max().isoformat(),
+              }
+
+          if not baseline:
+              print("ERROR: restored release contains no candle history to validate.", file=sys.stderr)
+              sys.exit(1)
+
+          Path("/tmp/gmx-restore-manifest.json").write_text(
+              json.dumps(baseline, indent=2, sort_keys=True),
+              encoding="utf-8",
+          )
+          print(f"Captured restore manifest for {len(baseline)} futures files.")
+          PY
 
       - name: Collect daily snapshot
         env:
@@ -95,6 +154,70 @@ jobs:
           df.to_parquet(out, index=False)
           print(f"Saved {len(df)} markets -> {out}")
           EOF
+
+      - name: Validate candle history integrity
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          import pandas as pd
+
+          baseline_path = Path("/tmp/gmx-restore-manifest.json")
+          if not baseline_path.exists():
+              print("ERROR: missing restore manifest; cannot validate candle history.", file=sys.stderr)
+              sys.exit(1)
+
+          baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          futures_dir = Path("./user_data/data/gmx/futures")
+          current = {}
+
+          for path in sorted(futures_dir.glob("*.feather")):
+              df = pd.read_feather(path, columns=["date"])
+              if df.empty:
+                  continue
+              dates = pd.to_datetime(df["date"], utc=True)
+              current[path.name] = {
+                  "rows": int(len(df)),
+                  "min_date": dates.min().isoformat(),
+                  "max_date": dates.max().isoformat(),
+              }
+
+          regressions = []
+
+          missing_files = sorted(set(baseline) - set(current))
+          if missing_files:
+              regressions.append(
+                  "missing futures files after collection: " + ", ".join(missing_files[:5])
+                  + (" ..." if len(missing_files) > 5 else "")
+              )
+
+          for name, before in baseline.items():
+              after = current.get(name)
+              if not after:
+                  continue
+              if after["rows"] < before["rows"]:
+                  regressions.append(
+                      f"{name} row count shrank from {before['rows']} to {after['rows']}"
+                  )
+              if after["min_date"] > before["min_date"]:
+                  regressions.append(
+                      f"{name} earliest candle moved forward from {before['min_date']} to {after['min_date']}"
+                  )
+
+          report = Path("data_report.txt").read_text(encoding="utf-8") if Path("data_report.txt").exists() else ""
+          if "## Failed OHLCV Fetches" in report:
+              regressions.append("collector reported failed OHLCV fetches")
+
+          if regressions:
+              print("ERROR: release integrity check failed.", file=sys.stderr)
+              for item in regressions:
+                  print(f"  - {item}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"Validated {len(current)} futures files with no regressions.")
+          PY
 
       - name: Show report in job summary
         if: always()

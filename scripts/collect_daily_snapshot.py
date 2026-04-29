@@ -122,6 +122,49 @@ def _extract_symbols(markets: list[dict]) -> list[str]:
     return sorted(symbols)
 
 
+def _fetch_candles_with_retry(
+    api: GMXAPI,
+    symbol: str,
+    tf: str,
+    limit: int,
+    *,
+    max_retries: int = 5,
+    initial_backoff: float = 2.0,
+    max_backoff: float = 60.0,
+) -> pd.DataFrame:
+    """Fetch one candle slice with retry and exponential backoff.
+
+    Retries both transport/API exceptions and empty responses. Empty payloads
+    are treated as transient here because a listed market should not normally
+    return no candles for a populated timeframe.
+    """
+    backoff = initial_backoff
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            df = api.get_candlesticks_dataframe(symbol, period=tf, limit=limit)
+            if df.empty:
+                raise RuntimeError("empty candle response")
+            return df
+        except Exception as e:
+            last_error = e
+            if attempt >= max_retries:
+                break
+
+            wait_time = min(backoff, max_backoff)
+            console.print(
+                f"    [yellow]Retry {attempt}/{max_retries} for {symbol}/{tf} "
+                f"in {wait_time:.1f}s after error: {e}[/yellow]"
+            )
+            time.sleep(wait_time)
+            backoff *= 2
+
+    raise RuntimeError(
+        f"Failed to fetch candles for {symbol}/{tf} after {max_retries} attempts"
+    ) from last_error
+
+
 def _flatten_apy(
     raw_apy: dict,
     period: str,
@@ -417,10 +460,7 @@ def collect_and_save_ohlcv(
                 else:
                     limit = 10000  # Max available history from API
 
-                df = api.get_candlesticks_dataframe(symbol, period=tf, limit=limit)
-                if df.empty:
-                    failed.append(f"{symbol}/{tf}")
-                    continue
+                df = _fetch_candles_with_retry(api, symbol, tf, limit)
 
                 new_rows = pd.DataFrame(
                     {
@@ -636,6 +676,26 @@ def generate_report(
     console.print(f"  Report → {report_path}")
 
 
+def _abort_on_failed_ohlcv_fetches(failed_symbols: list[str]) -> None:
+    """Stop the run if any OHLCV fetches failed.
+
+    The release workflow must never publish a partial candle history. If one
+    symbol/timeframe cannot be refreshed, the run fails so it can be retried
+    instead of shipping a hole in the historical archive.
+    """
+    if not failed_symbols:
+        return
+
+    console.print(
+        "[red]Aborting release: OHLCV fetch failures would produce a partial snapshot.[/red]"
+    )
+    console.print(
+        f"  Failed pairs: {len(failed_symbols)}"
+        + (f" (first: {failed_symbols[0]})" if failed_symbols else "")
+    )
+    sys.exit(1)
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -791,6 +851,7 @@ Examples:
         volumes_dir=volumes_dir,
         report_path=report_path,
     )
+    _abort_on_failed_ohlcv_fetches(failed_symbols)
     console.print()
 
     # --- Summary ---
