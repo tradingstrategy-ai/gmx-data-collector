@@ -129,32 +129,6 @@ jobs:
         run: |
           PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data
 
-      - name: Collect 24h volume snapshot
-        run: |
-          PYTHONPATH=src python - <<'EOF'
-          import sys
-          from datetime import datetime, UTC
-          from pathlib import Path
-          from gmx_historical_data.subsquid_volume import fetch_daily_volumes
-          import pandas as pd
-
-          date_str = datetime.now(UTC).strftime("%Y-%m-%d")
-          volumes_dir = Path("./user_data/data/gmx/volumes")
-          volumes_dir.mkdir(parents=True, exist_ok=True)
-
-          print(f"Fetching 24h volumes for {date_str}...")
-          volumes = fetch_daily_volumes(chain="arbitrum")
-          if not volumes:
-              print("No volume data returned.")
-              sys.exit(0)
-
-          rows = [{"date": date_str, "market_address": addr, "volume_usd": str(vol)} for addr, vol in volumes.items()]
-          df = pd.DataFrame(rows)
-          out = volumes_dir / f"{date_str}.parquet"
-          df.to_parquet(out, index=False)
-          print(f"Saved {len(df)} markets -> {out}")
-          EOF
-
       - name: Validate candle history integrity
         run: |
           PYTHONPATH=src python - <<'PY'
@@ -218,6 +192,32 @@ jobs:
 
           print(f"Validated {len(current)} futures files with no regressions.")
           PY
+
+      - name: Collect 24h volume snapshot
+        run: |
+          PYTHONPATH=src python - <<'EOF'
+          import sys
+          from datetime import datetime, UTC
+          from pathlib import Path
+          from gmx_historical_data.subsquid_volume import fetch_daily_volumes
+          import pandas as pd
+
+          date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+          volumes_dir = Path("./user_data/data/gmx/volumes")
+          volumes_dir.mkdir(parents=True, exist_ok=True)
+
+          print(f"Fetching 24h volumes for {date_str}...")
+          volumes = fetch_daily_volumes(chain="arbitrum")
+          if not volumes:
+              print("No volume data returned.")
+              sys.exit(0)
+
+          rows = [{"date": date_str, "market_address": addr, "volume_usd": str(vol)} for addr, vol in volumes.items()]
+          df = pd.DataFrame(rows)
+          out = volumes_dir / f"{date_str}.parquet"
+          df.to_parquet(out, index=False)
+          print(f"Saved {len(df)} markets -> {out}")
+          EOF
 
       - name: Show report in job summary
         if: always()

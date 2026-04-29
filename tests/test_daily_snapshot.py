@@ -206,6 +206,50 @@ class TestOhlcvRetry:
 
         assert sleeps == [2.0, 4.0]
 
+    def test_fetch_candles_with_retry_treats_empty_response_as_failure(self, monkeypatch):
+        """Empty DataFrame must trigger a retry, not be returned as a successful empty result."""
+        import pandas as pd
+
+        from scripts.collect_daily_snapshot import _fetch_candles_with_retry
+
+        sleeps: list[float] = []
+
+        class FakeApi:
+            def __init__(self):
+                self.calls = 0
+
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                self.calls += 1
+                if self.calls == 1:
+                    return pd.DataFrame()  # transient empty response
+                return _make_ohlcv(["2026-03-10"], [100.0]).rename(columns={"date": "timestamp"})
+
+        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+
+        df = _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=5, initial_backoff=2.0)
+
+        assert len(df) == 1, "retry should have produced non-empty data"
+        assert sleeps == [2.0], "exactly one backoff sleep expected before the recovery call"
+
+    def test_fetch_candles_with_retry_fails_when_responses_stay_empty(self, monkeypatch):
+        """Empty responses on every attempt must raise after exhausting retries (not silently succeed)."""
+        import pandas as pd
+
+        from scripts.collect_daily_snapshot import _fetch_candles_with_retry
+
+        sleeps: list[float] = []
+
+        class FakeApi:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                return pd.DataFrame()
+
+        monkeypatch.setattr("scripts.collect_daily_snapshot.time.sleep", lambda seconds: sleeps.append(seconds))
+
+        with pytest.raises(RuntimeError, match="Failed to fetch candles for BTC/1m after 3 attempts"):
+            _fetch_candles_with_retry(FakeApi(), "BTC", "1m", 10000, max_retries=3, initial_backoff=2.0)
+
+        assert sleeps == [2.0, 4.0]
+
 
 class TestCollectTickers:
     """Tests for the ticker collection function."""
