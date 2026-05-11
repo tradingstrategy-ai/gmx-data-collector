@@ -67,7 +67,7 @@ SKIP_DOWNLOAD    ?=
 .PHONY: help install show-config monitor \
         refresh-data full-data full-data-nn \
         collect-update collect-update-nn collect-full collect-full-nn export-freqtrade \
-        funding-unified funding-unified-resume funding-unified-merge \
+        funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         oi oi-resume \
         pool-liquidity pool-liquidity-resume \
@@ -92,6 +92,7 @@ help:
 	@echo "  collect-full         Candles: full historical from genesis, nice+10 (enable quickstart with QUICKSTART=--quickstart)"
 	@echo "  collect-full-nn      Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
+	@echo "  funding-unified-nn   Funding: all phases, no nice (nn = no-nice, max throughput)"
 	@echo "  funding-unified-resume  Funding: incremental (resume from checkpoints)"
 	@echo "  funding-full         Funding: all phases + DataStore (slow, archive RPC)"
 	@echo "  funding-feather      Funding: export to FreqTrade feather format"
@@ -325,6 +326,22 @@ funding-unified-resume:
 	@echo ""
 	@mkdir -p "$(UNIFIED_OUTPUT_DIR)" "$(LOG_DIR)"
 	$(UNIFIED_CMD) --resume
+
+# No-nice variant: no OS-level nice, maximum throughput (dedicated machine / overnight).
+funding-unified-nn:
+	@echo "Starting unified funding rate extraction (no-nice, HyperSync only)..."
+	@echo "  Network:    $(NETWORK)"
+	@echo "  Output:     $(UNIFIED_OUTPUT_DIR)"
+	@echo ""
+	@mkdir -p "$(UNIFIED_OUTPUT_DIR)" "$(LOG_DIR)"
+	poetry run python scripts/extract_unified_funding.py \
+		--network $(NETWORK) \
+		--output-dir "$(UNIFIED_OUTPUT_DIR)" \
+		--output $(OUTPUT_FORMAT) \
+		$(if $(INCLUDE_DATASTORE),--include-datastore,) \
+		$(if $(FROM_BLOCK),--from-block $(FROM_BLOCK),) \
+		$(if $(TO_BLOCK),--to-block $(TO_BLOCK),) \
+		$(if $(MARKET),--market $(MARKET),)
 
 funding-unified-merge:
 	@echo "Merging existing funding rate data..."
