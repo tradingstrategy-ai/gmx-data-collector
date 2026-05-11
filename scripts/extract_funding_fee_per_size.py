@@ -90,6 +90,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import hypersync
+import polars as pl
 from eth_abi import decode as abi_decode
 from eth_utils import keccak
 from hypersync import (
@@ -113,20 +114,6 @@ from rich.progress import (
 from rich.table import Table
 
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
-
-try:
-    import polars as pl
-
-    HAS_POLARS = True
-except ImportError:
-    HAS_POLARS = False
-
-try:
-    import pyarrow.feather as pq_feather
-
-    HAS_FEATHER = True
-except ImportError:
-    HAS_FEATHER = False
 
 console = Console()
 
@@ -695,9 +682,6 @@ def aggregate_hourly_direction(
     :param records: List of :class:`FundingFeePerSizeRecord` objects.
     :returns: Dict mapping symbol to hourly DataFrame with direction info.
     """
-    if not HAS_POLARS:
-        raise RuntimeError("polars required for aggregation")
-
     if not records:
         return {}
 
@@ -826,10 +810,6 @@ def save_raw_per_symbol(records: list[FundingFeePerSizeRecord], output_dir: Path
     :param records: List of :class:`FundingFeePerSizeRecord` objects.
     :param output_dir: Base output directory (e.g., ``data/funding/arbitrum``).
     """
-    if not HAS_POLARS:
-        console.print("[red]polars required for Parquet[/red]")
-        return
-
     by_symbol: dict[str, list[FundingFeePerSizeRecord]] = defaultdict(list)
     for r in records:
         by_symbol[r.symbol].append(r)
@@ -872,32 +852,32 @@ def save_feather_freqtrade(
     :param feather_dir: Output directory for feather files.
     :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
     """
-    if not HAS_FEATHER:
-        console.print("[red]pandas + pyarrow required for feather export[/red]")
-        return
-
     gmx_dir = feather_dir / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
 
     for symbol, df in sorted(hourly_by_symbol.items()):
-        # Convert to pandas for feather writing
-        # Open = signed direction indicator: +1.0 = longs pay, -1.0 = shorts pay
-        pdf = df.select(["timestamp", "longs_pay_shorts"]).to_pandas()
-        pdf = pdf.rename(columns={"timestamp": "date"})
-        pdf["open"] = pdf["longs_pay_shorts"].apply(lambda x: 1.0 if x else -1.0)
-        pdf = pdf.drop(columns=["longs_pay_shorts"])
-        pdf["date"] = pdf["date"].dt.as_unit("ns")
-        pdf["high"] = 0.0
-        pdf["low"] = 0.0
-        pdf["close"] = 0.0
-        pdf["volume"] = 0.0
-        pdf = pdf.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
-        pdf = pdf.dropna(subset=["open"])
+        # open = signed direction indicator: +1.0 = longs pay, -1.0 = shorts pay.
+        out = (
+            df.select(
+                pl.col("timestamp").cast(pl.Datetime("ns", "UTC")).alias("date"),
+                pl.when(pl.col("longs_pay_shorts")).then(1.0).otherwise(-1.0).alias("open"),
+            )
+            .with_columns(
+                pl.lit(0.0).alias("high"),
+                pl.lit(0.0).alias("low"),
+                pl.lit(0.0).alias("close"),
+                pl.lit(0.0).alias("volume"),
+            )
+            .select(["date", "open", "high", "low", "close", "volume"])
+            .sort("date")
+            .unique(subset=["date"], keep="first", maintain_order=True)
+            .drop_nulls(subset=["open"])
+        )
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        pq_feather.write_feather(pdf, filepath)
-        console.print(f"  Feather: [cyan]{len(pdf):,}[/cyan] hours -> [green]{filepath}[/green]")
+        out.write_ipc(filepath)
+        console.print(f"  Feather: [cyan]{len(out):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 
 def save_json(data: list, filename: str) -> None:

@@ -24,11 +24,11 @@ ifneq ($(strip $(DAT_DIR)),)
 DATA_DIR ?= $(DAT_DIR)
 FEATHER_DIR ?= $(DAT_DIR)
 endif
-DATA_DIR ?= ./user_data
+DATA_DIR ?= /Volumes/WD Blue 1tb/VMs/data/gmx
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
-OI_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/open_interest
-POOL_LIQUIDITY_OUTPUT_DIR ?= $(DATA_DIR)/data/gmx/pool_liquidity
-FEATHER_DIR ?= $(DATA_DIR)/data
+OI_OUTPUT_DIR ?= $(DATA_DIR)/open_interest
+POOL_LIQUIDITY_OUTPUT_DIR ?= $(DATA_DIR)/pool_liquidity
+FEATHER_DIR ?= /Volumes/WD Blue 1tb/VMs/data
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
 
@@ -51,6 +51,8 @@ INCLUDE_DATASTORE ?=
 
 # Pass --keep to export-freqtrade to preserve source parquet after export (default: delete)
 KEEP ?=
+# Pass --overwrite to replace existing feather files entirely instead of merging
+OVERWRITE ?=
 
 # CEX gap-fill knobs (additive, optional)
 GAP_THRESHOLD    ?= 0.20
@@ -214,7 +216,8 @@ export-freqtrade:
 	$(NICE) poetry run python -m gmx_historical_data.cli export-freqtrade \
 		--data-dir "$(DATA_DIR)" \
 		--output-dir "$(FEATHER_DIR)" \
-		$(KEEP)
+		$(KEEP) \
+		$(OVERWRITE)
 
 # ==============================================================================
 # Open Interest Extraction

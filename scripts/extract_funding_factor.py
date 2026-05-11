@@ -78,6 +78,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import hypersync
+import polars as pl
 from eth_abi import decode as abi_decode
 from eth_utils import keccak
 from hypersync import (
@@ -101,13 +102,6 @@ from rich.progress import (
 from rich.table import Table
 
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
-
-try:
-    import polars as pl
-
-    HAS_POLARS = True
-except ImportError:
-    HAS_POLARS = False
 
 console = Console()
 
@@ -180,11 +174,15 @@ class FundingFactorRecord:
     The ``Funding`` event carries ``fundingFactorPerSecond`` — the per-second
     funding rate as a 30-decimal fixed-point integer.
 
+    Direction (``longs_pay_shorts``) is not encoded in this event; it depends
+    on the OI imbalance and is determined downstream in
+    :mod:`scripts.extract_unified_funding` by joining direction data from
+    ``extract_funding_fee_per_size.py``.
+
     :ivar symbol: Derived symbol (e.g., ``'ETH'``)
     :ivar market: Market contract address
     :ivar funding_factor_per_second: Raw 30-decimal integer as string
-    :ivar funding_rate_per_second: Decimal per-second rate
-    :ivar longs_pay_shorts: True when longs pay shorts
+    :ivar funding_rate_per_second: Decimal per-second rate (unsigned magnitude)
     :ivar block_number: Block number
     :ivar block_timestamp: Unix timestamp (seconds)
     :ivar block_datetime: ISO 8601 datetime string
@@ -196,7 +194,6 @@ class FundingFactorRecord:
     market: str
     funding_factor_per_second: str
     funding_rate_per_second: float
-    longs_pay_shorts: bool
     block_number: int
     block_timestamp: int
     block_datetime: str
@@ -577,9 +574,9 @@ async def extract_funding_events(
 
                 # fundingFactorPerSecond is always in uints (unsigned).
                 # Direction (longs pay shorts or vice versa) is NOT encoded
-                # in the Funding event — it depends on OI imbalance.
-                # We treat the rate as the absolute magnitude.
-                longs_pay = True  # not determinable from event
+                # in the Funding event — it depends on OI imbalance. We treat
+                # the rate as the absolute magnitude here; direction is joined
+                # in by extract_unified_funding at merge time.
                 factor_raw = decoded["uints"].get("fundingFactorPerSecond", 0)
 
                 symbol = market_symbol(market_addr, markets)
@@ -605,7 +602,6 @@ async def extract_funding_events(
                     market=market_addr.lower(),
                     funding_factor_per_second=str(factor_raw),
                     funding_rate_per_second=rate,
-                    longs_pay_shorts=longs_pay,
                     block_number=block_num,
                     block_timestamp=ts,
                     block_datetime=dt_str,
@@ -677,63 +673,83 @@ def aggregate_hourly_rates(
     :param records: List of :class:`FundingFactorRecord` objects.
     :returns: Dict mapping symbol to hourly DataFrame.
     """
-    if not HAS_POLARS:
-        raise RuntimeError("polars required for aggregation")
-
     if not records:
         return {}
 
     df = pl.DataFrame([asdict(r) for r in records])
 
-    # Convert block_timestamp to datetime
+    # Convert block_timestamp to datetime and to a hashable hour bucket.
     df = df.with_columns(
         pl.from_epoch(pl.col("block_timestamp"), time_unit="s")
-        .alias("timestamp")
-        .cast(pl.Datetime("ns", "UTC")),
-    )
-
-    # Truncate to hour
-    df = df.with_columns(
+        .cast(pl.Datetime("ns", "UTC"))
+        .alias("timestamp"),
+    ).with_columns(
         pl.col("timestamp").dt.truncate("1h").alias("hour"),
     )
 
-    # Aggregate per symbol per hour
+    # ------------------------------------------------------------------
+    # Time-weighted average (TWAP) within each hourly bucket
+    # ------------------------------------------------------------------
+    # The rate at any second is the most recent funding_rate_per_second
+    # reported by an event up to that second. dt_seconds is the seconds the
+    # current event's rate stays in effect within its hour bucket:
+    #
+    #   dt_i = min(next_event_ts, hour_end) - event_ts
+    #
+    # For the final event in a bucket (no next event before hour_end),
+    # dt = hour_end - event_ts. TWAP = sum(rate * dt) / sum(dt).
+    df = df.sort(["symbol", "market", "timestamp"])
+    df = df.with_columns(
+        pl.col("timestamp")
+        .shift(-1)
+        .over(["symbol", "market"])
+        .alias("_next_ts"),
+        (pl.col("hour") + pl.duration(hours=1)).alias("_hour_end"),
+    )
+    df = df.with_columns(
+        pl.min_horizontal(pl.col("_next_ts").fill_null(pl.col("_hour_end")), pl.col("_hour_end"))
+        .alias("_window_end"),
+    )
+    df = df.with_columns(
+        (pl.col("_window_end") - pl.col("timestamp")).dt.total_seconds().alias("dt_seconds"),
+    )
+    # Defensive: any non-positive dt (e.g. duplicate timestamps) contributes
+    # zero seconds but its rate still factors into min/max/update_count.
+    df = df.with_columns(pl.col("dt_seconds").clip(lower_bound=0))
+
     hourly = (
         df.group_by(["symbol", "market", "hour"])
         .agg(
-            pl.col("funding_rate_per_second").mean().alias("funding_rate"),
+            (pl.col("funding_rate_per_second") * pl.col("dt_seconds")).sum().alias("_weighted_sum"),
+            pl.col("dt_seconds").sum().alias("_total_seconds"),
             pl.col("funding_rate_per_second").min().alias("funding_rate_min"),
             pl.col("funding_rate_per_second").max().alias("funding_rate_max"),
-            pl.col("longs_pay_shorts").mode().first().alias("longs_pay_shorts"),
             pl.len().alias("update_count"),
         )
+        .with_columns(
+            pl.when(pl.col("_total_seconds") > 0)
+            .then(pl.col("_weighted_sum") / pl.col("_total_seconds"))
+            # Degenerate case (all events at hour_end): fall back to max as an
+            # unsigned representative; the row keeps min/max for downstream use.
+            .otherwise(pl.col("funding_rate_max"))
+            .alias("funding_rate"),
+        )
+        .drop(["_weighted_sum", "_total_seconds"])
         .sort(["symbol", "hour"])
     )
 
-    # Compute derived columns
+    # Derived columns (unsigned magnitudes; direction joined later in unified merge)
     hourly = hourly.with_columns(
         (pl.col("funding_rate") * 3600).alias("funding_rate_hourly"),
         (pl.col("funding_rate") * 3600 * 8760).alias("funding_rate_annualized"),
-        # Signed fee columns: positive = pays, negative = receives
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * 3600)
-        .otherwise(pl.col("funding_rate") * -3600)
-        .alias("funding_fee_long"),
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * -3600)
-        .otherwise(pl.col("funding_rate") * 3600)
-        .alias("funding_fee_short"),
     )
 
-    # Rename hour -> timestamp
     hourly = hourly.rename({"hour": "timestamp"})
 
-    # Split by symbol
+    # Split by symbol; emit columns in stable order.
     result = {}
     for symbol in hourly["symbol"].unique().sort().to_list():
-        sym_df = hourly.filter(pl.col("symbol") == symbol)
-        # Select columns in the expected order
-        sym_df = sym_df.select(
+        sym_df = hourly.filter(pl.col("symbol") == symbol).select(
             [
                 "timestamp",
                 "funding_rate",
@@ -741,9 +757,6 @@ def aggregate_hourly_rates(
                 "funding_rate_max",
                 "funding_rate_hourly",
                 "funding_rate_annualized",
-                "longs_pay_shorts",
-                "funding_fee_long",
-                "funding_fee_short",
                 "update_count",
                 "symbol",
                 "market",
@@ -793,10 +806,6 @@ def save_raw_per_symbol(records: list[FundingFactorRecord], output_dir: Path) ->
     :param records: List of :class:`FundingFactorRecord` objects.
     :param output_dir: Base output directory (e.g., ``data/funding/arbitrum``).
     """
-    if not HAS_POLARS:
-        console.print("[red]polars required for Parquet[/red]")
-        return
-
     by_symbol: dict[str, list[FundingFactorRecord]] = defaultdict(list)
     for r in records:
         by_symbol[r.symbol].append(r)
@@ -839,9 +848,6 @@ def save_csv(data: list, filename: str) -> None:
     :param data: List of dataclass instances.
     :param filename: Output file path.
     """
-    if not HAS_POLARS:
-        console.print("[red]polars required for CSV[/red]")
-        return
     df = pl.DataFrame([asdict(d) for d in data])
     df.write_csv(filename)
     console.print(f"  Saved [cyan]{len(data):,}[/cyan] records to [green]{filename}[/green]")

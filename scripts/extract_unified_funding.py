@@ -57,32 +57,10 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
-try:
-    import polars as pl
-except ImportError:
-    print("ERROR: polars is required. Install with: poetry install")
-    sys.exit(1)
+import polars as pl
+from rich.console import Console
 
-try:
-    import pandas as pd
-    import pyarrow.feather as pq_feather
-
-    HAS_FEATHER = True
-except ImportError:
-    HAS_FEATHER = False
-
-try:
-    from rich.console import Console
-
-    console = Console()
-except ImportError:
-    import builtins
-
-    class _FallbackConsole:
-        def print(self, *a, **kw):
-            builtins.print(*a)
-
-    console = _FallbackConsole()
+console = Console()
 
 
 # =============================================================================
@@ -428,6 +406,147 @@ def market_symbol_from_filter(market_filter: str) -> str:
     return market_filter.split("/")[0].strip()
 
 
+def apply_direction_to_rates(
+    rates: pl.DataFrame,
+    direction: pl.DataFrame | None,
+) -> pl.DataFrame:
+    """Attach direction (``longs_pay_shorts``) to unsigned hourly rates.
+
+    Direction observations from ``FundingFeeAmountPerSizeUpdated`` events are
+    sparse — there may be no observation in many hours. We join by timestamp,
+    then **forward-fill** within ``(symbol, market)`` so each hour inherits the
+    last observed direction until the next event flips it.
+
+    Hours preceding the first direction observation keep ``longs_pay_shorts``
+    as ``null`` rather than silently defaulting to ``True``. Signed-fee
+    columns (``funding_fee_long``/``funding_fee_short``) are also ``null``
+    for those rows.
+
+    :param rates: Hourly rate frame with at least ``timestamp``, ``symbol``,
+        ``market``, ``funding_rate``.
+    :param direction: Hourly direction frame with ``timestamp``,
+        ``longs_pay_shorts``. Pass ``None`` when no direction data exists;
+        all rows then receive ``null`` direction.
+    :returns: ``rates`` augmented with ``longs_pay_shorts``,
+        ``funding_fee_long``, ``funding_fee_short`` columns.
+    """
+    if direction is None or direction.is_empty():
+        return rates.with_columns(
+            pl.lit(None, dtype=pl.Boolean).alias("longs_pay_shorts"),
+            pl.lit(None, dtype=pl.Float64).alias("funding_fee_long"),
+            pl.lit(None, dtype=pl.Float64).alias("funding_fee_short"),
+        )
+
+    dir_df = direction.select(["timestamp", "longs_pay_shorts"]).rename(
+        {"longs_pay_shorts": "direction_longs_pay"}
+    )
+
+    # Drop any pre-existing longs_pay_shorts (e.g. from legacy parquet).
+    if "longs_pay_shorts" in rates.columns:
+        rates = rates.drop("longs_pay_shorts")
+
+    # Group-aware forward fill: sort by (symbol, market, timestamp), then
+    # forward-fill direction within each (symbol, market). Leading nulls
+    # (no prior observation) stay null.
+    has_market = "market" in rates.columns
+    group_keys = ["symbol", "market"] if has_market else ["symbol"]
+    sort_keys = [*group_keys, "timestamp"]
+
+    merged = (
+        rates.join(dir_df, on="timestamp", how="left")
+        .sort(sort_keys)
+        .with_columns(
+            pl.col("direction_longs_pay")
+            .forward_fill()
+            .over(group_keys)
+            .alias("longs_pay_shorts")
+        )
+        .drop("direction_longs_pay")
+    )
+
+    # Signed-fee derivation: only when direction is known. Null direction
+    # propagates to null signed fees via the otherwise-null branch.
+    merged = merged.with_columns(
+        pl.when(pl.col("longs_pay_shorts").is_null())
+        .then(None)
+        .when(pl.col("longs_pay_shorts"))
+        .then(pl.col("funding_rate") * 3600)
+        .otherwise(pl.col("funding_rate") * -3600)
+        .alias("funding_fee_long"),
+        pl.when(pl.col("longs_pay_shorts").is_null())
+        .then(None)
+        .when(pl.col("longs_pay_shorts"))
+        .then(pl.col("funding_rate") * -3600)
+        .otherwise(pl.col("funding_rate") * 3600)
+        .alias("funding_fee_short"),
+    )
+
+    return merged
+
+
+def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
+    """Expand event-based hourly rates onto a contiguous hourly grid.
+
+    GMX emits ``Funding`` events only on position updates, so low-volume
+    markets have silent hours. The on-chain ``fundingFactorPerSecond`` is a
+    contract state variable that persists between events — a silent hour
+    means the rate is unchanged since the most recent prior event, not
+    that the rate is unknown.
+
+    Builds a continuous hourly grid spanning ``[min(timestamp), max(timestamp)]``
+    and forward-fills numeric and identifier columns. Filled rows are flagged
+    via ``is_gap_filled = True`` and ``update_count = 0``. The grid never
+    extends past the last observed event (no backfill, no zombie-fill).
+
+    :param rates: Hourly rate frame from ``aggregate_hourly_rates`` or
+        ``rates/{SYM}/1h_factor.parquet``. Must contain at least
+        ``timestamp`` and ``update_count``.
+    :returns: Contiguous hourly frame with ``is_gap_filled`` column added.
+        Empty input returns an empty frame (schema preserved).
+    """
+    if rates.is_empty():
+        return rates.with_columns(pl.lit(False).alias("is_gap_filled"))
+
+    start = rates["timestamp"].min()
+    end = rates["timestamp"].max()
+    ts_dtype = rates["timestamp"].dtype
+    grid = pl.DataFrame(
+        {
+            "timestamp": pl.datetime_range(
+                start, end, interval="1h", time_zone="UTC", eager=True
+            ).cast(ts_dtype)
+        }
+    )
+
+    # Left-join factor rows onto the grid; unmatched grid hours get nulls.
+    merged = grid.join(rates, on="timestamp", how="left")
+
+    # Flag filled rows BEFORE forward-fill (otherwise we lose the signal).
+    merged = merged.with_columns(
+        pl.col("update_count").is_null().alias("is_gap_filled"),
+    )
+
+    # Forward-fill rate columns and identifiers. update_count is filled with 0
+    # (not forward-filled — a filled hour has zero events by definition).
+    ff_cols = [
+        "funding_rate",
+        "funding_rate_min",
+        "funding_rate_max",
+        "funding_rate_hourly",
+        "funding_rate_annualized",
+        "symbol",
+        "market",
+    ]
+    merged = merged.with_columns(
+        [pl.col(c).forward_fill() for c in ff_cols if c in merged.columns]
+    )
+    merged = merged.with_columns(
+        pl.col("update_count").fill_null(0).cast(pl.UInt32),
+    )
+
+    return merged.sort("timestamp")
+
+
 def merge_symbol(
     symbol: str,
     rates_dir: Path,
@@ -458,38 +577,12 @@ def merge_symbol(
     factor_path = rates_dir / symbol / "1h_factor.parquet"
     if factor_path.exists():
         hs_df = pl.read_parquet(factor_path)
+        hs_df = forward_fill_hourly_grid(hs_df)
 
-        # --- Source 3: Direction correction ---
+        # --- Source 3: Direction correction (forward-filled, see helper) ---
         direction_path = direction_dir / symbol / "1h.parquet"
-        if direction_path.exists():
-            dir_df = pl.read_parquet(direction_path)
-            dir_df = dir_df.select(["timestamp", "longs_pay_shorts"]).rename(
-                {"longs_pay_shorts": "direction_longs_pay"}
-            )
-
-            # Drop the hardcoded longs_pay_shorts from factor data
-            if "longs_pay_shorts" in hs_df.columns:
-                hs_df = hs_df.drop("longs_pay_shorts")
-
-            # Join direction onto HyperSync rates by timestamp
-            hs_df = hs_df.join(dir_df, on="timestamp", how="left")
-
-            # Where direction is available, use it; otherwise default True
-            hs_df = hs_df.with_columns(
-                pl.col("direction_longs_pay").fill_null(True).alias("longs_pay_shorts")
-            ).drop("direction_longs_pay")
-
-            # Recompute signed fee columns based on corrected direction
-            hs_df = hs_df.with_columns(
-                pl.when(pl.col("longs_pay_shorts"))
-                .then(pl.col("funding_rate") * 3600)
-                .otherwise(pl.col("funding_rate") * -3600)
-                .alias("funding_fee_long"),
-                pl.when(pl.col("longs_pay_shorts"))
-                .then(pl.col("funding_rate") * -3600)
-                .otherwise(pl.col("funding_rate") * 3600)
-                .alias("funding_fee_short"),
-            )
+        dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
+        hs_df = apply_direction_to_rates(hs_df, dir_df)
 
         hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
         frames.append(hs_df)
@@ -499,6 +592,9 @@ def merge_symbol(
 
     # Concatenate with schema alignment
     unified = pl.concat(frames, how="diagonal_relaxed")
+
+    # DataStore rows predate is_gap_filled; they are real hourly RPC reads, never filled.
+    unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
 
     # Deduplicate by timestamp (prefer later source — hypersync appended second)
     unified = unified.unique(subset=["timestamp"], keep="last")
@@ -599,13 +695,6 @@ def export_feather(
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
     :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
     """
-    if not HAS_FEATHER:
-        console.print(
-            "[red]ERROR: pandas + pyarrow required for feather export. "
-            "Install with: poetry install[/red]"
-        )
-        return
-
     console.print(f"\n{'=' * 70}")
     console.print("  Feather Export (FreqTrade format)")
     console.print(f"{'=' * 70}")
@@ -618,11 +707,10 @@ def export_feather(
     gmx_dir = feather_dir / "data" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
 
-    symbols = {}
+    symbols: dict[str, Path] = {}
     for d in rates_dir.iterdir():
         if not d.is_dir():
             continue
-        # Prefer feather if it exists, fall back to parquet
         if (d / "1h.feather").exists():
             symbols[d.name] = d / "1h.feather"
         elif (d / "1h.parquet").exists():
@@ -635,37 +723,42 @@ def export_feather(
     exported = 0
     for symbol in sorted(symbols):
         unified_path = symbols[symbol]
-        if unified_path.suffix == ".feather":
-            df = pd.read_feather(unified_path)
-        else:
-            df = pd.read_parquet(unified_path)
-
-        if df.empty:
+        df = (
+            pl.read_ipc(unified_path)
+            if unified_path.suffix == ".feather"
+            else pl.read_parquet(unified_path)
+        )
+        if df.is_empty():
             continue
 
-        result = pd.DataFrame()
-        # Produce datetime64[ns, UTC] to match Binance/FreqTrade feather schema exactly
-        ts = pd.to_datetime(df["timestamp"], utc=True).as_unit("ns")
-        result["date"] = ts
-
         # open = per-settlement funding rate (per 1h for GMX continuous accrual)
-        # = funding_rate_per_second × 3600, same unit as Hyperliquid 1h settlement
-        if "funding_rate_hourly" in df.columns:
-            result["open"] = df["funding_rate_hourly"].astype(float)
-        else:
-            result["open"] = (df["funding_rate"] * 3600).astype(float)
+        #      = funding_rate_per_second × 3600 (same unit as Hyperliquid 1h settlement).
+        rate_expr = (
+            pl.col("funding_rate_hourly")
+            if "funding_rate_hourly" in df.columns
+            else pl.col("funding_rate") * 3600
+        )
 
-        result["high"] = 0.0
-        result["low"] = 0.0
-        result["close"] = 0.0
-        result["volume"] = 0.0
-
-        result = result.sort_values("date").drop_duplicates(subset=["date"]).reset_index(drop=True)
-        result = result.dropna(subset=["open"])
+        result = (
+            df.select(
+                pl.col("timestamp").cast(pl.Datetime("ns", "UTC")).alias("date"),
+                rate_expr.cast(pl.Float64).alias("open"),
+            )
+            .with_columns(
+                pl.lit(0.0).alias("high"),
+                pl.lit(0.0).alias("low"),
+                pl.lit(0.0).alias("close"),
+                pl.lit(0.0).alias("volume"),
+            )
+            .select(["date", "open", "high", "low", "close", "volume"])
+            .sort("date")
+            .unique(subset=["date"], keep="first", maintain_order=True)
+            .drop_nulls(subset=["open"])
+        )
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        pq_feather.write_feather(result, filepath)
+        result.write_ipc(filepath)
         exported += 1
         console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
 
