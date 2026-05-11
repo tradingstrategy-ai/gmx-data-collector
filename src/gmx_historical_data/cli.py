@@ -2264,13 +2264,29 @@ def export_freqtrade_command(
     overwrite: bool = typer.Option(
         False,
         "--overwrite",
-        help="Replace existing feather/parquet files instead of merging incrementally",
+        help=(
+            "Backward-compat alias.  Still runs the history-preservation guard "
+            "after the 2026-05-11 incident — use --unsafe-overwrite to actually "
+            "discard old rows."
+        ),
     ),
-    keep: bool = typer.Option(
+    unsafe_overwrite: bool = typer.Option(
         False,
-        "--keep",
-        "-k",
-        help="Keep candle parquet source files after successful feather export.",
+        "--unsafe-overwrite",
+        help=(
+            "Replace existing feathers entirely, bypassing the history "
+            "guard.  Only set this for schema migrations where you "
+            "intentionally discard old data."
+        ),
+    ),
+    delete_source: bool = typer.Option(
+        False,
+        "--delete-source",
+        help=(
+            "Delete the source candle parquet after writing the feather. "
+            "Default is to keep the source — only set this for explicit "
+            "parquet→feather migration workflows."
+        ),
     ),
 ) -> None:
     """Export GMX data to Freqtrade-compatible format.
@@ -2378,7 +2394,8 @@ def export_freqtrade_command(
             timeframes=timeframes_to_export,
             output_format=output_format,
             overwrite=overwrite,
-            keep_parquet=keep,
+            unsafe_overwrite=unsafe_overwrite,
+            keep_parquet=not delete_source,
         )
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
@@ -2470,6 +2487,171 @@ For more details on each command, use --help:
   gmx_historical_data debug-oracle --help
 """
 
+def export_candles_command(
+    data_dir: Path = typer.Option(Path("./data"), "--data-dir", help="Source GMX data directory"),
+    output_dir: Path = typer.Option(
+        Path("./freqtrade_data"), "--output-dir", help="Output directory for Freqtrade files"
+    ),
+    symbol: list[str] | None = typer.Option(
+        None, "--symbol", help="Specific symbols to export (can be repeated)"
+    ),
+    timeframe: list[str] | None = typer.Option(
+        None, "--timeframe", help="Specific timeframes to export (can be repeated)"
+    ),
+    output_format: str = typer.Option(
+        "feather", "--format", help="Output format (feather or parquet)"
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help=(
+            "Backward-compat alias.  Still runs the history-preservation guard "
+            "after the 2026-05-11 incident — use --unsafe-overwrite to actually "
+            "discard old rows."
+        ),
+    ),
+    unsafe_overwrite: bool = typer.Option(
+        False,
+        "--unsafe-overwrite",
+        help=(
+            "Replace existing feathers entirely, bypassing the history "
+            "guard.  Schema migrations only."
+        ),
+    ),
+    delete_source: bool = typer.Option(
+        False,
+        "--delete-source",
+        help=(
+            "Delete the source candle parquet after writing the feather. "
+            "Default keeps the source."
+        ),
+    ),
+) -> None:
+    """Export GMX OHLCV (candles + mark + index) feathers ONLY.
+
+    Reads only from ``{data_dir}/candles/`` and writes ``-futures``, ``-mark``,
+    and ``-index`` feathers.  Never touches funding files — use the
+    ``export-funding`` command for that.
+    """
+    from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+
+    if not data_dir.exists():
+        console.print(f"[red]Error: Data directory not found: {data_dir}[/red]")
+        raise typer.Exit(1)
+
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    candle_symbols = exporter.storage.list_symbols()
+    if not candle_symbols:
+        console.print(f"[yellow]No candle data found in {data_dir}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel(
+            "[bold cyan]Freqtrade Export — Candles (OHLCV + mark + index)[/bold cyan]\n\n"
+            f"Source: {data_dir}\n"
+            f"Output: {output_dir}\n"
+            f"Format: {output_format}",
+            box=box.ROUNDED,
+        )
+    )
+    try:
+        results = exporter.export_candles(
+            symbols=list(symbol) if symbol else None,
+            timeframes=list(timeframe) if timeframe else None,
+            output_format=output_format,
+            overwrite=overwrite,
+            unsafe_overwrite=unsafe_overwrite,
+            keep_parquet=not delete_source,
+        )
+    except Exception as e:
+        console.print(f"[red]Export failed: {e}[/red]")
+        console.print(traceback.format_exc())
+        raise typer.Exit(1) from e
+
+    total_files = sum(r["files"] for r in results.values())
+    total_candles = sum(r["candles"] for r in results.values())
+    console.print(
+        f"\n[green]✓[/green] {total_files} feather files written ({total_candles:,} candles) "
+        f"to [cyan]{output_dir / 'gmx'}[/cyan]"
+    )
+
+
+def export_funding_command(
+    data_dir: Path = typer.Option(Path("./data"), "--data-dir", help="Source GMX data directory"),
+    output_dir: Path = typer.Option(
+        Path("./freqtrade_data"), "--output-dir", help="Output directory for Freqtrade files"
+    ),
+    symbol: list[str] | None = typer.Option(
+        None, "--symbol", help="Specific symbols to export (can be repeated)"
+    ),
+    timeframe: list[str] | None = typer.Option(
+        None, "--timeframe", help="Specific timeframes to export (can be repeated)"
+    ),
+    output_format: str = typer.Option(
+        "feather", "--format", help="Output format (feather or parquet)"
+    ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help=(
+            "Backward-compat alias.  Still runs the history-preservation guard "
+            "after the 2026-05-11 incident."
+        ),
+    ),
+    unsafe_overwrite: bool = typer.Option(
+        False,
+        "--unsafe-overwrite",
+        help="Replace existing feathers entirely.  Schema migrations only.",
+    ),
+) -> None:
+    """Export GMX funding-rate feathers ONLY.
+
+    Reads only from ``{data_dir}/funding/`` and writes ``-funding_rate``
+    feathers.  Never touches OHLCV files — use ``export-candles`` for those.
+    The funding parquet source is owned by the unified-funding pipeline and
+    is never deleted by this command.
+    """
+    from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+
+    if not data_dir.exists():
+        console.print(f"[red]Error: Data directory not found: {data_dir}[/red]")
+        raise typer.Exit(1)
+
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    funding_symbols = exporter.list_funding_symbols()
+    if not funding_symbols:
+        console.print(f"[yellow]No funding data found in {data_dir}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel(
+            "[bold cyan]Freqtrade Export — Funding rates[/bold cyan]\n\n"
+            f"Source: {data_dir}\n"
+            f"Output: {output_dir}\n"
+            f"Format: {output_format}",
+            box=box.ROUNDED,
+        )
+    )
+    try:
+        results = exporter.export_funding(
+            symbols=list(symbol) if symbol else None,
+            timeframes=list(timeframe) if timeframe else None,
+            output_format=output_format,
+            overwrite=overwrite,
+            unsafe_overwrite=unsafe_overwrite,
+        )
+    except Exception as e:
+        console.print(f"[red]Export failed: {e}[/red]")
+        console.print(traceback.format_exc())
+        raise typer.Exit(1) from e
+
+    total = sum(r["funding_files"] for r in results.values())
+    console.print(
+        f"\n[green]✓[/green] {total} funding feathers written "
+        f"to [cyan]{output_dir / 'gmx'}[/cyan]"
+    )
+
+
 app = typer.Typer(help=CLI_HELP, rich_markup_mode="rich")
 
 # Register commands
@@ -2477,6 +2659,8 @@ app.command(name="collect")(cli)
 app.command(name="verify")(verify_command)
 app.command(name="debug-oracle")(debug_oracle_command)
 app.command(name="export-freqtrade")(export_freqtrade_command)
+app.command(name="export-candles")(export_candles_command)
+app.command(name="export-funding")(export_funding_command)
 
 
 def fill_gaps_cex(

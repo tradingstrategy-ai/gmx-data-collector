@@ -31,8 +31,27 @@ def _make_candles(symbols, dates):
     return pd.DataFrame(rows)
 
 
-def test_export_cleanup_removes_parquet_by_default(tmp_path):
-    """Test that keep_parquet=False (default) removes source parquet after export."""
+def test_export_cleanup_kept_by_default(tmp_path):
+    """`keep_parquet` defaults to ``True`` post-2026-05-11 — source parquet survives."""
+    storage_dir = tmp_path / "data"
+    storage_dir.mkdir()
+    storage = ParquetStorage(storage_dir)
+    storage.save_candles(_make_candles(["ETH"], ["2024-01-01"]), "1h", "ETH")
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    exporter = FreqtradeExporter(storage_dir, output_dir)
+    exporter.export(symbols=["ETH"], timeframes=["1h"])
+
+    feather_files = list(output_dir.rglob("*.feather"))
+    assert len(feather_files) >= 1, "feather export must succeed before cleanup is valid"
+
+    candle_path = storage_dir / "candles" / "arbitrum" / "ETH" / "1h.parquet"
+    assert candle_path.exists(), "default export must NOT delete the candle parquet"
+
+
+def test_export_cleanup_removes_parquet_when_opted_in(tmp_path):
+    """Explicit ``keep_parquet=False`` retains the legacy delete-after-export behaviour."""
     storage_dir = tmp_path / "data"
     storage_dir.mkdir()
     storage = ParquetStorage(storage_dir)
@@ -43,40 +62,29 @@ def test_export_cleanup_removes_parquet_by_default(tmp_path):
     exporter = FreqtradeExporter(storage_dir, output_dir)
     exporter.export(symbols=["ETH"], timeframes=["1h"], keep_parquet=False)
 
-    # Verify feather was created (futures + mark + index = 3 files for one symbol/timeframe)
-    feather_files = list(output_dir.rglob("*.feather"))
-    assert len(feather_files) >= 1, "feather export must succeed before cleanup is valid"
-
-    # After export with keep_parquet=False, the source parquet should be gone
     candle_path = storage_dir / "candles" / "arbitrum" / "ETH" / "1h.parquet"
-    assert not candle_path.exists()
+    assert not candle_path.exists(), "keep_parquet=False must delete the source parquet"
 
 
-def test_export_cleanup_kept_when_requested(tmp_path):
-    """Test that keep_parquet=True leaves the source parquet file in place."""
-    storage_dir = tmp_path / "data"
-    storage_dir.mkdir()
-    storage = ParquetStorage(storage_dir)
-    storage.save_candles(_make_candles(["ETH"], ["2024-01-01"]), "1h", "ETH")
+def test_makefile_export_supports_delete_source_flag():
+    """Makefile wires the new ``DELETE_SOURCE`` / ``UNSAFE_OVERWRITE`` knobs.
 
-    output_dir = tmp_path / "output"
-    output_dir.mkdir()
-    exporter = FreqtradeExporter(storage_dir, output_dir)
-    exporter.export(symbols=["ETH"], timeframes=["1h"], keep_parquet=True)
+    The legacy ``KEEP`` knob was removed after the 2026-05-11 incident, when
+    keeping the parquet became the safe default.
 
-    # Source parquet should still exist
-    candle_path = storage_dir / "candles" / "arbitrum" / "ETH" / "1h.parquet"
-    assert candle_path.exists()
-
-
-def test_makefile_export_supports_keep_flag():
-    """Test that the Makefile declares KEEP variable and passes it to export-freqtrade.
-
-    :raises AssertionError: If KEEP variable or --keep flag is missing from Makefile.
+    :raises AssertionError: If the new Makefile contract is missing.
     """
     makefile = Path(__file__).parent.parent / "Makefile"
     content = makefile.read_text()
-    assert "KEEP ?=" in content, "Makefile must declare KEEP variable with default"
-    assert "$(KEEP)" in content, (
-        "Makefile must wire $(KEEP) into the export-freqtrade CLI invocation"
+    assert "DELETE_SOURCE ?=" in content, (
+        "Makefile must declare DELETE_SOURCE variable (replaces KEEP)"
+    )
+    assert "UNSAFE_OVERWRITE ?=" in content, (
+        "Makefile must declare UNSAFE_OVERWRITE variable for schema migrations"
+    )
+    assert "$(DELETE_SOURCE)" in content, (
+        "Makefile must wire $(DELETE_SOURCE) into the export-freqtrade CLI invocation"
+    )
+    assert "KEEP ?=" not in content, (
+        "Legacy KEEP variable must be removed — DELETE_SOURCE has the inverse semantics"
     )

@@ -49,10 +49,16 @@ ARGS ?=
 # Set INCLUDE_DATASTORE=1 to include archive RPC reads (slow, requires JSON_RPC_ARBITRUM)
 INCLUDE_DATASTORE ?=
 
-# Pass --keep to export-freqtrade to preserve source parquet after export (default: delete)
-KEEP ?=
-# Pass --overwrite to replace existing feather files entirely instead of merging
+# Pass --overwrite to replace existing feather files entirely instead of merging.
+# NOTE: --overwrite no longer bypasses the history-preservation guard after the
+# 2026-05-11 incident.  Use UNSAFE_OVERWRITE=--unsafe-overwrite for genuine
+# schema migrations where you intentionally discard old rows.
 OVERWRITE ?=
+UNSAFE_OVERWRITE ?=
+# Pass DELETE_SOURCE=--delete-source to remove the source candle parquet after
+# a successful feather export.  Default is to keep sources (was the opposite
+# pre-2026-05-11 and led to data loss).
+DELETE_SOURCE ?=
 
 # CEX gap-fill knobs (additive, optional)
 GAP_THRESHOLD    ?= 0.20
@@ -68,7 +74,8 @@ SKIP_DOWNLOAD    ?=
 
 .PHONY: help install show-config monitor \
         refresh-data full-data full-data-nn \
-        collect-update collect-update-nn collect-full collect-full-nn export-freqtrade \
+        collect-update collect-update-nn collect-full collect-full-nn \
+        export-freqtrade export-candles export-funding \
         funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         oi oi-resume \
@@ -103,8 +110,19 @@ help:
 	@echo "  oi-resume            Open Interest: incremental (resume from checkpoint)"
 	@echo "  pool-liquidity       Pool Liquidity: full historical from genesis"
 	@echo "  pool-liquidity-resume  Pool Liquidity: incremental (resume from checkpoint)"
-	@echo "  export-freqtrade     Export candles + funding to FreqTrade format"
+	@echo "  export-candles       Export OHLCV (candles + mark + index) feathers ONLY"
+	@echo "  export-funding       Export funding_rate feathers ONLY"
+	@echo "  export-freqtrade     Legacy: runs export-candles + export-funding in one shot"
 	@echo "  fill-gaps-cex        Run CEX gap-fill stage on existing parquet"
+	@echo ""
+	@echo "Data isolation guarantees (post 2026-05-11):"
+	@echo "  - 'export-candles' touches only OHLCV feathers; funding files are left alone."
+	@echo "  - 'export-funding' touches only funding feathers; OHLCV files are left alone."
+	@echo "  - 'oi', 'pool-liquidity' write only to their own parquet directories."
+	@echo "  - Source candle parquet is preserved by default — set DELETE_SOURCE=--delete-source"
+	@echo "    to opt back into the old delete-after-export behaviour."
+	@echo "  - --overwrite no longer bypasses the history-preservation guard. Use"
+	@echo "    UNSAFE_OVERWRITE=--unsafe-overwrite explicitly for schema migrations."
 	@echo ""
 	@echo "Utility:"
 	@echo "  install         Install dependencies with Poetry"
@@ -125,22 +143,22 @@ help:
 # ==============================================================================
 
 # Incremental data refresh — tops up existing data with latest candles,
-# funding rates, OI, liquidity, then exports to FreqTrade format.
-refresh-data: collect-update funding-unified-resume extract-all-resume export-freqtrade
+# funding rates, OI, liquidity, then exports each pipeline in isolation.
+refresh-data: collect-update funding-unified-resume extract-all-resume export-candles export-funding
 	@echo ""
-	@echo "Incremental refresh complete: candles + funding + OI + liquidity + FreqTrade export"
+	@echo "Incremental refresh complete: candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download — collects everything from genesis. Slow but complete.
-full-data: collect-full funding-unified extract-all export-freqtrade
+full-data: collect-full funding-unified extract-all export-candles export-funding
 	@echo ""
-	@echo "Full data download complete: candles + funding + OI + liquidity + FreqTrade export"
+	@echo "Full data download complete: candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download, no nice — maximum throughput (dedicated machine / overnight).
-full-data-nn: collect-full-nn funding-unified extract-all export-freqtrade
+full-data-nn: collect-full-nn funding-unified extract-all export-candles export-funding
 	@echo ""
-	@echo "Full data download complete (no-nice): candles + funding + OI + liquidity + FreqTrade export"
+	@echo "Full data download complete (no-nice): candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # ==============================================================================
@@ -216,8 +234,40 @@ export-freqtrade:
 	$(NICE) poetry run python -m gmx_historical_data.cli export-freqtrade \
 		--data-dir "$(DATA_DIR)" \
 		--output-dir "$(FEATHER_DIR)" \
-		$(KEEP) \
-		$(OVERWRITE)
+		$(DELETE_SOURCE) \
+		$(OVERWRITE) \
+		$(UNSAFE_OVERWRITE)
+
+# Isolated OHLCV export.  Writes only -futures / -mark / -index feathers.
+# Will NOT touch funding feathers.
+export-candles:
+	@echo "Exporting OHLCV candles to FreqTrade format..."
+	@echo "  Data:       $(DATA_DIR)"
+	@echo "  Output:     $(FEATHER_DIR)"
+	@echo ""
+	@mkdir -p "$(FEATHER_DIR)"
+	$(NICE) poetry run python -m gmx_historical_data.cli export-candles \
+		--data-dir "$(DATA_DIR)" \
+		--output-dir "$(FEATHER_DIR)" \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(DELETE_SOURCE) \
+		$(OVERWRITE) \
+		$(UNSAFE_OVERWRITE)
+
+# Isolated funding-rate export.  Writes only -funding_rate feathers.
+# Will NOT touch OHLCV feathers.  Never deletes the funding parquet source.
+export-funding:
+	@echo "Exporting funding rates to FreqTrade format..."
+	@echo "  Data:       $(DATA_DIR)"
+	@echo "  Output:     $(FEATHER_DIR)"
+	@echo ""
+	@mkdir -p "$(FEATHER_DIR)"
+	$(NICE) poetry run python -m gmx_historical_data.cli export-funding \
+		--data-dir "$(DATA_DIR)" \
+		--output-dir "$(FEATHER_DIR)" \
+		$(if $(SYMBOL),--symbol $(SYMBOL),) \
+		$(OVERWRITE) \
+		$(UNSAFE_OVERWRITE)
 
 # ==============================================================================
 # Open Interest Extraction
@@ -450,14 +500,14 @@ fill-gaps-cex:
 		$(if $(SKIP_DOWNLOAD),--skip-download,) \
 		$(ARGS)
 
-refresh-data-cex: collect-update funding-unified-resume extract-all-resume fill-gaps-cex export-freqtrade
+refresh-data-cex: collect-update funding-unified-resume extract-all-resume fill-gaps-cex export-candles export-funding
 	@echo ""
 	@echo "Incremental refresh (with CEX gap-fill) complete"
 
-full-data-cex: collect-full funding-unified extract-all fill-gaps-cex export-freqtrade
+full-data-cex: collect-full funding-unified extract-all fill-gaps-cex export-candles export-funding
 	@echo ""
 	@echo "Full data download (with CEX gap-fill) complete"
 
-full-data-nn-cex: collect-full-nn funding-unified extract-all fill-gaps-cex export-freqtrade
+full-data-nn-cex: collect-full-nn funding-unified extract-all fill-gaps-cex export-candles export-funding
 	@echo ""
 	@echo "Full data download no-nice (with CEX gap-fill) complete"

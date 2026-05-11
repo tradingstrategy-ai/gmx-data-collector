@@ -52,6 +52,183 @@ class FreqtradeExporter:
     # Public API
     # ------------------------------------------------------------------
 
+    def export_candles(
+        self,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+        output_format: str = "feather",
+        trading_mode: str = "futures",
+        quote_currency: str = "USDC",
+        overwrite: bool = False,
+        unsafe_overwrite: bool = False,
+        keep_parquet: bool = True,
+    ) -> dict[str, dict]:
+        """Export OHLCV (candles + mark + index) feathers only.
+
+        Reads only from ``{data_dir}/candles/`` and writes only ``-futures``,
+        ``-mark``, and ``-index`` feathers.  Never touches funding files.
+
+        :param symbols: Specific symbols (default: all candle symbols).
+        :param timeframes: Specific timeframes (default: all available).
+        :param output_format: ``'feather'`` or ``'parquet'``.
+        :param trading_mode: ``'futures'`` or ``'spot'``.
+        :param quote_currency: Quote/settlement currency (default ``'USDC'``).
+        :param overwrite: Backward-compat alias; merges with history guard.
+        :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
+        :param keep_parquet: Default ``True``.  If ``False`` the source candle
+            parquet is deleted after a successful feather export.
+        :returns: Dict mapping symbol to export stats.
+        """
+        gmx_dir = self._make_gmx_dir(trading_mode)
+
+        candle_symbols = set(self.storage.list_symbols())
+        export_symbols = (
+            sorted(s for s in symbols if s in candle_symbols)
+            if symbols
+            else sorted(candle_symbols)
+        )
+
+        results: dict[str, dict] = {}
+        for symbol in export_symbols:
+            ohlcv_files = mark_files = index_files = total_candles = 0
+            candle_tfs = set(self.storage.list_timeframes(symbol))
+            export_tfs = [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
+
+            for tf in export_tfs:
+                raw = self.storage.read_candles(tf, symbol)
+                if raw.empty:
+                    continue
+                df = pl.from_pandas(raw)
+
+                ft_df = self._transform_dataframe(df)
+                self._write(
+                    ft_df,
+                    gmx_dir
+                    / self._get_freqtrade_filename(
+                        symbol, tf, output_format, trading_mode, quote_currency
+                    ),
+                    output_format,
+                    overwrite,
+                    unsafe_overwrite,
+                )
+                ohlcv_files += 1
+                total_candles += len(ft_df)
+
+                mark_df = self._transform_mark_price(df)
+                self._write(
+                    mark_df,
+                    gmx_dir
+                    / self._get_freqtrade_filename(
+                        symbol, tf, output_format, trading_mode, quote_currency, candle_type="mark"
+                    ),
+                    output_format,
+                    overwrite,
+                    unsafe_overwrite,
+                )
+                mark_files += 1
+
+                self._write(
+                    mark_df,
+                    gmx_dir
+                    / self._get_freqtrade_filename(
+                        symbol, tf, output_format, trading_mode, quote_currency, candle_type="index"
+                    ),
+                    output_format,
+                    overwrite,
+                    unsafe_overwrite,
+                )
+                index_files += 1
+
+                if not keep_parquet and output_format == "feather":
+                    self._cleanup_candle_source(symbol, tf)
+
+            results[symbol] = {
+                "files": ohlcv_files + mark_files + index_files,
+                "candles": total_candles,
+                "ohlcv_files": ohlcv_files,
+                "funding_files": 0,
+                "mark_files": mark_files,
+                "index_files": index_files,
+            }
+
+        return results
+
+    def export_funding(
+        self,
+        symbols: list[str] | None = None,
+        timeframes: list[str] | None = None,
+        output_format: str = "feather",
+        trading_mode: str = "futures",
+        quote_currency: str = "USDC",
+        overwrite: bool = False,
+        unsafe_overwrite: bool = False,
+    ) -> dict[str, dict]:
+        """Export funding_rate feathers only.
+
+        Reads only from ``{data_dir}/funding/`` and writes only
+        ``-funding_rate`` feathers.  Never touches OHLCV files.  The funding
+        parquet source is owned by the unified-funding pipeline — this
+        method never deletes it.
+
+        :param symbols: Specific symbols (default: all funding symbols).
+        :param timeframes: Specific timeframes (default: all available).
+        :param output_format: ``'feather'`` or ``'parquet'``.
+        :param trading_mode: ``'futures'`` or ``'spot'``.
+        :param quote_currency: Quote/settlement currency (default ``'USDC'``).
+        :param overwrite: Backward-compat alias; merges with history guard.
+        :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
+        :returns: Dict mapping symbol to export stats.
+        """
+        gmx_dir = self._make_gmx_dir(trading_mode)
+
+        funding_symbols = set(self.list_funding_symbols())
+        export_symbols = (
+            sorted(s for s in symbols if s in funding_symbols)
+            if symbols
+            else sorted(funding_symbols)
+        )
+
+        results: dict[str, dict] = {}
+        for symbol in export_symbols:
+            funding_files = 0
+            funding_tfs = set(self.list_funding_timeframes(symbol))
+            export_tfs = (
+                [tf for tf in timeframes if tf in funding_tfs] if timeframes else sorted(funding_tfs)
+            )
+
+            for tf in export_tfs:
+                funding_df = self._read_funding_rate(symbol, tf)
+                if funding_df is None or funding_df.is_empty():
+                    continue
+                ft_funding = self._transform_funding_rate(funding_df)
+                self._write(
+                    ft_funding,
+                    gmx_dir
+                    / self._get_freqtrade_filename(
+                        symbol,
+                        tf,
+                        output_format,
+                        trading_mode,
+                        quote_currency,
+                        candle_type="funding_rate",
+                    ),
+                    output_format,
+                    overwrite,
+                    unsafe_overwrite,
+                )
+                funding_files += 1
+
+            results[symbol] = {
+                "files": funding_files,
+                "candles": 0,
+                "ohlcv_files": 0,
+                "funding_files": funding_files,
+                "mark_files": 0,
+                "index_files": 0,
+            }
+
+        return results
+
     def export(
         self,
         symbols: list[str] | None = None,
@@ -60,143 +237,59 @@ class FreqtradeExporter:
         trading_mode: str = "futures",
         quote_currency: str = "USDC",
         overwrite: bool = False,
-        keep_parquet: bool = False,
+        unsafe_overwrite: bool = False,
+        keep_parquet: bool = True,
     ) -> dict[str, dict]:
-        """Export GMX data to Freqtrade format.
+        """Backward-compat wrapper: run candle export then funding export.
 
-        Exports OHLCV candles, funding rates, and mark price files for
-        each symbol/timeframe combination.
+        Prefer :meth:`export_candles` and :meth:`export_funding` directly so
+        callers can isolate the two pipelines.  This wrapper exists for the
+        ``gmx_historical_data export-freqtrade`` CLI command and any external
+        callers that relied on the combined behaviour.
 
-        By default existing files are merged incrementally — no history is
-        ever deleted.  Pass ``overwrite=True`` to replace files entirely.
-
-        :param symbols: Specific symbols to export (default: all).
-        :param timeframes: Specific timeframes to export (default: all).
-        :param output_format: Output format (``'feather'`` or ``'parquet'``).
-        :param trading_mode: ``'futures'`` or ``'spot'`` (default: ``'futures'``).
-        :param quote_currency: Quote/settlement currency (default: ``'USDC'``).
-        :param overwrite: If ``True``, replace existing files instead of merging.
-        :param keep_parquet: If ``False`` (default), delete the source candle
-            parquet file after a successful feather export.  Pass ``True`` to
-            retain the source file.
-        :returns: Dict mapping symbol to export stats.
+        Parameters identical to :meth:`export_candles` plus the funding
+        rate output.  Returns merged per-symbol stats.
         """
-        # Create output directory
-        if trading_mode == "futures":
-            gmx_dir = self.output_dir / "gmx" / "futures"
-        else:
-            gmx_dir = self.output_dir / "gmx"
-        gmx_dir.mkdir(parents=True, exist_ok=True)
+        candle_kwargs = dict(
+            symbols=symbols,
+            timeframes=timeframes,
+            output_format=output_format,
+            trading_mode=trading_mode,
+            quote_currency=quote_currency,
+            overwrite=overwrite,
+            unsafe_overwrite=unsafe_overwrite,
+            keep_parquet=keep_parquet,
+        )
+        candle_results = self.export_candles(**candle_kwargs)
+        funding_results = self.export_funding(
+            symbols=symbols,
+            timeframes=timeframes,
+            output_format=output_format,
+            trading_mode=trading_mode,
+            quote_currency=quote_currency,
+            overwrite=overwrite,
+            unsafe_overwrite=unsafe_overwrite,
+        )
 
-        # Merge symbols from both candle and funding data
-        candle_symbols = set(self.storage.list_symbols())
-        funding_symbols = set(self.list_funding_symbols())
-        all_symbols = sorted(candle_symbols | funding_symbols)
-
-        if symbols:
-            export_symbols = [s for s in symbols if s in all_symbols]
-        else:
-            export_symbols = all_symbols
-
-        results = {}
-
-        for symbol in export_symbols:
-            ohlcv_files = 0
-            funding_files = 0
-            mark_files = 0
-            index_files = 0
-            total_candles = 0
-
-            # Determine timeframes from candle + funding data
-            candle_tfs = (
-                set(self.storage.list_timeframes(symbol)) if symbol in candle_symbols else set()
-            )
-            funding_tfs = (
-                set(self.list_funding_timeframes(symbol)) if symbol in funding_symbols else set()
-            )
-            available_tfs = sorted(candle_tfs | funding_tfs)
-
-            if timeframes:
-                export_tfs = [tf for tf in timeframes if tf in available_tfs]
-            else:
-                export_tfs = available_tfs
-
-            for tf in export_tfs:
-                # --- OHLCV candles ---
-                if tf in candle_tfs:
-                    raw = self.storage.read_candles(tf, symbol)
-                    if not raw.empty:
-                        df = pl.from_pandas(raw)
-                        ft_df = self._transform_dataframe(df)
-                        filename = self._get_freqtrade_filename(
-                            symbol,
-                            tf,
-                            output_format,
-                            trading_mode,
-                            quote_currency,
-                        )
-                        self._write(ft_df, gmx_dir / filename, output_format, overwrite)
-                        ohlcv_files += 1
-                        total_candles += len(ft_df)
-
-                        # --- Mark price (OHLCV proxy) ---
-                        mark_df = self._transform_mark_price(df)
-                        mark_filename = self._get_freqtrade_filename(
-                            symbol,
-                            tf,
-                            output_format,
-                            trading_mode,
-                            quote_currency,
-                            candle_type="mark",
-                        )
-                        self._write(mark_df, gmx_dir / mark_filename, output_format, overwrite)
-                        mark_files += 1
-
-                        # --- Index price (same as mark for GMX/Chainlink) ---
-                        index_filename = self._get_freqtrade_filename(
-                            symbol,
-                            tf,
-                            output_format,
-                            trading_mode,
-                            quote_currency,
-                            candle_type="index",
-                        )
-                        self._write(mark_df, gmx_dir / index_filename, output_format, overwrite)
-                        index_files += 1
-
-                # --- Funding rate ---
-                if tf in funding_tfs:
-                    funding_df = self._read_funding_rate(symbol, tf)
-                    if funding_df is not None and not funding_df.is_empty():
-                        ft_funding = self._transform_funding_rate(funding_df)
-                        funding_filename = self._get_freqtrade_filename(
-                            symbol,
-                            tf,
-                            output_format,
-                            trading_mode,
-                            quote_currency,
-                            candle_type="funding_rate",
-                        )
-                        self._write(
-                            ft_funding, gmx_dir / funding_filename, output_format, overwrite
-                        )
-                        funding_files += 1
-
-                # --- Cleanup source parquet if requested ---
-                # Deferred until after all writes (OHLCV, mark, index, funding) succeed.
-                if not keep_parquet and output_format == "feather":
-                    self._cleanup_source_parquet(symbol, tf)
-
-            results[symbol] = {
-                "files": ohlcv_files + funding_files + mark_files + index_files,
-                "candles": total_candles,
-                "ohlcv_files": ohlcv_files,
-                "funding_files": funding_files,
-                "mark_files": mark_files,
-                "index_files": index_files,
+        merged: dict[str, dict] = {}
+        for symbol in sorted(set(candle_results) | set(funding_results)):
+            c = candle_results.get(symbol, {})
+            f = funding_results.get(symbol, {})
+            merged[symbol] = {
+                "files": c.get("files", 0) + f.get("files", 0),
+                "candles": c.get("candles", 0),
+                "ohlcv_files": c.get("ohlcv_files", 0),
+                "funding_files": f.get("funding_files", 0),
+                "mark_files": c.get("mark_files", 0),
+                "index_files": c.get("index_files", 0),
             }
+        return merged
 
-        return results
+    def _make_gmx_dir(self, trading_mode: str) -> Path:
+        """Resolve and create the per-trading-mode output directory."""
+        gmx_dir = self.output_dir / "gmx" / "futures" if trading_mode == "futures" else self.output_dir / "gmx"
+        gmx_dir.mkdir(parents=True, exist_ok=True)
+        return gmx_dir
 
     # ------------------------------------------------------------------
     # Funding rate helpers
@@ -314,8 +407,12 @@ class FreqtradeExporter:
     # File I/O
     # ------------------------------------------------------------------
 
-    def _cleanup_source_parquet(self, symbol: str, timeframe: str) -> None:
-        """Delete the source candle parquet for a symbol/timeframe.
+    def _cleanup_candle_source(self, symbol: str, timeframe: str) -> None:
+        """Delete the source *candle* parquet for a symbol/timeframe.
+
+        Only ever touches ``{data_dir}/candles/...``.  By design, no analogous
+        method exists for funding — the funding parquet is owned by the
+        unified-funding pipeline and never deleted by this exporter.
 
         :param symbol: Token symbol (e.g., ``'ETH'``).
         :param timeframe: Timeframe string (e.g., ``'1h'``).
@@ -323,58 +420,83 @@ class FreqtradeExporter:
         candle_path = self.data_dir / "candles" / "arbitrum" / symbol / f"{timeframe}.parquet"
         if candle_path.exists():
             candle_path.unlink()
-            logger.debug("Removed source parquet: %s", candle_path)
+            logger.debug("Removed source candle parquet: %s", candle_path)
 
-    def _write(self, df: pl.DataFrame, path: Path, fmt: str, overwrite: bool = False) -> None:
+    def _write(
+        self,
+        df: pl.DataFrame,
+        path: Path,
+        fmt: str,
+        overwrite: bool = False,
+        unsafe_overwrite: bool = False,
+    ) -> None:
         """Merge-write dataframe into an existing file or create it.
 
-        By default (``overwrite=False``) existing rows are never deleted.
-        New rows are appended and overlapping timestamps are resolved by keeping
-        the newer value (``keep="last"`` after concatenating ``[existing, new]``).
-        This mirrors the ``_merge_feather`` logic in ``collect_daily_snapshot.py``
-        and prevents ``export-freqtrade`` from truncating history built by the
-        daily snapshot pipeline.
+        Behaviour matrix:
 
-        Pass ``overwrite=True`` to skip the merge and replace the file entirely.
+        +---------------------+----------------+----------------------------------+
+        | Flags               | Existing file? | Effect                           |
+        +=====================+================+==================================+
+        | default             | yes            | merge, history guard ON          |
+        +---------------------+----------------+----------------------------------+
+        | overwrite=True      | yes            | merge, history guard ON          |
+        +---------------------+----------------+----------------------------------+
+        | unsafe_overwrite    | yes            | replace entirely, NO guard       |
+        +---------------------+----------------+----------------------------------+
+        | any                 | no             | write new file                   |
+        +---------------------+----------------+----------------------------------+
 
-        Read errors propagate immediately — there is no fallback to writing
-        incoming-only data.
+        ``overwrite`` is kept as a backward-compatible flag but now still
+        merges with the history guard.  Use ``unsafe_overwrite=True`` only
+        for schema migrations where you intentionally discard old rows.
+        This change was made after the 2026-05-11 incident, where
+        ``--overwrite`` (set for a funding schema migration) silently
+        truncated multi-year OHLCV feathers to a 6-month window.
 
         :param df: New Polars dataframe to merge in.
         :param path: Output file path (created if missing).
         :param fmt: ``'feather'`` or ``'parquet'``.
-        :param overwrite: If ``True``, replace the existing file instead of merging.
-        :raises: Any exception raised by ``pl.read_ipc`` / ``pl.read_parquet``
-            propagates unchanged.
+        :param overwrite: Reserved for CLI compatibility; still merges with
+            the history guard.
+        :param unsafe_overwrite: If ``True``, bypass the history guard and
+            replace the file entirely.  For schema migrations only.
+        :raises ValueError: If a merge would shrink existing history and
+            ``unsafe_overwrite`` is not set.
         """
-        if not overwrite and path.exists():
-            file_size = path.stat().st_size
-            existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
-            existing_stats = _coverage_stats(existing, ts_col="date")
-            incoming_stats = _coverage_stats(df, ts_col="date")
-            merged = (
-                pl.concat([existing, df])
-                .unique(subset=["date"], keep="last", maintain_order=False)
-                .sort("date")
-            )
-            merged_stats = _coverage_stats(merged, ts_col="date")
-            _assert_history_preserved(
-                existing_stats, incoming_stats, merged_stats, ts_label="date", location=str(path)
-            )
-            logger.debug(
-                "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
-                path,
-                existing_stats["rows"],
-                file_size / 1024,
-                incoming_stats["rows"],
-                merged_stats["rows"],
-            )
-            df = merged
+        if unsafe_overwrite or not path.exists():
+            if fmt == "feather":
+                df.write_ipc(path)
+            else:
+                df.write_parquet(str(path))
+            return
+
+        # Both default and overwrite=True paths run the merge + history guard.
+        file_size = path.stat().st_size
+        existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
+        existing_stats = _coverage_stats(existing, ts_col="date")
+        incoming_stats = _coverage_stats(df, ts_col="date")
+        merged = (
+            pl.concat([existing, df])
+            .unique(subset=["date"], keep="last", maintain_order=False)
+            .sort("date")
+        )
+        merged_stats = _coverage_stats(merged, ts_col="date")
+        _assert_history_preserved(
+            existing_stats, incoming_stats, merged_stats, ts_label="date", location=str(path)
+        )
+        logger.debug(
+            "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
+            path,
+            existing_stats["rows"],
+            file_size / 1024,
+            incoming_stats["rows"],
+            merged_stats["rows"],
+        )
 
         if fmt == "feather":
-            df.write_ipc(path)
+            merged.write_ipc(path)
         else:
-            df.write_parquet(str(path))
+            merged.write_parquet(str(path))
 
     # ------------------------------------------------------------------
     # Filename generation
