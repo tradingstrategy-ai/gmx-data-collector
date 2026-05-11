@@ -15,20 +15,43 @@ endif
 # Network configuration
 NETWORK ?= arbitrum
 
-# Directory paths
-# DAT_DIR: shorthand override that sets both source (DATA_DIR) and export
-# (FEATHER_DIR) to the same path. Explicit DATA_DIR / FEATHER_DIR on the CLI
-# still take precedence.
+# Directory paths — Freqtrade convention.
+#
+# Freqtrade's default datadir is ``user_data/data/`` and per-exchange futures
+# OHLCV lives at ``user_data/data/{exchange}/futures/``.  Our exporter writes
+# to ``FEATHER_DIR/gmx/futures/``, so FEATHER_DIR=./user_data/data lands the
+# feathers exactly where Freqtrade expects them.
+#
+# DATA_DIR is the GMX source parquet root: candles live under
+# ``DATA_DIR/candles/arbitrum/{SYM}/``, funding under
+# ``DATA_DIR/funding/arbitrum/rates/{SYM}/``.
+#
+# Single override knob: ``DATA=<gmx-root>``
+#
+#     make refresh-data DATA="/Volumes/WD Blue 1tb/VMs/data/gmx"
+#
+# DATA sets DATA_DIR to itself and FEATHER_DIR to the parent of DATA — the
+# exporter then writes to $(DATA)/futures/ which is the standard Freqtrade
+# layout.  Explicit DATA_DIR= / FEATHER_DIR= on the CLI still take
+# precedence over DATA (they're set first, then DATA only fills unset slots).
+#
+# DAT_DIR is kept as a backward-compat alias for DATA.
+DATA ?=
 DAT_DIR ?=
-ifneq ($(strip $(DAT_DIR)),)
-DATA_DIR ?= $(DAT_DIR)
-FEATHER_DIR ?= $(DAT_DIR)
+ifeq ($(strip $(DATA)),)
+DATA := $(DAT_DIR)
 endif
-DATA_DIR ?= /Volumes/WD Blue 1tb/VMs/data/gmx
+ifneq ($(strip $(DATA)),)
+DATA_DIR ?= $(DATA)
+# Use shell dirname so paths with spaces (e.g. ``/Volumes/WD Blue 1tb/...``)
+# are handled correctly; Make's ``$(dir ...)`` whitespace-tokenises its input.
+FEATHER_DIR ?= $(shell dirname '$(DATA)')
+endif
+DATA_DIR ?= ./user_data/data/gmx
 UNIFIED_OUTPUT_DIR ?= $(DATA_DIR)/funding
 OI_OUTPUT_DIR ?= $(DATA_DIR)/open_interest
 POOL_LIQUIDITY_OUTPUT_DIR ?= $(DATA_DIR)/pool_liquidity
-FEATHER_DIR ?= /Volumes/WD Blue 1tb/VMs/data
+FEATHER_DIR ?= ./user_data/data
 LOG_DIR ?= ./logs
 CHECKPOINT_DIR ?= ./checkpoints
 
@@ -456,6 +479,7 @@ monitor:
 
 show-config:
 	@echo "Current Configuration:"
+	@echo "  DATA (override)           = $(DATA)"
 	@echo "  DATA_DIR                  = $(DATA_DIR)"
 	@echo "  NETWORK                   = $(NETWORK)"
 	@echo "  UNIFIED_OUTPUT_DIR        = $(UNIFIED_OUTPUT_DIR)"

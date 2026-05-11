@@ -2237,14 +2237,14 @@ def debug_oracle_command(
 
 def export_freqtrade_command(
     data_dir: Path = typer.Option(
-        Path("./data"),
+        Path("./user_data/data/gmx"),
         "--data-dir",
-        help="Source GMX data directory",
+        help="Source GMX data directory (Freqtrade convention)",
     ),
     output_dir: Path = typer.Option(
-        Path("./freqtrade_data"),
+        Path("./user_data/data"),
         "--output-dir",
-        help="Output directory for Freqtrade files",
+        help="Output directory for Freqtrade files (writes gmx/futures/*.feather)",
     ),
     symbol: list[str] | None = typer.Option(
         None,
@@ -2488,9 +2488,15 @@ For more details on each command, use --help:
 """
 
 def export_candles_command(
-    data_dir: Path = typer.Option(Path("./data"), "--data-dir", help="Source GMX data directory"),
+    data_dir: Path = typer.Option(
+        Path("./user_data/data/gmx"),
+        "--data-dir",
+        help="Source GMX data directory (Freqtrade convention)",
+    ),
     output_dir: Path = typer.Option(
-        Path("./freqtrade_data"), "--output-dir", help="Output directory for Freqtrade files"
+        Path("./user_data/data"),
+        "--output-dir",
+        help="Output directory for Freqtrade files (writes gmx/futures/*.feather)",
     ),
     symbol: list[str] | None = typer.Option(
         None, "--symbol", help="Specific symbols to export (can be repeated)"
@@ -2577,9 +2583,15 @@ def export_candles_command(
 
 
 def export_funding_command(
-    data_dir: Path = typer.Option(Path("./data"), "--data-dir", help="Source GMX data directory"),
+    data_dir: Path = typer.Option(
+        Path("./user_data/data/gmx"),
+        "--data-dir",
+        help="Source GMX data directory (Freqtrade convention)",
+    ),
     output_dir: Path = typer.Option(
-        Path("./freqtrade_data"), "--output-dir", help="Output directory for Freqtrade files"
+        Path("./user_data/data"),
+        "--output-dir",
+        help="Output directory for Freqtrade files (writes gmx/futures/*.feather)",
     ),
     symbol: list[str] | None = typer.Option(
         None, "--symbol", help="Specific symbols to export (can be repeated)"
