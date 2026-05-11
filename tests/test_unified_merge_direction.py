@@ -32,7 +32,9 @@ _unified = _load_module()
 apply_direction_to_rates = _unified.apply_direction_to_rates
 
 
-def _rates_df(timestamps, rate: float = 1e-9, symbol: str = "ETH", market: str = "0xm") -> pl.DataFrame:
+def _rates_df(
+    timestamps, rate: float = 1e-9, symbol: str = "ETH", market: str = "0xm"
+) -> pl.DataFrame:
     return pl.DataFrame(
         {
             "timestamp": timestamps,

@@ -2487,6 +2487,7 @@ For more details on each command, use --help:
   gmx_historical_data debug-oracle --help
 """
 
+
 def export_candles_command(
     data_dir: Path = typer.Option(
         Path("./user_data/data/gmx"),
@@ -2528,8 +2529,7 @@ def export_candles_command(
         False,
         "--delete-source",
         help=(
-            "Delete the source candle parquet after writing the feather. "
-            "Default keeps the source."
+            "Delete the source candle parquet after writing the feather. Default keeps the source."
         ),
     ),
 ) -> None:
@@ -2659,8 +2659,7 @@ def export_funding_command(
 
     total = sum(r["funding_files"] for r in results.values())
     console.print(
-        f"\n[green]✓[/green] {total} funding feathers written "
-        f"to [cyan]{output_dir / 'gmx'}[/cyan]"
+        f"\n[green]✓[/green] {total} funding feathers written to [cyan]{output_dir / 'gmx'}[/cyan]"
     )
 
 

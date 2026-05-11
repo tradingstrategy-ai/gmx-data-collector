@@ -179,7 +179,9 @@ def test_export_funding_does_not_delete_funding_parquet(data_dir_with_funding, t
     """Funding parquet is owned by the unified-funding pipeline, never deleted."""
     feather_dir = tmp_path / "feathers"
     exporter = FreqtradeExporter(data_dir_with_funding, feather_dir)
-    funding_parquet = data_dir_with_funding / "funding" / "arbitrum" / "rates" / "BTC" / "1h.parquet"
+    funding_parquet = (
+        data_dir_with_funding / "funding" / "arbitrum" / "rates" / "BTC" / "1h.parquet"
+    )
     assert funding_parquet.exists()
 
     exporter.export_funding(symbols=["BTC"], timeframes=["1h"])

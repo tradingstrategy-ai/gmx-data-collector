@@ -83,16 +83,16 @@ class FreqtradeExporter:
 
         candle_symbols = set(self.storage.list_symbols())
         export_symbols = (
-            sorted(s for s in symbols if s in candle_symbols)
-            if symbols
-            else sorted(candle_symbols)
+            sorted(s for s in symbols if s in candle_symbols) if symbols else sorted(candle_symbols)
         )
 
         results: dict[str, dict] = {}
         for symbol in export_symbols:
             ohlcv_files = mark_files = index_files = total_candles = 0
             candle_tfs = set(self.storage.list_timeframes(symbol))
-            export_tfs = [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
+            export_tfs = (
+                [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
+            )
 
             for tf in export_tfs:
                 raw = self.storage.read_candles(tf, symbol)
@@ -193,7 +193,9 @@ class FreqtradeExporter:
             funding_files = 0
             funding_tfs = set(self.list_funding_timeframes(symbol))
             export_tfs = (
-                [tf for tf in timeframes if tf in funding_tfs] if timeframes else sorted(funding_tfs)
+                [tf for tf in timeframes if tf in funding_tfs]
+                if timeframes
+                else sorted(funding_tfs)
             )
 
             for tf in export_tfs:
@@ -287,7 +289,11 @@ class FreqtradeExporter:
 
     def _make_gmx_dir(self, trading_mode: str) -> Path:
         """Resolve and create the per-trading-mode output directory."""
-        gmx_dir = self.output_dir / "gmx" / "futures" if trading_mode == "futures" else self.output_dir / "gmx"
+        gmx_dir = (
+            self.output_dir / "gmx" / "futures"
+            if trading_mode == "futures"
+            else self.output_dir / "gmx"
+        )
         gmx_dir.mkdir(parents=True, exist_ok=True)
         return gmx_dir
 
