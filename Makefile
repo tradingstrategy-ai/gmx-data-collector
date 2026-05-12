@@ -97,7 +97,7 @@ SKIP_DOWNLOAD    ?=
 
 .PHONY: help install show-config monitor \
         refresh-data full-data full-data-nn \
-        collect-update collect-update-nn collect-full collect-full-nn \
+        collect-update collect-update-nn collect-candles collect-candles-nn \
         export-freqtrade export-candles export-funding \
         funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
@@ -121,8 +121,8 @@ help:
 	@echo "Individual targets:"
 	@echo "  collect-update       Candles: incremental (GMX API + Chainlink + oracle)"
 	@echo "  collect-update-nn    Candles: incremental, no nice, concurrency 10 (nn = no-nice)"
-	@echo "  collect-full         Candles: full historical from genesis, nice+10 (enable quickstart with QUICKSTART=--quickstart)"
-	@echo "  collect-full-nn      Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
+	@echo "  collect-candles      Candles: full historical from genesis, nice+10 (enable quickstart with QUICKSTART=--quickstart)"
+	@echo "  collect-candles-nn   Candles: full historical, no nice, concurrency 10 (nn = no-nice)"
 	@echo "  funding-unified      Funding: all phases (HyperSync, fast)"
 	@echo "  funding-unified-nn   Funding: all phases, no nice (nn = no-nice, max throughput)"
 	@echo "  funding-unified-resume  Funding: incremental (resume from checkpoints)"
@@ -155,7 +155,7 @@ help:
 	@echo "Examples:"
 	@echo "  make refresh-data                           # Daily incremental update"
 	@echo "  make full-data                              # First-time full download"
-	@echo "  make collect-full SYMBOL=ETH                # Single symbol"
+	@echo "  make collect-candles SYMBOL=ETH             # Single symbol"
 	@echo "  make full-data CONCURRENCY=8                # Faster with more workers"
 	@echo "  make oi FROM_BLOCK=120000000                # OI from specific block"
 	@echo ""
@@ -173,13 +173,13 @@ refresh-data: collect-update funding-unified-resume extract-all-resume export-ca
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download — collects everything from genesis. Slow but complete.
-full-data: collect-full funding-unified extract-all export-candles export-funding
+full-data: collect-candles funding-unified extract-all export-candles export-funding
 	@echo ""
 	@echo "Full data download complete: candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download, no nice — maximum throughput (dedicated machine / overnight).
-full-data-nn: collect-full-nn funding-unified extract-all export-candles export-funding
+full-data-nn: collect-candles-nn funding-unified extract-all export-candles export-funding
 	@echo ""
 	@echo "Full data download complete (no-nice): candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
@@ -225,14 +225,14 @@ collect-update-nn:
 		$(ARGS)
 
 # --quickstart is OFF BY DEFAULT. Enable with QUICKSTART=--quickstart when
-# invoking: `make collect-full QUICKSTART=--quickstart`.
+# invoking: `make collect-candles QUICKSTART=--quickstart`.
 QUICKSTART ?=
-collect-full:
+collect-candles:
 	$(call COLLECT_CMD,full historical,full,$(QUICKSTART))
 
 # No-nice variant: no OS-level nice, no --nice auto-tune, concurrency 10.
 # Use this when you want maximum throughput (e.g. dedicated machine / overnight run).
-collect-full-nn:
+collect-candles-nn:
 	@echo "Starting full historical candle collection (no-nice, concurrency 10)..."
 	@echo "  Output:      $(DATA_DIR)"
 	@echo "  Concurrency: 10"
@@ -528,10 +528,10 @@ refresh-data-cex: collect-update funding-unified-resume extract-all-resume fill-
 	@echo ""
 	@echo "Incremental refresh (with CEX gap-fill) complete"
 
-full-data-cex: collect-full funding-unified extract-all fill-gaps-cex export-candles export-funding
+full-data-cex: collect-candles funding-unified extract-all fill-gaps-cex export-candles export-funding
 	@echo ""
 	@echo "Full data download (with CEX gap-fill) complete"
 
-full-data-nn-cex: collect-full-nn funding-unified extract-all fill-gaps-cex export-candles export-funding
+full-data-nn-cex: collect-candles-nn funding-unified extract-all fill-gaps-cex export-candles export-funding
 	@echo ""
 	@echo "Full data download no-nice (with CEX gap-fill) complete"
