@@ -700,15 +700,13 @@ def aggregate_hourly_rates(
     # dt = hour_end - event_ts. TWAP = sum(rate * dt) / sum(dt).
     df = df.sort(["symbol", "market", "timestamp"])
     df = df.with_columns(
-        pl.col("timestamp")
-        .shift(-1)
-        .over(["symbol", "market"])
-        .alias("_next_ts"),
+        pl.col("timestamp").shift(-1).over(["symbol", "market"]).alias("_next_ts"),
         (pl.col("hour") + pl.duration(hours=1)).alias("_hour_end"),
     )
     df = df.with_columns(
-        pl.min_horizontal(pl.col("_next_ts").fill_null(pl.col("_hour_end")), pl.col("_hour_end"))
-        .alias("_window_end"),
+        pl.min_horizontal(
+            pl.col("_next_ts").fill_null(pl.col("_hour_end")), pl.col("_hour_end")
+        ).alias("_window_end"),
     )
     df = df.with_columns(
         (pl.col("_window_end") - pl.col("timestamp")).dt.total_seconds().alias("dt_seconds"),
@@ -749,19 +747,23 @@ def aggregate_hourly_rates(
     # Split by symbol; emit columns in stable order.
     result = {}
     for symbol in hourly["symbol"].unique().sort().to_list():
-        sym_df = hourly.filter(pl.col("symbol") == symbol).select(
-            [
-                "timestamp",
-                "funding_rate",
-                "funding_rate_min",
-                "funding_rate_max",
-                "funding_rate_hourly",
-                "funding_rate_annualized",
-                "update_count",
-                "symbol",
-                "market",
-            ]
-        ).cast({"update_count": pl.UInt32})
+        sym_df = (
+            hourly.filter(pl.col("symbol") == symbol)
+            .select(
+                [
+                    "timestamp",
+                    "funding_rate",
+                    "funding_rate_min",
+                    "funding_rate_max",
+                    "funding_rate_hourly",
+                    "funding_rate_annualized",
+                    "update_count",
+                    "symbol",
+                    "market",
+                ]
+            )
+            .cast({"update_count": pl.UInt32})
+        )
         result[symbol] = sym_df
 
     return result
@@ -869,7 +871,6 @@ def print_summary(records: list[FundingFactorRecord]) -> None:
     table.add_column("Avg Rate/s", justify="right")
     table.add_column("Avg Hourly", justify="right")
     table.add_column("Avg Annual", justify="right")
-    table.add_column("Direction", justify="center")
 
     by_symbol: dict[str, list[FundingFactorRecord]] = defaultdict(list)
     for r in records:
@@ -880,16 +881,12 @@ def print_summary(records: list[FundingFactorRecord]) -> None:
         avg_rate = sum(r.funding_rate_per_second for r in sym_records) / len(sym_records)
         avg_hourly = avg_rate * 3600
         avg_annual = avg_rate * 3600 * 8760
-        longs_pay_count = sum(1 for r in sym_records if r.longs_pay_shorts)
-        direction = "Longs pay" if longs_pay_count > len(sym_records) / 2 else "Shorts pay"
-
         table.add_row(
             symbol,
             f"{len(sym_records):,}",
             f"{avg_rate:.2e}",
             f"{avg_hourly:.6f}",
             f"{avg_annual:.2%}",
-            direction,
         )
 
     console.print()
