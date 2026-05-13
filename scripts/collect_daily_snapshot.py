@@ -586,13 +586,135 @@ def generate_report(
         if volume_data
         else "- Total 24h Volume: N/A",
         "",
+        "## Date Range Summary",
+    ]
+
+    # Add date range information for each data type
+    if snapshot_files:
+        snapshot_dates = []
+        for f in snapshot_files:
+            try:
+                df = pd.read_parquet(f, columns=["date"])
+                if not df.empty:
+                    # Convert to datetime if needed
+                    dates = df["date"]
+                    if not pd.api.types.is_datetime64_any_dtype(dates):
+                        dates = pd.to_datetime(dates)
+                    snapshot_dates.extend(dates.tolist())
+            except Exception:
+                pass
+        if snapshot_dates:
+            min_date = min(snapshot_dates).strftime("%Y-%m-%d")
+            max_date = max(snapshot_dates).strftime("%Y-%m-%d")
+            lines.append(f"- Markets snapshots: {min_date} to {max_date} ({len(snapshot_files)} days)")
+        else:
+            lines.append("- Markets snapshots: No valid date data found")
+    else:
+        lines.append("- Markets snapshots: No data available")
+
+    # OHLCV date ranges (per timeframe)
+    for tf in TIMEFRAMES:
+        tf_files = list(futures_dir.glob(f"*-{tf}-futures.feather"))
+        if tf_files:
+            tf_dates = []
+            for f in tf_files:
+                try:
+                    df = pd.read_feather(f, columns=["date"])
+                    if not df.empty:
+                        # Convert to datetime if needed
+                        dates = df["date"]
+                        if not pd.api.types.is_datetime64_any_dtype(dates):
+                            dates = pd.to_datetime(dates)
+                        tf_dates.extend(dates.tolist())
+                except Exception:
+                    pass
+            if tf_dates:
+                min_date = min(tf_dates).strftime("%Y-%m-%d")
+                max_date = max(tf_dates).strftime("%Y-%m-%d")
+                lines.append(f"- OHLCV {tf}: {min_date} to {max_date} ({len(tf_files)} symbols)")
+            else:
+                lines.append(f"- OHLCV {tf}: No valid date data found")
+        else:
+            lines.append(f"- OHLCV {tf}: No data available")
+
+    # Ticker date ranges
+    if ticker_files:
+        ticker_dates = []
+        for f in ticker_files:
+            try:
+                df = pd.read_parquet(f, columns=["date"])
+                if not df.empty:
+                    # Convert to datetime if needed
+                    dates = df["date"]
+                    if not pd.api.types.is_datetime64_any_dtype(dates):
+                        dates = pd.to_datetime(dates)
+                    ticker_dates.extend(dates.tolist())
+            except Exception:
+                pass
+        if ticker_dates:
+            min_date = min(ticker_dates).strftime("%Y-%m-%d")
+            max_date = max(ticker_dates).strftime("%Y-%m-%d")
+            lines.append(f"- Tickers: {min_date} to {max_date} ({len(ticker_files)} days)")
+        else:
+            lines.append("- Tickers: No valid date data found")
+    else:
+        lines.append("- Tickers: No data available")
+
+    # APY date ranges
+    if apy_files:
+        apy_dates = []
+        for f in apy_files:
+            try:
+                df = pd.read_parquet(f, columns=["date"])
+                if not df.empty:
+                    # Convert to datetime if needed
+                    dates = df["date"]
+                    if not pd.api.types.is_datetime64_any_dtype(dates):
+                        dates = pd.to_datetime(dates)
+                    apy_dates.extend(dates.tolist())
+            except Exception:
+                pass
+        if apy_dates:
+            min_date = min(apy_dates).strftime("%Y-%m-%d")
+            max_date = max(apy_dates).strftime("%Y-%m-%d")
+            lines.append(f"- APY: {min_date} to {max_date} ({len(apy_files)} days)")
+        else:
+            lines.append("- APY: No valid date data found")
+    else:
+        lines.append("- APY: No data available")
+
+    # Volume date ranges
+    if volume_files:
+        volume_dates = []
+        for f in volume_files:
+            try:
+                df = pd.read_parquet(f, columns=["date"])
+                if not df.empty:
+                    # Convert to datetime if needed
+                    dates = df["date"]
+                    if not pd.api.types.is_datetime64_any_dtype(dates):
+                        dates = pd.to_datetime(dates)
+                    volume_dates.extend(dates.tolist())
+            except Exception:
+                pass
+        if volume_dates:
+            min_date = min(volume_dates).strftime("%Y-%m-%d")
+            max_date = max(volume_dates).strftime("%Y-%m-%d")
+            lines.append(f"- Volumes: {min_date} to {max_date} ({len(volume_files)} days)")
+        else:
+            lines.append("- Volumes: No valid date data found")
+    else:
+        lines.append("- Volumes: No data available")
+
+    lines.extend([
+        "",
         "## Data Files",
         f"- Snapshot parquet files: {len(snapshot_files)} days",
         f"- Ticker parquet files: {len(ticker_files)} days",
         f"- APY parquet files: {len(apy_files)} days",
         f"- Volume parquet files: {len(volume_files)} days",
         "- OHLCV feather files by timeframe:",
-    ]
+    ])
     for tf in TIMEFRAMES:
         lines.append(f"    {tf}: {tf_counts[tf]} symbols")
 
