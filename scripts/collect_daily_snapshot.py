@@ -409,12 +409,49 @@ def collect_markets_snapshot(
     return df
 
 
+def _date_stats(dates: pd.Series) -> dict | None:
+    """Compute ``{rows, min_date, max_date}`` from a Series of timestamps.
+
+    :param dates: Series of timestamp-like values (naive or tz-aware).
+    :returns: Dict with ``rows`` (int), ``min_date`` / ``max_date``
+        (``pd.Timestamp`` UTC), or ``None`` if input is empty.
+    """
+    if dates is None or len(dates) == 0:
+        return None
+    if not pd.api.types.is_datetime64_any_dtype(dates):
+        dates = pd.to_datetime(dates, utc=True)
+    elif dates.dt.tz is None:
+        dates = dates.dt.tz_localize("UTC")
+    return {
+        "rows": int(len(dates)),
+        "min_date": dates.min(),
+        "max_date": dates.max(),
+    }
+
+
+def _feather_date_stats(filepath: Path) -> dict | None:
+    """Read ``date`` column from a feather file and summarise it.
+
+    :param filepath: Feather file to inspect.
+    :returns: ``_date_stats`` dict or ``None`` if file missing/empty/unreadable.
+    """
+    if not filepath.exists():
+        return None
+    try:
+        df = pd.read_feather(filepath, columns=["date"])
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    return _date_stats(df["date"])
+
+
 def collect_and_save_ohlcv(
     api: GMXAPI,
     markets: list[dict],
     futures_dir: Path,
     timeframes: list[str] | None = None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
 
     For each unique listed perpetual symbol, fetches candles across all
@@ -429,7 +466,11 @@ def collect_and_save_ohlcv(
     :param markets: Raw market dicts from ``get_markets_info()``.
     :param futures_dir: Directory for CCXT feather files.
     :param timeframes: List of timeframes to collect (default: all from TIMEFRAMES).
-    :returns: Tuple of (total files saved, list of failed symbol/timeframe pairs).
+    :returns: Tuple of ``(total files saved, failed symbol/timeframe pairs,
+        coverage_map)``. ``coverage_map`` is keyed by ``(symbol, tf)`` and
+        each value is a dict with ``pre_merge``, ``api_slice``, ``post_merge``
+        sub-dicts (each ``None`` or ``{rows, min_date, max_date}``) plus a
+        ``status`` string from ``{"OK", "NEW", "REGRESSION", "FLAT", "FAILED"}``.
     """
     tfs = timeframes or TIMEFRAMES
     symbols = _extract_symbols(markets)
@@ -438,6 +479,7 @@ def collect_and_save_ohlcv(
     futures_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
     failed = []
+    coverage: dict[tuple[str, str], dict] = {}
 
     # Recent-fetch limits per timeframe (how many candles to fetch on incremental runs)
     # 1m: ~24h = 1440, 5m: ~2d = 576, 15m: ~3d = 288, 1h: ~5d = 120, 4h: ~10d = 60, 1d: 5
@@ -452,15 +494,22 @@ def collect_and_save_ohlcv(
 
     for symbol in symbols:
         for tf in tfs:
+            filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
+            pre_stats = _feather_date_stats(filepath)
+            entry: dict = {
+                "pre_merge": pre_stats,
+                "api_slice": None,
+                "post_merge": None,
+                "status": "FAILED",
+            }
+            coverage[(symbol, tf)] = entry
+
             try:
-                filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
-
-                if filepath.exists():
-                    limit = incremental_limits.get(tf, 100)
-                else:
-                    limit = 10000  # Max available history from API
-
+                limit = incremental_limits.get(tf, 100) if filepath.exists() else 10000
                 df = _fetch_candles_with_retry(api, symbol, tf, limit)
+
+                api_stats = _date_stats(df["timestamp"])
+                entry["api_slice"] = api_stats
 
                 new_rows = pd.DataFrame(
                     {
@@ -474,6 +523,24 @@ def collect_and_save_ohlcv(
                 )
 
                 _merge_feather(new_rows, filepath)
+                post_stats = _feather_date_stats(filepath)
+                entry["post_merge"] = post_stats
+
+                if pre_stats is None:
+                    entry["status"] = "NEW"
+                elif post_stats is not None and post_stats["min_date"] > pre_stats["min_date"]:
+                    # Historical earliest moved forward — should never happen.
+                    entry["status"] = "REGRESSION"
+                elif (
+                    post_stats is not None
+                    and api_stats is not None
+                    and post_stats["min_date"] >= api_stats["min_date"]
+                ):
+                    # No historical depth beyond what API already returned.
+                    entry["status"] = "FLAT"
+                else:
+                    entry["status"] = "OK"
+
                 saved += 1
 
             except Exception as e:
@@ -491,7 +558,42 @@ def collect_and_save_ohlcv(
             else ""
         )
     )
-    return saved, failed
+    return saved, failed, coverage
+
+
+def _summarise_daily_files(dir_path: Path) -> dict:
+    """Inspect a directory of ``YYYY-MM-DD.parquet`` daily files.
+
+    :param dir_path: Directory holding daily-stamped parquet files.
+    :returns: Dict with ``count`` (int), ``first`` / ``last`` (ISO date strings
+        or ``None``) and ``missing`` (sorted list of ISO date strings missing
+        between first and last). ``count`` is 0 when the directory is empty
+        or missing.
+    """
+    if not dir_path.exists():
+        return {"count": 0, "first": None, "last": None, "missing": []}
+
+    dates: list[datetime] = []
+    for f in dir_path.glob("*.parquet"):
+        try:
+            dates.append(datetime.strptime(f.stem, "%Y-%m-%d"))
+        except ValueError:
+            continue
+
+    if not dates:
+        return {"count": 0, "first": None, "last": None, "missing": []}
+
+    dates.sort()
+    first, last = dates[0], dates[-1]
+    expected = pd.date_range(first, last, freq="D").to_pydatetime().tolist()
+    present = {d.date() for d in dates}
+    missing = [d.date().isoformat() for d in expected if d.date() not in present]
+    return {
+        "count": len(dates),
+        "first": first.date().isoformat(),
+        "last": last.date().isoformat(),
+        "missing": missing,
+    }
 
 
 def generate_report(
@@ -509,6 +611,7 @@ def generate_report(
     apy_dir: Path,
     volumes_dir: Path,
     report_path: Path,
+    ohlcv_coverage: dict[tuple[str, str], dict] | None = None,
 ) -> None:
     """Write a human-readable data report after each collection run.
 
@@ -526,6 +629,11 @@ def generate_report(
     :param apy_dir: Path to APY directory.
     :param volumes_dir: Path to volumes directory.
     :param report_path: Output path for the report file.
+    :param ohlcv_coverage: Per-``(symbol, tf)`` coverage map from
+        :func:`collect_and_save_ohlcv`. When provided, the report includes a
+        per-symbol API-vs-Combined date range table and a leading
+        ``Suspected Seed Regressions`` block listing entries where historical
+        depth is suspicious.
     """
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -589,122 +697,69 @@ def generate_report(
         "## Date Range Summary",
     ]
 
-    # Add date range information for each data type
-    if snapshot_files:
-        snapshot_dates = []
-        for f in snapshot_files:
-            try:
-                df = pd.read_parquet(f, columns=["date"])
-                if not df.empty:
-                    # Convert to datetime if needed
-                    dates = df["date"]
-                    if not pd.api.types.is_datetime64_any_dtype(dates):
-                        dates = pd.to_datetime(dates)
-                    snapshot_dates.extend(dates.tolist())
-            except Exception:
-                pass
-        if snapshot_dates:
-            min_date = min(snapshot_dates).strftime("%Y-%m-%d")
-            max_date = max(snapshot_dates).strftime("%Y-%m-%d")
-            lines.append(f"- Markets snapshots: {min_date} to {max_date} ({len(snapshot_files)} days)")
-        else:
-            lines.append("- Markets snapshots: No valid date data found")
-    else:
-        lines.append("- Markets snapshots: No data available")
+    # Daily-stamped data types — inspected by filename (no parquet reads).
+    daily_sources = (
+        ("Markets snapshots", snapshots_dir),
+        ("Tickers", tickers_dir),
+        ("APY", apy_dir),
+        ("Volumes", volumes_dir),
+    )
+    daily_summaries = {label: _summarise_daily_files(d) for label, d in daily_sources}
+    for label, info in daily_summaries.items():
+        if info["count"] == 0:
+            lines.append(f"- {label}: No data available")
+            continue
+        gap_note = f", {len(info['missing'])} missing day(s)" if info["missing"] else ""
+        lines.append(
+            f"- {label}: {info['first']} to {info['last']} ({info['count']} days{gap_note})"
+        )
 
-    # OHLCV date ranges (per timeframe)
+    # OHLCV per-timeframe aggregate range — prefer the in-memory coverage map
+    # over re-reading every feather, but fall back to feather reads when the
+    # report is regenerated standalone (no coverage map passed in).
     for tf in TIMEFRAMES:
-        tf_files = list(futures_dir.glob(f"*-{tf}-futures.feather"))
-        if tf_files:
-            tf_dates = []
-            for f in tf_files:
-                try:
-                    df = pd.read_feather(f, columns=["date"])
-                    if not df.empty:
-                        # Convert to datetime if needed
-                        dates = df["date"]
-                        if not pd.api.types.is_datetime64_any_dtype(dates):
-                            dates = pd.to_datetime(dates)
-                        tf_dates.extend(dates.tolist())
-                except Exception:
-                    pass
-            if tf_dates:
-                min_date = min(tf_dates).strftime("%Y-%m-%d")
-                max_date = max(tf_dates).strftime("%Y-%m-%d")
-                lines.append(f"- OHLCV {tf}: {min_date} to {max_date} ({len(tf_files)} symbols)")
-            else:
-                lines.append(f"- OHLCV {tf}: No valid date data found")
+        agg_min: pd.Timestamp | None = None
+        agg_max: pd.Timestamp | None = None
+        sym_count = 0
+
+        if ohlcv_coverage:
+            for (_, ctf), entry in ohlcv_coverage.items():
+                if ctf != tf:
+                    continue
+                post = entry.get("post_merge")
+                if post is None:
+                    continue
+                sym_count += 1
+                agg_min = post["min_date"] if agg_min is None else min(agg_min, post["min_date"])
+                agg_max = post["max_date"] if agg_max is None else max(agg_max, post["max_date"])
         else:
+            for f in futures_dir.glob(f"*-{tf}-futures.feather"):
+                stats = _feather_date_stats(f)
+                if stats is None:
+                    continue
+                sym_count += 1
+                agg_min = stats["min_date"] if agg_min is None else min(agg_min, stats["min_date"])
+                agg_max = stats["max_date"] if agg_max is None else max(agg_max, stats["max_date"])
+
+        if sym_count == 0:
             lines.append(f"- OHLCV {tf}: No data available")
+            continue
+        lines.append(
+            f"- OHLCV {tf}: {agg_min.strftime('%Y-%m-%d')} to "
+            f"{agg_max.strftime('%Y-%m-%d')} ({sym_count} symbols)"
+        )
 
-    # Ticker date ranges
-    if ticker_files:
-        ticker_dates = []
-        for f in ticker_files:
-            try:
-                df = pd.read_parquet(f, columns=["date"])
-                if not df.empty:
-                    # Convert to datetime if needed
-                    dates = df["date"]
-                    if not pd.api.types.is_datetime64_any_dtype(dates):
-                        dates = pd.to_datetime(dates)
-                    ticker_dates.extend(dates.tolist())
-            except Exception:
-                pass
-        if ticker_dates:
-            min_date = min(ticker_dates).strftime("%Y-%m-%d")
-            max_date = max(ticker_dates).strftime("%Y-%m-%d")
-            lines.append(f"- Tickers: {min_date} to {max_date} ({len(ticker_files)} days)")
-        else:
-            lines.append("- Tickers: No valid date data found")
-    else:
-        lines.append("- Tickers: No data available")
-
-    # APY date ranges
-    if apy_files:
-        apy_dates = []
-        for f in apy_files:
-            try:
-                df = pd.read_parquet(f, columns=["date"])
-                if not df.empty:
-                    # Convert to datetime if needed
-                    dates = df["date"]
-                    if not pd.api.types.is_datetime64_any_dtype(dates):
-                        dates = pd.to_datetime(dates)
-                    apy_dates.extend(dates.tolist())
-            except Exception:
-                pass
-        if apy_dates:
-            min_date = min(apy_dates).strftime("%Y-%m-%d")
-            max_date = max(apy_dates).strftime("%Y-%m-%d")
-            lines.append(f"- APY: {min_date} to {max_date} ({len(apy_files)} days)")
-        else:
-            lines.append("- APY: No valid date data found")
-    else:
-        lines.append("- APY: No data available")
-
-    # Volume date ranges
-    if volume_files:
-        volume_dates = []
-        for f in volume_files:
-            try:
-                df = pd.read_parquet(f, columns=["date"])
-                if not df.empty:
-                    # Convert to datetime if needed
-                    dates = df["date"]
-                    if not pd.api.types.is_datetime64_any_dtype(dates):
-                        dates = pd.to_datetime(dates)
-                    volume_dates.extend(dates.tolist())
-            except Exception:
-                pass
-        if volume_dates:
-            min_date = min(volume_dates).strftime("%Y-%m-%d")
-            max_date = max(volume_dates).strftime("%Y-%m-%d")
-            lines.append(f"- Volumes: {min_date} to {max_date} ({len(volume_files)} days)")
-        else:
-            lines.append("- Volumes: No valid date data found")
-    else:
-        lines.append("- Volumes: No data available")
+    # Missing-day detail for daily-stamped sources (only when gaps exist).
+    gap_lines = []
+    for label, info in daily_summaries.items():
+        if info["missing"]:
+            preview = ", ".join(info["missing"][:10])
+            tail = "" if len(info["missing"]) <= 10 else f" (+{len(info['missing']) - 10} more)"
+            gap_lines.append(f"- {label}: {preview}{tail}")
+    if gap_lines:
+        lines.append("")
+        lines.append("## Missing Days (daily-stamped sources)")
+        lines.extend(gap_lines)
 
     lines.extend([
         "",
@@ -717,6 +772,48 @@ def generate_report(
     ])
     for tf in TIMEFRAMES:
         lines.append(f"    {tf}: {tf_counts[tf]} symbols")
+
+    # ------------------------------------------------------------------
+    # Suspected seed regressions — surfaces the cases where the historical
+    # archive failed to extend coverage beyond what the GMX API serves on
+    # its own. Empty when every feather either grew or was newly seeded.
+    # ------------------------------------------------------------------
+    if ohlcv_coverage:
+        regressions = [
+            (sym, tf, entry)
+            for (sym, tf), entry in sorted(ohlcv_coverage.items())
+            if entry["status"] in ("REGRESSION", "FLAT")
+        ]
+        if regressions:
+            lines.append("")
+            lines.append("## Suspected Seed Regressions")
+            lines.append(
+                "  Entries where post-merge history matches the API window "
+                "(no historical depth) or moved forward (lost rows)."
+            )
+            for sym, tf, entry in regressions:
+                pre = entry["pre_merge"]
+                api = entry["api_slice"]
+                post = entry["post_merge"]
+                pre_str = (
+                    f"{pre['min_date'].strftime('%Y-%m-%d')} ({pre['rows']} rows)"
+                    if pre
+                    else "n/a"
+                )
+                api_str = (
+                    f"{api['min_date'].strftime('%Y-%m-%d')} ({api['rows']} rows)"
+                    if api
+                    else "n/a"
+                )
+                post_str = (
+                    f"{post['min_date'].strftime('%Y-%m-%d')} ({post['rows']} rows)"
+                    if post
+                    else "n/a"
+                )
+                lines.append(
+                    f"  [{entry['status']:11s}] {sym}/{tf}: "
+                    f"pre={pre_str}  api={api_str}  post={post_str}"
+                )
 
     lines.extend(
         [
@@ -755,16 +852,13 @@ def generate_report(
         if len(failed_symbols) > 20:
             lines.append(f"  ... and {len(failed_symbols) - 20} more")
 
-    # Per-symbol candle counts for ALL timeframes
-    tf_label = {
-        "1m": "minutes",
-        "5m": "5-min bars",
-        "15m": "15-min bars",
-        "1h": "hours",
-        "4h": "4-hour bars",
-        "1d": "days",
-    }
-    # Minutes per bar for each timeframe (used to convert row count → days)
+    # ------------------------------------------------------------------
+    # Per-symbol OHLCV coverage — for each timeframe, list every symbol
+    # with its API-slice range (what GMX served this run) alongside the
+    # combined range after merge. The "historical depth" column makes it
+    # obvious how much pre-API data the seed contributes.
+    # ------------------------------------------------------------------
+    # Minutes per bar — used to convert row counts into approximate days.
     tf_minutes = {
         "1m": 1,
         "5m": 5,
@@ -773,23 +867,62 @@ def generate_report(
         "4h": 240,
         "1d": 1440,
     }
+
+    def _fmt_range(s: dict | None) -> str:
+        if s is None:
+            return f"{'n/a':<24s} {'-':>7s}r"
+        return (
+            f"{s['min_date'].strftime('%Y-%m-%d')}→{s['max_date'].strftime('%Y-%m-%d')}"
+            f" {s['rows']:>7d}r"
+        )
+
     for tf in TIMEFRAMES:
         lines.append("")
-        lines.append(f"## OHLCV Coverage — {tf} (rows per symbol)")
-        tf_feather_files = sorted(futures_dir.glob(f"*-{tf}-futures.feather"))
-        for f in tf_feather_files:
-            try:
-                df = pd.read_feather(f)
+        lines.append(f"## OHLCV Coverage — {tf} (API slice vs Combined feather)")
+        lines.append(
+            f"  {'symbol':<10s}  {'status':<11s}  {'API slice':<32s}  "
+            f"{'Combined':<32s}  hist depth"
+        )
+
+        if ohlcv_coverage:
+            rows_for_tf = sorted(
+                ((sym, entry) for (sym, ctf), entry in ohlcv_coverage.items() if ctf == tf),
+                key=lambda kv: kv[0],
+            )
+            if not rows_for_tf:
+                lines.append("  (no symbols collected)")
+            else:
+                mpb = tf_minutes.get(tf, 1)
+                for sym, entry in rows_for_tf:
+                    api = entry["api_slice"]
+                    post = entry["post_merge"]
+                    pre = entry["pre_merge"]
+                    if post and api:
+                        depth_rows = post["rows"] - api["rows"]
+                        depth_days = round(depth_rows * mpb / 1440, 1)
+                        if pre and post["min_date"] < api["min_date"]:
+                            depth_str = f"+{depth_rows} rows (~{depth_days}d pre-API)"
+                        else:
+                            depth_str = "API-only window"
+                    elif post and not api:
+                        depth_str = "post-only (no API slice)"
+                    else:
+                        depth_str = "—"
+                    lines.append(
+                        f"  {sym:<10s}  {entry['status']:<11s}  "
+                        f"{_fmt_range(api):<32s}  {_fmt_range(post):<32s}  {depth_str}"
+                    )
+        else:
+            # Fallback: no coverage map — fall back to feather reads.
+            for f in sorted(futures_dir.glob(f"*-{tf}-futures.feather")):
+                stats = _feather_date_stats(f)
+                if stats is None:
+                    continue
                 sym = f.stem.replace(f"_USDC_USDC-{tf}-futures", "")
-                count = len(df)
-                label = tf_label.get(tf, "rows")
-                days = round(count * tf_minutes.get(tf, 1) / 1440, 1)
-                if tf == "1d":
-                    lines.append(f"  {sym}: {count} {label}")
-                else:
-                    lines.append(f"  {sym}: {count} {label} ({days} days)")
-            except Exception:
-                pass
+                lines.append(
+                    f"  {sym:<10s}  {'n/a':<11s}  {'(no API stats)':<32s}  "
+                    f"{_fmt_range(stats):<32s}  —"
+                )
 
     lines.append("")
 
@@ -939,7 +1072,9 @@ Examples:
 
     # --- Phase 2: OHLCV candles for ALL timeframes ---
     console.print("[bold]Phase 2: OHLCV candles (all timeframes)[/bold]")
-    candle_count, failed_symbols = collect_and_save_ohlcv(api, all_markets, futures_dir)
+    candle_count, failed_symbols, ohlcv_coverage = collect_and_save_ohlcv(
+        api, all_markets, futures_dir
+    )
     console.print()
 
     # Phase 3: Volume collection runs in a separate workflow (collect-volume.yml)
@@ -972,6 +1107,7 @@ Examples:
         apy_dir=apy_dir,
         volumes_dir=volumes_dir,
         report_path=report_path,
+        ohlcv_coverage=ohlcv_coverage,
     )
     _abort_on_failed_ohlcv_fetches(failed_symbols)
     console.print()
