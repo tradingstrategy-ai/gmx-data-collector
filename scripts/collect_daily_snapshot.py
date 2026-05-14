@@ -689,6 +689,7 @@ def generate_report(
     volumes_dir: Path,
     report_path: Path,
     ohlcv_coverage: dict[tuple[str, str], dict] | None = None,
+    skipped: dict[str, "SkipDecision"] | None = None,
 ) -> None:
     """Write a human-readable data report after each collection run.
 
@@ -711,6 +712,11 @@ def generate_report(
         per-symbol API-vs-Combined date range table and a leading
         ``Suspected Seed Regressions`` block listing entries where historical
         depth is suspicious.
+    :param skipped: Dict mapping data-type keys (``"markets"``, ``"tickers"``,
+        ``"apy"``, ``"volumes"``) to the :class:`~gmx_historical_data.coverage_gate.SkipDecision`
+        that caused the skip. When non-empty a ``## Skipped (already current)``
+        section is appended between ``## Collection Summary`` and
+        ``## Date Range Summary``.
     """
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -771,8 +777,47 @@ def generate_report(
         if volume_data
         else "- Total 24h Volume: N/A",
         "",
-        "## Date Range Summary",
     ]
+
+    # ------------------------------------------------------------------
+    # Skipped (already current) — emitted only when at least one fetch
+    # was bypassed by the coverage gate.
+    # ------------------------------------------------------------------
+    skip_lines: list[str] = []
+    if skipped:
+        labels = {
+            "markets": "Markets snapshots",
+            "tickers": "Tickers",
+            "apy": "APY",
+            "volumes": "Volumes",
+        }
+        for key in ("markets", "tickers", "apy", "volumes"):
+            d = skipped.get(key)
+            if d is None:
+                continue
+            skip_lines.append(
+                f"- {labels[key]}: existing {d.existing_rows} rows ≥ "
+                f"{d.expected_min_rows} required (reason: {d.reason})"
+            )
+    if ohlcv_coverage:
+        per_tf_skips: dict[str, int] = {}
+        per_tf_total: dict[str, int] = {}
+        for (sym, tf), entry in ohlcv_coverage.items():
+            per_tf_total[tf] = per_tf_total.get(tf, 0) + 1
+            if entry.get("status") == "SKIPPED":
+                per_tf_skips[tf] = per_tf_skips.get(tf, 0) + 1
+        for tf in TIMEFRAMES:
+            if per_tf_skips.get(tf):
+                skip_lines.append(
+                    f"- OHLCV {tf}: {per_tf_skips[tf]}/{per_tf_total.get(tf, 0)} "
+                    "symbols skipped (existing max ≥ expected last bar)"
+                )
+    if skip_lines:
+        lines.append("## Skipped (already current)")
+        lines.extend(skip_lines)
+        lines.append("")
+
+    lines.append("## Date Range Summary")
 
     # Daily-stamped data types — inspected by filename (no parquet reads).
     daily_sources = (
@@ -1237,6 +1282,7 @@ Examples:
         volumes_dir=volumes_dir,
         report_path=report_path,
         ohlcv_coverage=ohlcv_coverage,
+        skipped=skipped,
     )
     _abort_on_failed_ohlcv_fetches(failed_symbols)
     console.print()

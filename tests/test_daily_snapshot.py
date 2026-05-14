@@ -407,3 +407,81 @@ class TestOhlcvGateSkip:
         # Saved counts fetches, not skips:
         assert saved == 0
         assert failed == []
+
+
+class TestReportSkippedSection:
+    def test_section_present_when_skips_recorded(self, tmp_path):
+        from scripts.collect_daily_snapshot import generate_report
+        from gmx_historical_data.coverage_gate import SkipDecision
+
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+            }
+        )
+        out = tmp_path / "report.txt"
+        skipped = {
+            "markets": SkipDecision(True, "current", 135, 100),
+            "apy": SkipDecision(True, "current", 945, 700),
+        }
+        generate_report(
+            date_str="2026-05-14",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=out,
+            ohlcv_coverage=None,
+            skipped=skipped,
+        )
+        content = out.read_text()
+        assert "## Skipped (already current)" in content
+        assert "Markets snapshots: existing 135 rows ≥ 100" in content
+        assert "APY: existing 945 rows ≥ 700" in content
+
+    def test_section_absent_when_no_skips(self, tmp_path):
+        from scripts.collect_daily_snapshot import generate_report
+
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+            }
+        )
+        out = tmp_path / "report.txt"
+        generate_report(
+            date_str="2026-05-14",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=out,
+            ohlcv_coverage=None,
+            skipped=None,
+        )
+        assert "## Skipped (already current)" not in out.read_text()
