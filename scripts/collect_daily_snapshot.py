@@ -1187,7 +1187,19 @@ Examples:
 
     # --- Phase 4: Tickers (bid/ask prices) ---
     console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
-    ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
+    ticker_path = tickers_dir / f"{date_str}.parquet"
+    ticker_decision = is_current(
+        ticker_path, expected_min_rows=100, force=args.force_refresh
+    )
+    if ticker_decision.skip:
+        skipped["tickers"] = ticker_decision
+        ticker_count = _row_count(ticker_path)
+        console.print(
+            f"  [yellow]Skipped — existing {ticker_decision.existing_rows} rows ≥ "
+            f"{ticker_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
     console.print()
 
     # --- Phase 5: APY (all periods) ---
