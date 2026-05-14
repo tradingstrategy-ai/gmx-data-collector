@@ -1204,7 +1204,19 @@ Examples:
 
     # --- Phase 5: APY (all periods) ---
     console.print("[bold]Phase 5: APY (yield data)[/bold]")
-    apy_count = collect_and_save_apy(api, date_str, apy_dir)
+    apy_path = apy_dir / f"{date_str}.parquet"
+    apy_decision = is_current(
+        apy_path, expected_min_rows=7 * 100, force=args.force_refresh
+    )
+    if apy_decision.skip:
+        skipped["apy"] = apy_decision
+        apy_count = _row_count(apy_path)
+        console.print(
+            f"  [yellow]Skipped — existing {apy_decision.existing_rows} rows ≥ "
+            f"{apy_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        apy_count = collect_and_save_apy(api, date_str, apy_dir)
     console.print()
 
     # --- Phase 6: Generate report ---
