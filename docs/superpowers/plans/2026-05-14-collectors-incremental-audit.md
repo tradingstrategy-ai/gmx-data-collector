@@ -689,10 +689,14 @@ grep -n "Phase 1\|collect_markets_snapshot" scripts/collect_daily_snapshot.py
 
 - [ ] **Step 2: Add module-level import**
 
-At the top of `scripts/collect_daily_snapshot.py`, next to the existing `from gmx_historical_data.quickstart import ...` line:
+At the top of `scripts/collect_daily_snapshot.py`, next to the existing `from gmx_historical_data.quickstart import ...` line, add a single import covering everything used by Phases 1, 2, 4, 5:
 
 ```python
-from gmx_historical_data.coverage_gate import SkipDecision, is_current
+from gmx_historical_data.coverage_gate import (
+    SkipDecision,
+    has_ohlcv_through,
+    is_current,
+)
 ```
 
 - [ ] **Step 3: Refactor Phase 1 to gate the snapshot write**
@@ -779,10 +783,9 @@ Inside the per-`(symbol, tf)` loop, add the gate before the try/except that does
             pre_stats = _feather_date_stats(filepath)
 
             # Coverage gate — skip fetch entirely if on-disk feather already
-            # covers today's last expected bar.
+            # covers today's last expected bar. ``has_ohlcv_through`` is
+            # imported at the top of this module alongside ``is_current``.
             if target_date is not None:
-                from gmx_historical_data.coverage_gate import has_ohlcv_through
-
                 expected_last = _expected_last_bar(tf, target_date=target_date)
                 gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
                 if gate.skip:
