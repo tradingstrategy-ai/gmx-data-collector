@@ -303,3 +303,186 @@ class TestCollectTickers:
         assert "max_price" in df.columns
         assert "date" in df.columns
         assert list(df["token_symbol"]) == ["ETH", "BTC"]
+
+
+class TestExpectedLastBar:
+    """_expected_last_bar — derives latest fully-closed bar for a timeframe."""
+
+    def test_today_1h(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1h", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14 17:00", tz="UTC")
+
+    def test_today_15m(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("15m", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14 17:30", tz="UTC")
+
+    def test_today_1d(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1d", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14", tz="UTC")
+
+    def test_past_date_1h(self):
+        """Backfill — clamps to end-of-day for the target date."""
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1h", target_date="2026-03-10", now=now)
+        assert got == pd.Timestamp("2026-03-10 23:00", tz="UTC")
+
+    def test_past_date_1d(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1d", target_date="2026-03-10", now=now)
+        assert got == pd.Timestamp("2026-03-10", tz="UTC")
+
+
+class TestRowCount:
+    def test_existing_parquet(self, tmp_path):
+        import polars as pl
+
+        from scripts.collect_daily_snapshot import _row_count
+
+        p = tmp_path / "x.parquet"
+        pl.DataFrame({"a": [1, 2, 3, 4]}).write_parquet(str(p))
+        assert _row_count(p) == 4
+
+    def test_missing_returns_zero(self, tmp_path):
+        from scripts.collect_daily_snapshot import _row_count
+
+        assert _row_count(tmp_path / "nope.parquet") == 0
+
+    def test_corrupt_returns_zero(self, tmp_path):
+        from scripts.collect_daily_snapshot import _row_count
+
+        p = tmp_path / "corrupt.parquet"
+        p.write_bytes(b"junk")
+        assert _row_count(p) == 0
+
+
+class TestOhlcvGateSkip:
+    """collect_and_save_ohlcv — feather-already-current → SKIPPED."""
+
+    def test_skipped_status_when_feather_current(self, tmp_path, monkeypatch):
+        """A feather whose max date >= expected_last → status='SKIPPED', no API call."""
+        import pyarrow.feather as feather
+
+        from scripts import collect_daily_snapshot as cds
+
+        symbol = "ZZZ"
+        # Build a feather whose latest bar is far in the future.
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2099-12-31"], utc=True).as_unit("ns"),
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [0.0],
+            }
+        )
+        feather.write_feather(df, tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather")
+
+        class FailingAPI:
+            def get_candlesticks_dataframe(self, *args, **kwargs):
+                raise AssertionError("API must not be called when gate fires")
+
+        markets = [{"name": f"{symbol}/USD", "isListed": True}]
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            FailingAPI(),
+            markets,
+            tmp_path,
+            timeframes=["1d"],
+            target_date="2026-05-14",
+        )
+        assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
+        assert coverage[(symbol, "1d")]["api_slice"] is None
+        # Saved counts fetches, not skips:
+        assert saved == 0
+        assert failed == []
+
+
+class TestReportSkippedSection:
+    def test_section_present_when_skips_recorded(self, tmp_path):
+        from gmx_historical_data.coverage_gate import SkipDecision
+        from scripts.collect_daily_snapshot import generate_report
+
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+            }
+        )
+        out = tmp_path / "report.txt"
+        skipped = {
+            "markets": SkipDecision(True, "current", 135, 100),
+            "apy": SkipDecision(True, "current", 945, 700),
+        }
+        generate_report(
+            date_str="2026-05-14",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=out,
+            ohlcv_coverage=None,
+            skipped=skipped,
+        )
+        content = out.read_text()
+        assert "## Skipped (already current)" in content
+        assert "Markets snapshots: existing 135 rows ≥ 100" in content
+        assert "APY: existing 945 rows ≥ 700" in content
+
+    def test_section_absent_when_no_skips(self, tmp_path):
+        from scripts.collect_daily_snapshot import generate_report
+
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+            }
+        )
+        out = tmp_path / "report.txt"
+        generate_report(
+            date_str="2026-05-14",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=out,
+            ohlcv_coverage=None,
+            skipped=None,
+        )
+        assert "## Skipped (already current)" not in out.read_text()

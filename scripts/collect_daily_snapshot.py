@@ -46,9 +46,15 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.feather as feather
+import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
+from gmx_historical_data.coverage_gate import (
+    SkipDecision,
+    has_ohlcv_through,
+    is_current,
+)
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
@@ -99,6 +105,41 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
     feather.write_feather(combined, filepath)
+
+
+def _expected_last_bar(
+    tf: str,
+    target_date: str,
+    *,
+    now: pd.Timestamp | None = None,
+) -> pd.Timestamp:
+    """Latest fully-closed bar we expect on disk for ``target_date``.
+
+    For *today's* date, returns the most recent closed bar of the timeframe
+    (e.g. ``1h`` at 17:42 UTC → ``today 17:00``).  For *past* dates,
+    returns the last bar of that calendar day (e.g. ``1h`` and
+    ``--date 2026-03-10`` → ``2026-03-10 23:00``).
+
+    :param tf: Timeframe (``1m``, ``5m``, ``15m``, ``1h``, ``4h``, ``1d``).
+    :param target_date: ISO date string (``YYYY-MM-DD``).
+    :param now: Override for the current UTC wall-clock; defaults to
+        ``pd.Timestamp.now(tz='UTC')``.
+    """
+    target = pd.Timestamp(target_date, tz="UTC").normalize()
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    if target.date() < now.date():
+        anchor = target + pd.Timedelta(hours=23, minutes=59)
+    else:
+        anchor = now
+    floor_freq = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1D",
+    }[tf]
+    return anchor.floor(floor_freq)
 
 
 def _extract_symbols(markets: list[dict]) -> list[str]:
@@ -446,11 +487,31 @@ def _feather_date_stats(filepath: Path) -> dict | None:
     return _date_stats(df["date"])
 
 
+def _row_count(path: Path) -> int:
+    """Return parquet row count via metadata; ``0`` if missing/corrupt.
+
+    Used by the gate-skip code path to report "existing N rows" without
+    reopening the file twice.
+
+    :param path: Path to the parquet file.
+    :returns: Row count, or ``0`` if the file is missing or unreadable.
+    """
+    if not path.exists():
+        return 0
+    try:
+        return pq.read_metadata(str(path)).num_rows
+    except Exception:
+        return 0
+
+
 def collect_and_save_ohlcv(
     api: GMXAPI,
     markets: list[dict],
     futures_dir: Path,
     timeframes: list[str] | None = None,
+    *,
+    force_refresh: bool = False,
+    target_date: str | None = None,
 ) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
 
@@ -496,6 +557,22 @@ def collect_and_save_ohlcv(
         for tf in tfs:
             filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
             pre_stats = _feather_date_stats(filepath)
+
+            # Coverage gate — skip fetch entirely if on-disk feather already
+            # covers today's last expected bar. ``has_ohlcv_through`` is
+            # imported at the top of this module alongside ``is_current``.
+            if target_date is not None:
+                expected_last = _expected_last_bar(tf, target_date=target_date)
+                gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
+                if gate.skip:
+                    coverage[(symbol, tf)] = {
+                        "pre_merge": pre_stats,
+                        "api_slice": None,
+                        "post_merge": pre_stats,  # no write happened
+                        "status": "SKIPPED",
+                    }
+                    continue
+
             entry: dict = {
                 "pre_merge": pre_stats,
                 "api_slice": None,
@@ -612,6 +689,7 @@ def generate_report(
     volumes_dir: Path,
     report_path: Path,
     ohlcv_coverage: dict[tuple[str, str], dict] | None = None,
+    skipped: dict[str, "SkipDecision"] | None = None,
 ) -> None:
     """Write a human-readable data report after each collection run.
 
@@ -634,6 +712,11 @@ def generate_report(
         per-symbol API-vs-Combined date range table and a leading
         ``Suspected Seed Regressions`` block listing entries where historical
         depth is suspicious.
+    :param skipped: Dict mapping data-type keys (``"markets"``, ``"tickers"``,
+        ``"apy"``, ``"volumes"``) to the :class:`~gmx_historical_data.coverage_gate.SkipDecision`
+        that caused the skip. When non-empty a ``## Skipped (already current)``
+        section is appended between ``## Collection Summary`` and
+        ``## Date Range Summary``.
     """
     now_utc = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -694,8 +777,47 @@ def generate_report(
         if volume_data
         else "- Total 24h Volume: N/A",
         "",
-        "## Date Range Summary",
     ]
+
+    # ------------------------------------------------------------------
+    # Skipped (already current) — emitted only when at least one fetch
+    # was bypassed by the coverage gate.
+    # ------------------------------------------------------------------
+    skip_lines: list[str] = []
+    if skipped:
+        labels = {
+            "markets": "Markets snapshots",
+            "tickers": "Tickers",
+            "apy": "APY",
+            "volumes": "Volumes",
+        }
+        for key in ("markets", "tickers", "apy", "volumes"):
+            d = skipped.get(key)
+            if d is None:
+                continue
+            skip_lines.append(
+                f"- {labels[key]}: existing {d.existing_rows} rows ≥ "
+                f"{d.expected_min_rows} required (reason: {d.reason})"
+            )
+    if ohlcv_coverage:
+        per_tf_skips: dict[str, int] = {}
+        per_tf_total: dict[str, int] = {}
+        for (sym, tf), entry in ohlcv_coverage.items():
+            per_tf_total[tf] = per_tf_total.get(tf, 0) + 1
+            if entry.get("status") == "SKIPPED":
+                per_tf_skips[tf] = per_tf_skips.get(tf, 0) + 1
+        for tf in TIMEFRAMES:
+            if per_tf_skips.get(tf):
+                skip_lines.append(
+                    f"- OHLCV {tf}: {per_tf_skips[tf]}/{per_tf_total.get(tf, 0)} "
+                    "symbols skipped (existing max ≥ expected last bar)"
+                )
+    if skip_lines:
+        lines.append("## Skipped (already current)")
+        lines.extend(skip_lines)
+        lines.append("")
+
+    lines.append("## Date Range Summary")
 
     # Daily-stamped data types — inspected by filename (no parquet reads).
     daily_sources = (
@@ -1010,6 +1132,16 @@ Examples:
         default=DEFAULT_RELEASE_TAG,
         help=f"Release tag to seed from (default: {DEFAULT_RELEASE_TAG} = most recent).",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help=(
+            "Ignore the coverage gate and re-fetch all data types even if "
+            "the on-disk file is already current.  Default off; matches "
+            "the conservative behaviour expected by the daily release "
+            "workflow."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1064,16 +1196,34 @@ Examples:
 
     # --- Phase 1: Markets snapshot (ALL markets: perp + swap-only + unlisted) ---
     console.print("\n[bold]Phase 1: Markets snapshot (OI, liquidity, rates)[/bold]")
-    markets_df = collect_markets_snapshot(all_markets, date_str)
     markets_path = snapshots_dir / f"{date_str}.parquet"
     markets_path.parent.mkdir(parents=True, exist_ok=True)
-    markets_df.to_parquet(markets_path, index=False)
-    console.print(f"  Saved → {markets_path}\n")
+
+    skipped: dict[str, SkipDecision] = {}
+    markets_decision = is_current(
+        markets_path, expected_min_rows=100, force=args.force_refresh
+    )
+    if markets_decision.skip:
+        skipped["markets"] = markets_decision
+        markets_df = pd.read_parquet(markets_path)
+        console.print(
+            f"  [yellow]Skipped — existing {markets_decision.existing_rows} rows ≥ "
+            f"{markets_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        markets_df = collect_markets_snapshot(all_markets, date_str)
+        markets_df.to_parquet(markets_path, index=False)
+        console.print(f"  Saved → {markets_path}")
+    console.print()
 
     # --- Phase 2: OHLCV candles for ALL timeframes ---
     console.print("[bold]Phase 2: OHLCV candles (all timeframes)[/bold]")
     candle_count, failed_symbols, ohlcv_coverage = collect_and_save_ohlcv(
-        api, all_markets, futures_dir
+        api,
+        all_markets,
+        futures_dir,
+        force_refresh=args.force_refresh,
+        target_date=date_str,
     )
     console.print()
 
@@ -1082,12 +1232,36 @@ Examples:
 
     # --- Phase 4: Tickers (bid/ask prices) ---
     console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
-    ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
+    ticker_path = tickers_dir / f"{date_str}.parquet"
+    ticker_decision = is_current(
+        ticker_path, expected_min_rows=100, force=args.force_refresh
+    )
+    if ticker_decision.skip:
+        skipped["tickers"] = ticker_decision
+        ticker_count = _row_count(ticker_path)
+        console.print(
+            f"  [yellow]Skipped — existing {ticker_decision.existing_rows} rows ≥ "
+            f"{ticker_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        ticker_count = collect_and_save_tickers(api, date_str, tickers_dir)
     console.print()
 
     # --- Phase 5: APY (all periods) ---
     console.print("[bold]Phase 5: APY (yield data)[/bold]")
-    apy_count = collect_and_save_apy(api, date_str, apy_dir)
+    apy_path = apy_dir / f"{date_str}.parquet"
+    apy_decision = is_current(
+        apy_path, expected_min_rows=7 * 100, force=args.force_refresh
+    )
+    if apy_decision.skip:
+        skipped["apy"] = apy_decision
+        apy_count = _row_count(apy_path)
+        console.print(
+            f"  [yellow]Skipped — existing {apy_decision.existing_rows} rows ≥ "
+            f"{apy_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        apy_count = collect_and_save_apy(api, date_str, apy_dir)
     console.print()
 
     # --- Phase 6: Generate report ---
@@ -1108,6 +1282,7 @@ Examples:
         volumes_dir=volumes_dir,
         report_path=report_path,
         ohlcv_coverage=ohlcv_coverage,
+        skipped=skipped,
     )
     _abort_on_failed_ohlcv_fetches(failed_symbols)
     console.print()
