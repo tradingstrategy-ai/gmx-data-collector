@@ -46,6 +46,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.feather as feather
+import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
@@ -479,6 +480,23 @@ def _feather_date_stats(filepath: Path) -> dict | None:
     if df.empty:
         return None
     return _date_stats(df["date"])
+
+
+def _row_count(path: Path) -> int:
+    """Return parquet row count via metadata; ``0`` if missing/corrupt.
+
+    Used by the gate-skip code path to report "existing N rows" without
+    reopening the file twice.
+
+    :param path: Path to the parquet file.
+    :returns: Row count, or ``0`` if the file is missing or unreadable.
+    """
+    if not path.exists():
+        return 0
+    try:
+        return pq.read_metadata(str(path)).num_rows
+    except Exception:
+        return 0
 
 
 def collect_and_save_ohlcv(

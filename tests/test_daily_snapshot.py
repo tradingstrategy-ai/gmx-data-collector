@@ -343,3 +343,25 @@ class TestExpectedLastBar:
         now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
         got = _expected_last_bar("1d", target_date="2026-03-10", now=now)
         assert got == pd.Timestamp("2026-03-10", tz="UTC")
+
+
+class TestRowCount:
+    def test_existing_parquet(self, tmp_path):
+        import polars as pl
+        from scripts.collect_daily_snapshot import _row_count
+
+        p = tmp_path / "x.parquet"
+        pl.DataFrame({"a": [1, 2, 3, 4]}).write_parquet(str(p))
+        assert _row_count(p) == 4
+
+    def test_missing_returns_zero(self, tmp_path):
+        from scripts.collect_daily_snapshot import _row_count
+
+        assert _row_count(tmp_path / "nope.parquet") == 0
+
+    def test_corrupt_returns_zero(self, tmp_path):
+        from scripts.collect_daily_snapshot import _row_count
+
+        p = tmp_path / "corrupt.parquet"
+        p.write_bytes(b"junk")
+        assert _row_count(p) == 0
