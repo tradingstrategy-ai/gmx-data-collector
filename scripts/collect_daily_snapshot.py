@@ -1063,6 +1063,16 @@ Examples:
         default=DEFAULT_RELEASE_TAG,
         help=f"Release tag to seed from (default: {DEFAULT_RELEASE_TAG} = most recent).",
     )
+    parser.add_argument(
+        "--force-refresh",
+        action="store_true",
+        help=(
+            "Ignore the coverage gate and re-fetch all data types even if "
+            "the on-disk file is already current.  Default off; matches "
+            "the conservative behaviour expected by the daily release "
+            "workflow."
+        ),
+    )
 
     args = parser.parse_args()
 
