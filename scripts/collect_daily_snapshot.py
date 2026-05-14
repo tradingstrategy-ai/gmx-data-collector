@@ -50,6 +50,11 @@ import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
+from gmx_historical_data.coverage_gate import (
+    SkipDecision,
+    has_ohlcv_through,
+    is_current,
+)
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
@@ -1127,11 +1132,25 @@ Examples:
 
     # --- Phase 1: Markets snapshot (ALL markets: perp + swap-only + unlisted) ---
     console.print("\n[bold]Phase 1: Markets snapshot (OI, liquidity, rates)[/bold]")
-    markets_df = collect_markets_snapshot(all_markets, date_str)
     markets_path = snapshots_dir / f"{date_str}.parquet"
     markets_path.parent.mkdir(parents=True, exist_ok=True)
-    markets_df.to_parquet(markets_path, index=False)
-    console.print(f"  Saved → {markets_path}\n")
+
+    skipped: dict[str, SkipDecision] = {}
+    markets_decision = is_current(
+        markets_path, expected_min_rows=100, force=args.force_refresh
+    )
+    if markets_decision.skip:
+        skipped["markets"] = markets_decision
+        markets_df = pd.read_parquet(markets_path)
+        console.print(
+            f"  [yellow]Skipped — existing {markets_decision.existing_rows} rows ≥ "
+            f"{markets_decision.expected_min_rows} required[/yellow]"
+        )
+    else:
+        markets_df = collect_markets_snapshot(all_markets, date_str)
+        markets_df.to_parquet(markets_path, index=False)
+        console.print(f"  Saved → {markets_path}")
+    console.print()
 
     # --- Phase 2: OHLCV candles for ALL timeframes ---
     console.print("[bold]Phase 2: OHLCV candles (all timeframes)[/bold]")
