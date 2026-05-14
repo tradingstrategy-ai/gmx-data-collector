@@ -128,12 +128,16 @@ Both return `SkipDecision` (not a bare bool) so callers can record *why* a fetch
 
 | Scenario | `is_current` | `has_ohlcv_through` |
 |---|---|---|
-| File missing | `skip=False, reason="missing"` | `skip=False, reason="missing"` |
-| File corrupt (`Exception` on read) | `skip=False, reason="missing"`, warning logged | `skip=False, reason="missing"` |
+| File missing | `skip=False, reason="missing", existing_rows=0` | `skip=False, reason="missing", existing_rows=0` |
+| File corrupt (`Exception` on read) | `skip=False, reason="missing", existing_rows=0`, warning logged | `skip=False, reason="missing", existing_rows=0` |
 | Rows < `expected_min_rows` | `skip=False, reason="too_small"` | n/a |
 | `max(date) < expected_max_date` | n/a | `skip=False, reason="stale"` |
 | Pass all checks | `skip=True, reason="current"` | `skip=True, reason="current"` |
 | `force=True` | `skip=False, reason="forced"` | `skip=False, reason="forced"` |
+
+`existing_rows` is always `0` for both the genuinely-missing and the corrupt-file cases — a corrupt file on disk may still have non-zero bytes, but the row count we could not determine is reported as `0`. Callers should not interpret `existing_rows=0` as proof the file is absent.
+
+**Row-count implementation**: `is_current` reads parquet metadata with `pyarrow.parquet.read_metadata(path).num_rows` — this opens only the footer (~few KB), never the row groups. For feathers, `has_ohlcv_through` reads just the `date` column via `pl.read_ipc(path, columns=["date"])`. Both calls are wrapped in `try/except Exception`; failure routes to the `"missing"` branch.
 
 ## Per-collector integration
 
@@ -151,11 +155,18 @@ A `skipped: dict[str, SkipDecision]` accumulates results.
 
 ### Phase 1 — Markets snapshot
 
+Important caveat: `_fetch_all_markets(api)` is called unconditionally because its result (`all_markets`, the raw API dict list) feeds both the markets snapshot AND `_extract_symbols(all_markets)` used by Phase 2 OHLCV. Gating the markets API call would require either reconstructing API-shape dicts from the parquet (key renaming camelCase ↔ snake_case) or refactoring `_extract_symbols` to accept either shape. Neither is worth the complexity for one cheap API call.
+
+What the gate actually skips for markets: the `collect_markets_snapshot` flatten + `markets_df.to_parquet` write. Negligible time, but kept for consistency with the other phases and for the `## Skipped` report line.
+
 ```python
 markets_path = snapshots_dir / f"{date_str}.parquet"
-decision = is_current(markets_path, expected_min_rows=100, force=args.force_refresh)
-if decision.skip:
-    skipped["markets"] = decision
+markets_decision = is_current(markets_path, expected_min_rows=100, force=args.force_refresh)
+if markets_decision.skip:
+    skipped["markets"] = markets_decision
+    # Read existing parquet for downstream report use; column shape already
+    # matches what generate_report expects (is_swap_only, open_interest_long,
+    # open_interest_short, market_token, name).
     markets_df = pd.read_parquet(markets_path)
 else:
     markets_df = collect_markets_snapshot(all_markets, date_str)
@@ -169,19 +180,54 @@ else:
 `collect_and_save_ohlcv` gains a `force_refresh` param. Inside the loop:
 
 ```python
-expected_last = _expected_last_bar(tf, today=date_str)
+expected_last = _expected_last_bar(tf, target_date=date_str)
 decision = has_ohlcv_through(filepath, expected_last, force=force_refresh)
 if decision.skip:
+    # Single feather read shared between pre_merge and post_merge — no
+    # write happened, so they are identical by construction.
+    stats = _feather_date_stats(filepath)
     coverage[(symbol, tf)] = {
-        "pre_merge": _feather_date_stats(filepath),
+        "pre_merge": stats,
         "api_slice": None,
-        "post_merge": _feather_date_stats(filepath),
+        "post_merge": stats,
         "status": "SKIPPED",
     }
     continue
 ```
 
-New helper `_expected_last_bar` rounds today's wall clock down to the timeframe boundary.
+New helper `_expected_last_bar(tf: str, target_date: str, *, now: pd.Timestamp | None = None) -> pd.Timestamp`:
+
+```python
+def _expected_last_bar(
+    tf: str,
+    target_date: str,
+    *,
+    now: pd.Timestamp | None = None,
+) -> pd.Timestamp:
+    """Latest fully-closed bar we expect on disk for ``target_date``.
+
+    For *today's* date, returns the most recent closed bar of the timeframe
+    (e.g. for ``1h`` at 17:42 UTC → ``today 17:00``).  For *past* dates
+    (backfill via ``--date``), returns the last bar of that calendar day
+    (e.g. for ``1h`` and ``--date 2026-03-10`` → ``2026-03-10 23:00``).
+
+    :param tf: Timeframe (``1m``, ``5m``, ``15m``, ``1h``, ``4h``, ``1d``).
+    :param target_date: ISO date string (``YYYY-MM-DD``).
+    :param now: Override for the current UTC wall-clock; defaults to
+        ``pd.Timestamp.utcnow()``.
+    """
+    target = pd.Timestamp(target_date, tz="UTC").normalize()
+    now = (now or pd.Timestamp.utcnow().tz_convert("UTC"))
+    if target.date() < now.date():
+        # Past-date backfill: clamp to end-of-day for that date.
+        anchor = target + pd.Timedelta(hours=23, minutes=59)
+    else:
+        anchor = now
+    return anchor.floor({"1m": "1min", "5m": "5min", "15m": "15min",
+                         "1h": "1h", "4h": "4h", "1d": "1D"}[tf])
+```
+
+A `SKIPPED` entry's `pre_merge == post_merge` and the existing release-workflow integrity check (`release-data.yml:170-181`) sees identical `before`/`after` stats — no false regression.
 
 ### Phase 4 — Tickers
 
@@ -207,7 +253,7 @@ else:
     apy_count = collect_and_save_apy(api, date_str, apy_dir)
 ```
 
-`7 * 100`: 7 APY periods × ≥100 markets.
+`7 * 100`: 7 APY periods × ≥100 markets. APY also emits GLV rows (`_flatten_apy` populates both `markets` and `glvs` keys), so the actual row count is `7 * (markets + glvs) ≈ 7 * 135 ≈ 945`. The `700` floor is intentionally conservative — it allows for shrinkage and accepts a tiny risk of skipping a partially-collected file where only 1 of 7 periods succeeded.
 
 ### Volumes (when re-enabled)
 
@@ -251,8 +297,11 @@ Daily-stamped lines come from `skipped`. OHLCV lines aggregate `ohlcv_coverage` 
 5. **Symbol exists in feather but not in today's markets**: loop iterates today's markets, so dropped symbols don't get gate-checked. Untouched.
 6. **New listing today**: no feather → `missing` → full fetch (`limit=10000`).
 7. **`--force-refresh`**: every gate returns `skip=False, reason="forced"`. Report omits `## Skipped`.
-8. **`--date <past>` backfill**: gate evaluates that date's file; `_expected_last_bar` uses the passed date. Works.
+8. **`--date <past>` backfill**: gate evaluates that date's file; `_expected_last_bar` clamps to that date's end-of-day. Works.
 9. **Corrupt parquet**: caught by `try/except` around the metadata read; treated as missing; warning logged; fetch path overwrites.
+10. **Completely empty `--output-dir`** (first run): every gate returns `reason="missing"` → fetch everything. Report omits `## Skipped` entirely (the section only emits when at least one skip occurred).
+11. **`--quickstart` then collect**: quickstart copies the previous release tarball into `--output-dir` first. The gate then sees the seeded files and — correctly — skips fetches for any data type whose date matches today's. If you want to force a fresh fetch after a quickstart seed, pass `--force-refresh` explicitly. The two flags compose without surprises.
+12. **Markets API call is not gated**: `_fetch_all_markets(api)` runs unconditionally because `_extract_symbols(all_markets)` needs the raw API shape for Phase 2 OHLCV. The Phase 1 gate only skips the flatten + parquet write. Documented under Phase 1 above.
 
 ## Performance impact
 
@@ -284,16 +333,19 @@ Unit tests in `tests/test_coverage_gate.py`:
 Integration test in `tests/test_daily_snapshot_gate.py`:
 
 - Seed `/tmp/test_data/data/gmx/snapshots/2026-05-14.parquet` with 135 rows.
-- Run `main()` with `--date 2026-05-14` against a mocked GMX API where `get_markets_info()` raises (proving it isn't called).
-- Assert: no exception (gate fires first), file unchanged, report contains the `## Skipped` section listing `Markets snapshots`.
+- Seed `/tmp/test_data/data/gmx/tickers/2026-05-14.parquet` and `apy/2026-05-14.parquet` similarly so all daily-stamped phases skip.
+- Run `main()` with `--date 2026-05-14` against a mocked GMX API where `get_tickers()` and `get_apy()` raise (proving they aren't called).
+- Assert: `markets_path` mtime unchanged after the run; report contains the `## Skipped` section listing all three.
+- Note: `get_markets_info()` is **not** mocked-to-raise because the API call runs unconditionally (see Phase 1 caveat). The assertion targets the parquet write, not the API call.
 
 ## Backwards compatibility
 
-- `generate_report` gains an optional `skipped=None` param. Existing callers (notebooks, tests) keep working.
+- `generate_report` gains an optional `skipped=None` param appended **after** `ohlcv_coverage` so positional callers keep working. Existing call sites (notebooks, tests) keep working.
 - `SkipDecision` lives only in `coverage_gate.py`; imports are scoped.
 - No on-disk format changes — schemas of `snapshots/{date}.parquet` etc. are untouched.
 - `--force-refresh` flag defaults to off → existing CI cron `release-data.yml` behavior unchanged.
 - `## Failed OHLCV Fetches` heading preserved (CI grep dependency at `release-data.yml:184`).
+- `_abort_on_failed_ohlcv_fetches` runs after `generate_report` and only inspects `failed_symbols`. A `SKIPPED` entry never makes it into `failed_symbols`, so this path is unchanged.
 
 ## Files touched
 
