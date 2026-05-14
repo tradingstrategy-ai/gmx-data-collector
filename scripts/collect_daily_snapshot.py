@@ -509,6 +509,9 @@ def collect_and_save_ohlcv(
     markets: list[dict],
     futures_dir: Path,
     timeframes: list[str] | None = None,
+    *,
+    force_refresh: bool = False,
+    target_date: str | None = None,
 ) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
 
@@ -554,6 +557,22 @@ def collect_and_save_ohlcv(
         for tf in tfs:
             filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
             pre_stats = _feather_date_stats(filepath)
+
+            # Coverage gate — skip fetch entirely if on-disk feather already
+            # covers today's last expected bar. ``has_ohlcv_through`` is
+            # imported at the top of this module alongside ``is_current``.
+            if target_date is not None:
+                expected_last = _expected_last_bar(tf, target_date=target_date)
+                gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
+                if gate.skip:
+                    coverage[(symbol, tf)] = {
+                        "pre_merge": pre_stats,
+                        "api_slice": None,
+                        "post_merge": pre_stats,  # no write happened
+                        "status": "SKIPPED",
+                    }
+                    continue
+
             entry: dict = {
                 "pre_merge": pre_stats,
                 "api_slice": None,
@@ -1155,7 +1174,11 @@ Examples:
     # --- Phase 2: OHLCV candles for ALL timeframes ---
     console.print("[bold]Phase 2: OHLCV candles (all timeframes)[/bold]")
     candle_count, failed_symbols, ohlcv_coverage = collect_and_save_ohlcv(
-        api, all_markets, futures_dir
+        api,
+        all_markets,
+        futures_dir,
+        force_refresh=args.force_refresh,
+        target_date=date_str,
     )
     console.print()
 

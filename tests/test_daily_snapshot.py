@@ -365,3 +365,45 @@ class TestRowCount:
         p = tmp_path / "corrupt.parquet"
         p.write_bytes(b"junk")
         assert _row_count(p) == 0
+
+
+class TestOhlcvGateSkip:
+    """collect_and_save_ohlcv — feather-already-current → SKIPPED."""
+
+    def test_skipped_status_when_feather_current(self, tmp_path, monkeypatch):
+        """A feather whose max date >= expected_last → status='SKIPPED', no API call."""
+        import pyarrow.feather as feather
+
+        from scripts import collect_daily_snapshot as cds
+
+        symbol = "ZZZ"
+        # Build a feather whose latest bar is far in the future.
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2099-12-31"], utc=True).as_unit("ns"),
+                "open": [1.0],
+                "high": [1.0],
+                "low": [1.0],
+                "close": [1.0],
+                "volume": [0.0],
+            }
+        )
+        feather.write_feather(df, tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather")
+
+        class FailingAPI:
+            def get_candlesticks_dataframe(self, *args, **kwargs):
+                raise AssertionError("API must not be called when gate fires")
+
+        markets = [{"name": f"{symbol}/USD", "isListed": True}]
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            FailingAPI(),
+            markets,
+            tmp_path,
+            timeframes=["1d"],
+            target_date="2026-05-14",
+        )
+        assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
+        assert coverage[(symbol, "1d")]["api_slice"] is None
+        # Saved counts fetches, not skips:
+        assert saved == 0
+        assert failed == []
