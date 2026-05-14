@@ -81,3 +81,55 @@ def is_current(
     if rows < expected_min_rows:
         return SkipDecision(False, "too_small", rows, expected_min_rows)
     return SkipDecision(True, "current", rows, expected_min_rows)
+
+
+def has_ohlcv_through(
+    feather_path: Path,
+    expected_max_date,  # pd.Timestamp, typed loosely to avoid module-level pandas import
+    *,
+    force: bool = False,
+) -> SkipDecision:
+    """Decide whether an OHLCV feather already extends through the latest bar.
+
+    Reads only the ``date`` column.
+
+    :param feather_path: Per-symbol feather (e.g.
+        ``BTC_USDC_USDC-1h-futures.feather``).
+    :param expected_max_date: Latest fully-closed bar for the timeframe
+        (UTC ``pd.Timestamp``).
+    :param force: When ``True``, always returns ``skip=False, reason='forced'``.
+    """
+    if force:
+        return SkipDecision(False, "forced", 0, 0)
+    if not feather_path.exists():
+        return SkipDecision(False, "missing", 0, 0)
+
+    try:
+        df = pl.read_ipc(str(feather_path), columns=["date"])
+    except Exception as exc:
+        logger.warning(
+            "coverage_gate: failed to read %s (%s) — treating as missing",
+            feather_path,
+            exc,
+        )
+        return SkipDecision(False, "missing", 0, 0)
+
+    if df.height == 0:
+        return SkipDecision(False, "missing", 0, 0)
+
+    max_date = df["date"].max()
+    # Normalise to tz-aware UTC for comparison.
+    max_ts = pd.Timestamp(max_date)
+    if max_ts.tzinfo is None:
+        max_ts = max_ts.tz_localize("UTC")
+    else:
+        max_ts = max_ts.tz_convert("UTC")
+    expected = pd.Timestamp(expected_max_date)
+    if expected.tzinfo is None:
+        expected = expected.tz_localize("UTC")
+    else:
+        expected = expected.tz_convert("UTC")
+
+    if max_ts < expected:
+        return SkipDecision(False, "stale", df.height, 0)
+    return SkipDecision(True, "current", df.height, 0)

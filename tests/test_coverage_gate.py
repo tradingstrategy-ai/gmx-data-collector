@@ -3,7 +3,9 @@
 
 from pathlib import Path
 
+import pandas as pd
 import polars as pl
+import pyarrow.feather as feather
 import pyarrow.parquet as pq
 import pytest
 
@@ -84,3 +86,87 @@ class TestIsCurrent:
         assert decision.reason == "missing"
         assert decision.existing_rows == 0
         assert any("failed to read" in r.message for r in caplog.records)
+
+
+class TestHasOhlcvThrough:
+    """has_ohlcv_through() — feather max-date check for OHLCV per (symbol, tf)."""
+
+    def _write_feather(self, path: Path, max_iso: str) -> None:
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-05-01", max_iso], utc=True, format="mixed").as_unit("ns"),
+                "open": [1.0, 2.0],
+                "high": [1.0, 2.0],
+                "low": [1.0, 2.0],
+                "close": [1.0, 2.0],
+                "volume": [0.0, 0.0],
+            }
+        )
+        feather.write_feather(df, path)
+
+    def test_missing(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        d = has_ohlcv_through(
+            tmp_path / "nope.feather",
+            expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"),
+        )
+        assert d.skip is False
+        assert d.reason == "missing"
+
+    def test_stale(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        p = tmp_path / "stale.feather"
+        self._write_feather(p, max_iso="2026-05-14 12:00")
+        d = has_ohlcv_through(
+            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
+        )
+        assert d.skip is False
+        assert d.reason == "stale"
+
+    def test_current(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        p = tmp_path / "ok.feather"
+        self._write_feather(p, max_iso="2026-05-14 16:00")
+        d = has_ohlcv_through(
+            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
+        )
+        assert d.skip is True
+        assert d.reason == "current"
+
+    def test_ahead(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        p = tmp_path / "ahead.feather"
+        self._write_feather(p, max_iso="2026-05-14 18:00")
+        d = has_ohlcv_through(
+            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
+        )
+        assert d.skip is True
+        assert d.reason == "current"
+
+    def test_forced(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        p = tmp_path / "ok.feather"
+        self._write_feather(p, max_iso="2026-05-14 16:00")
+        d = has_ohlcv_through(
+            p,
+            expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"),
+            force=True,
+        )
+        assert d.skip is False
+        assert d.reason == "forced"
+
+    def test_corrupt(self, tmp_path):
+        from gmx_historical_data.coverage_gate import has_ohlcv_through
+
+        p = tmp_path / "corrupt.feather"
+        p.write_bytes(b"not a feather")
+        d = has_ohlcv_through(
+            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
+        )
+        assert d.skip is False
+        assert d.reason == "missing"
