@@ -121,14 +121,18 @@ class TestIsCurrent:
         assert decision.existing_rows == 135
 
     def test_corrupt_file(self, tmp_path, caplog):
+        import logging
+
         from gmx_historical_data.coverage_gate import is_current
 
         p = tmp_path / "corrupt.parquet"
         p.write_bytes(b"this is not parquet")
-        decision = is_current(p, expected_min_rows=10)
+        with caplog.at_level(logging.WARNING, logger="gmx_historical_data.coverage_gate"):
+            decision = is_current(p, expected_min_rows=10)
         assert decision.skip is False
         assert decision.reason == "missing"
         assert decision.existing_rows == 0
+        assert any("failed to read" in r.message for r in caplog.records)
 ```
 
 - [ ] **Step 2: Run tests, verify they fail**
@@ -157,6 +161,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import pandas as pd
+import polars as pl
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
@@ -215,7 +221,6 @@ def is_current(
             rows = pq.read_metadata(str(path)).num_rows
         else:
             # Feather metadata read — fall back to full read of the index col.
-            import polars as pl
             rows = pl.read_ipc(str(path), columns=[]).height
     except Exception as exc:
         logger.warning("coverage_gate: failed to read %s (%s) — treating as missing", path, exc)
@@ -369,8 +374,6 @@ def has_ohlcv_through(
         (UTC ``pd.Timestamp``).
     :param force: When ``True``, always returns ``skip=False, reason='forced'``.
     """
-    import polars as pl
-
     if force:
         return SkipDecision(False, "forced", 0, 0)
     if not feather_path.exists():
@@ -391,8 +394,6 @@ def has_ohlcv_through(
 
     max_date = df["date"].max()
     # Normalise to tz-aware UTC for comparison.
-    import pandas as pd
-
     max_ts = pd.Timestamp(max_date)
     if max_ts.tzinfo is None:
         max_ts = max_ts.tz_localize("UTC")
@@ -586,7 +587,13 @@ Expected: `ImportError: cannot import name '_row_count'`
 
 - [ ] **Step 3: Implement `_row_count`**
 
-Add near other private helpers in `scripts/collect_daily_snapshot.py`:
+First add the import at the top of `scripts/collect_daily_snapshot.py` next to the existing `import pyarrow.feather as feather` line:
+
+```python
+import pyarrow.parquet as pq
+```
+
+Then add the helper near other private helpers:
 
 ```python
 def _row_count(path: Path) -> int:
@@ -598,8 +605,6 @@ def _row_count(path: Path) -> int:
     if not path.exists():
         return 0
     try:
-        import pyarrow.parquet as pq
-
         return pq.read_metadata(str(path)).num_rows
     except Exception:
         return 0
@@ -682,9 +687,17 @@ git commit -m "feat(daily_snapshot): --force-refresh CLI flag"
 grep -n "Phase 1\|collect_markets_snapshot" scripts/collect_daily_snapshot.py
 ```
 
-- [ ] **Step 2: Refactor to gate the snapshot write**
+- [ ] **Step 2: Add module-level import**
 
-Inside `main()`, replace the existing Phase 1 block:
+At the top of `scripts/collect_daily_snapshot.py`, next to the existing `from gmx_historical_data.quickstart import ...` line:
+
+```python
+from gmx_historical_data.coverage_gate import SkipDecision, is_current
+```
+
+- [ ] **Step 3: Refactor Phase 1 to gate the snapshot write**
+
+Inside `main()`, replace the existing Phase 1 block (the `# --- Phase 1: Markets snapshot ...` section, currently ~6 lines that call `collect_markets_snapshot` then `to_parquet`):
 
 ```python
     # --- Phase 1: Markets snapshot (ALL markets: perp + swap-only + unlisted) ---
@@ -692,9 +705,7 @@ Inside `main()`, replace the existing Phase 1 block:
     markets_path = snapshots_dir / f"{date_str}.parquet"
     markets_path.parent.mkdir(parents=True, exist_ok=True)
 
-    from gmx_historical_data.coverage_gate import is_current
-
-    skipped: dict[str, "SkipDecision"] = {}
+    skipped: dict[str, SkipDecision] = {}
     markets_decision = is_current(
         markets_path, expected_min_rows=100, force=args.force_refresh
     )
@@ -712,15 +723,7 @@ Inside `main()`, replace the existing Phase 1 block:
     console.print()
 ```
 
-Also add the import at the top of the module (alongside other `from gmx_historical_data...` imports), and import `SkipDecision` for the type hint:
-
-```python
-from gmx_historical_data.coverage_gate import SkipDecision, is_current
-```
-
-Then remove the duplicate inline `from gmx_historical_data.coverage_gate import is_current` inside `main()`.
-
-- [ ] **Step 3: Smoke test — gate triggers when file exists**
+- [ ] **Step 4: Smoke test — gate triggers when file exists**
 
 ```bash
 mkdir -p /tmp/gate_smoke/data/gmx/snapshots
@@ -733,7 +736,7 @@ poetry run python scripts/collect_daily_snapshot.py --output-dir /tmp/gate_smoke
 
 Expected output includes `Skipped — existing 150 rows ≥ 100 required`.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add scripts/collect_daily_snapshot.py
@@ -1008,12 +1011,38 @@ def generate_report(
 
 - [ ] **Step 2: Add the `## Skipped` section in `generate_report`**
 
-Insert after `## Collection Summary`, before `## Date Range Summary`. Only emit when at least one skip occurred (daily-stamped OR OHLCV):
+The block must be inserted **before** the existing `"## Date Range Summary"` heading inside the `lines = [...]` list. Locate the exact line:
+
+```bash
+grep -n "Date Range Summary" scripts/collect_daily_snapshot.py
+```
+
+Expected single match in the `lines = [...]` literal. Using `Edit`, anchor the insertion by replacing:
 
 ```python
+        "",
+        "## Date Range Summary",
+    ]
+```
+
+with:
+
+```python
+        "",
+    ]
+
+    # ------------------------------------------------------------------
+    # Skipped (already current) — emitted only when at least one fetch
+    # was bypassed by the coverage gate.
+    # ------------------------------------------------------------------
     skip_lines: list[str] = []
     if skipped:
-        labels = {"markets": "Markets snapshots", "tickers": "Tickers", "apy": "APY", "volumes": "Volumes"}
+        labels = {
+            "markets": "Markets snapshots",
+            "tickers": "Tickers",
+            "apy": "APY",
+            "volumes": "Volumes",
+        }
         for key in ("markets", "tickers", "apy", "volumes"):
             d = skipped.get(key)
             if d is None:
@@ -1036,10 +1065,14 @@ Insert after `## Collection Summary`, before `## Date Range Summary`. Only emit 
                     "symbols skipped (existing max ≥ expected last bar)"
                 )
     if skip_lines:
-        lines.append("")
         lines.append("## Skipped (already current)")
         lines.extend(skip_lines)
+        lines.append("")
+
+    lines.append("## Date Range Summary")
 ```
+
+This closes the original `lines = [...]` list one line early, then appends the optional Skipped block, then appends `## Date Range Summary` so the rest of the function (which uses `lines.append`/`lines.extend`) continues to flow naturally.
 
 - [ ] **Step 3: Update `main()` to pass `skipped`**
 
@@ -1175,48 +1208,53 @@ import pytest
 
 @pytest.fixture
 def seeded_dir(tmp_path):
-    """Seed all daily-stamped files for 2026-05-14 so the gate skips them."""
-    gmx = tmp_path / "data" / "gmx"
-    for sub, rows in (
-        ("snapshots", 135),
-        ("tickers", 126),
-        ("apy", 945),
-    ):
+    """Seed all daily-stamped files for 2026-05-14 plus all 6 timeframes of
+    OHLCV with future dates so every gate fires.
+
+    Returns the directory we will pass to ``--output-dir`` (a ``user_data``
+    sub-dir, mirroring the production layout where the report lands at
+    ``output_dir.parent / data_report.txt``).
+    """
+    output_dir = tmp_path / "user_data"
+    gmx = output_dir / "data" / "gmx"
+
+    snapshot_cols_template = {
+        "name": "BTC/USD",
+        "is_swap_only": False,
+        "is_listed": True,
+        "market_token": "0x0",
+        "open_interest_long": "0",
+        "open_interest_short": "0",
+        "index_token": "0x0",
+        "long_token": "0x0",
+        "short_token": "0x0",
+        "listing_date": "",
+        "pool_amount_long": "0",
+        "pool_amount_short": "0",
+        "available_liquidity_long": "0",
+        "available_liquidity_short": "0",
+        "funding_rate_long": "0",
+        "funding_rate_short": "0",
+        "borrowing_rate_long": "0",
+        "borrowing_rate_short": "0",
+        "net_rate_long": "0",
+        "net_rate_short": "0",
+        "symbol": "BTC",
+        "date": "2026-05-14",
+    }
+    for sub, rows in (("snapshots", 135), ("tickers", 126), ("apy", 945)):
         d = gmx / sub
         d.mkdir(parents=True, exist_ok=True)
-        cols = {"col": list(range(rows))}
-        # snapshots needs columns referenced by generate_report
         if sub == "snapshots":
-            cols = {
-                "name": ["BTC/USD"] * rows,
-                "is_swap_only": [False] * rows,
-                "is_listed": [True] * rows,
-                "market_token": ["0x0"] * rows,
-                "open_interest_long": ["0"] * rows,
-                "open_interest_short": ["0"] * rows,
-                "index_token": ["0x0"] * rows,
-                "long_token": ["0x0"] * rows,
-                "short_token": ["0x0"] * rows,
-                "listing_date": [""] * rows,
-                "pool_amount_long": ["0"] * rows,
-                "pool_amount_short": ["0"] * rows,
-                "available_liquidity_long": ["0"] * rows,
-                "available_liquidity_short": ["0"] * rows,
-                "funding_rate_long": ["0"] * rows,
-                "funding_rate_short": ["0"] * rows,
-                "borrowing_rate_long": ["0"] * rows,
-                "borrowing_rate_short": ["0"] * rows,
-                "net_rate_long": ["0"] * rows,
-                "net_rate_short": ["0"] * rows,
-                "symbol": ["BTC"] * rows,
-                "date": ["2026-05-14"] * rows,
-            }
+            cols = {k: [v] * rows for k, v in snapshot_cols_template.items()}
+        else:
+            cols = {"col": list(range(rows))}
         pl.DataFrame(cols).write_parquet(str(d / "2026-05-14.parquet"))
 
-    # Seed one OHLCV feather way in the future so it skips too
+    # Seed an OHLCV feather for every timeframe so every (BTC, tf) hits the gate.
     fut = gmx / "futures"
     fut.mkdir(parents=True, exist_ok=True)
-    df = pd.DataFrame(
+    future_df = pd.DataFrame(
         {
             "date": pd.to_datetime(["2099-12-31"], utc=True).as_unit("ns"),
             "open": [1.0],
@@ -1226,43 +1264,59 @@ def seeded_dir(tmp_path):
             "volume": [0.0],
         }
     )
-    feather.write_feather(df, fut / "BTC_USDC_USDC-1d-futures.feather")
-    return tmp_path
+    for tf in ("1m", "5m", "15m", "1h", "4h", "1d"):
+        feather.write_feather(future_df, fut / f"BTC_USDC_USDC-{tf}-futures.feather")
+
+    return output_dir
 
 
-def test_gate_skips_tickers_and_apy_api(seeded_dir, capsys):
-    """Verify get_tickers() and get_apy() are not called when files are current."""
+def test_gate_skips_tickers_and_apy_api(seeded_dir):
+    """Verify get_tickers() / get_apy() / get_candlesticks_dataframe() are
+    never called when on-disk data is current."""
+    import sys
+
     from scripts import collect_daily_snapshot as cds
 
-    raise_called = lambda *a, **k: (_ for _ in ()).throw(
-        AssertionError("API must not be called when gate fires")
-    )
+    def raise_called(*args, **kwargs):
+        raise AssertionError("API must not be called when gate fires")
 
-    # Stub the API class so any candlestick call fails (it shouldn't be called for BTC/1d).
     class StubAPI:
-        def __init__(self, chain): pass
+        def __init__(self, chain):
+            pass
+
         def get_markets_info(self):
-            # Markets API is NOT gated — has to return something realistic.
+            # Markets API is NOT gated by design (see spec); return one
+            # listed market so the OHLCV loop has a symbol to iterate.
             return {"markets": [{"name": "BTC/USD", "isListed": True}]}
-        def get_tickers(self, use_cache=False): raise_called()
-        def get_apy(self, period, use_cache=False): raise_called()
-        def get_candlesticks_dataframe(self, *a, **k): raise_called()
 
-    with patch("scripts.collect_daily_snapshot.GMXAPI", StubAPI):
-        with patch.object(
-            __import__("sys"), "argv",
-            ["collect_daily_snapshot.py", "--output-dir", str(seeded_dir / "data" / ".."), "--date", "2026-05-14"],
-        ):
-            # The argparse + main() flow; if the gate fails to fire,
-            # raise_called() bubbles up and fails the test.
-            cds.main()
+        def get_tickers(self, use_cache=False):
+            raise_called()
 
-    # Confirm the report has the skipped section
-    report = (seeded_dir / "data_report.txt").read_text()
+        def get_apy(self, period, use_cache=False):
+            raise_called()
+
+        def get_candlesticks_dataframe(self, *args, **kwargs):
+            raise_called()
+
+    argv = [
+        "collect_daily_snapshot.py",
+        "--output-dir", str(seeded_dir),
+        "--date", "2026-05-14",
+    ]
+    with patch("scripts.collect_daily_snapshot.GMXAPI", StubAPI), \
+         patch.object(sys, "argv", argv):
+        cds.main()
+
+    # Report lands at output_dir.parent / data_report.txt
+    report_path = seeded_dir.parent / "data_report.txt"
+    report = report_path.read_text()
     assert "## Skipped (already current)" in report
     assert "Markets snapshots:" in report
     assert "Tickers:" in report
     assert "APY:" in report
+    # All 6 timeframes for BTC were seeded with future dates → all SKIPPED
+    for tf in ("1m", "5m", "15m", "1h", "4h", "1d"):
+        assert f"OHLCV {tf}:" in report
 ```
 
 - [ ] **Step 2: Run the test**
