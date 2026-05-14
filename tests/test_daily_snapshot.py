@@ -303,3 +303,43 @@ class TestCollectTickers:
         assert "max_price" in df.columns
         assert "date" in df.columns
         assert list(df["token_symbol"]) == ["ETH", "BTC"]
+
+
+class TestExpectedLastBar:
+    """_expected_last_bar — derives latest fully-closed bar for a timeframe."""
+
+    def test_today_1h(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1h", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14 17:00", tz="UTC")
+
+    def test_today_15m(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("15m", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14 17:30", tz="UTC")
+
+    def test_today_1d(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1d", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14", tz="UTC")
+
+    def test_past_date_1h(self):
+        """Backfill — clamps to end-of-day for the target date."""
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1h", target_date="2026-03-10", now=now)
+        assert got == pd.Timestamp("2026-03-10 23:00", tz="UTC")
+
+    def test_past_date_1d(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
+        got = _expected_last_bar("1d", target_date="2026-03-10", now=now)
+        assert got == pd.Timestamp("2026-03-10", tz="UTC")

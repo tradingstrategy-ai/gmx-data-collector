@@ -101,6 +101,41 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
     feather.write_feather(combined, filepath)
 
 
+def _expected_last_bar(
+    tf: str,
+    target_date: str,
+    *,
+    now: pd.Timestamp | None = None,
+) -> pd.Timestamp:
+    """Latest fully-closed bar we expect on disk for ``target_date``.
+
+    For *today's* date, returns the most recent closed bar of the timeframe
+    (e.g. ``1h`` at 17:42 UTC → ``today 17:00``).  For *past* dates,
+    returns the last bar of that calendar day (e.g. ``1h`` and
+    ``--date 2026-03-10`` → ``2026-03-10 23:00``).
+
+    :param tf: Timeframe (``1m``, ``5m``, ``15m``, ``1h``, ``4h``, ``1d``).
+    :param target_date: ISO date string (``YYYY-MM-DD``).
+    :param now: Override for the current UTC wall-clock; defaults to
+        ``pd.Timestamp.now(tz='UTC')``.
+    """
+    target = pd.Timestamp(target_date, tz="UTC").normalize()
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
+    if target.date() < now.date():
+        anchor = target + pd.Timedelta(hours=23, minutes=59)
+    else:
+        anchor = now
+    floor_freq = {
+        "1m": "1min",
+        "5m": "5min",
+        "15m": "15min",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1D",
+    }[tf]
+    return anchor.floor(floor_freq)
+
+
 def _extract_symbols(markets: list[dict]) -> list[str]:
     """Extract sorted unique symbols from listed perpetual markets.
 
