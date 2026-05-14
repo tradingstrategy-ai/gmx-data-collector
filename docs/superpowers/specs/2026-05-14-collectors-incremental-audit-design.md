@@ -217,7 +217,7 @@ def _expected_last_bar(
         ``pd.Timestamp.utcnow()``.
     """
     target = pd.Timestamp(target_date, tz="UTC").normalize()
-    now = (now or pd.Timestamp.utcnow().tz_convert("UTC"))
+    now = now if now is not None else pd.Timestamp.now(tz="UTC")
     if target.date() < now.date():
         # Past-date backfill: clamp to end-of-day for that date.
         anchor = target + pd.Timedelta(hours=23, minutes=59)
