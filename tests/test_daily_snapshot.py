@@ -348,6 +348,7 @@ class TestExpectedLastBar:
 class TestRowCount:
     def test_existing_parquet(self, tmp_path):
         import polars as pl
+
         from scripts.collect_daily_snapshot import _row_count
 
         p = tmp_path / "x.parquet"
@@ -411,8 +412,8 @@ class TestOhlcvGateSkip:
 
 class TestReportSkippedSection:
     def test_section_present_when_skips_recorded(self, tmp_path):
-        from scripts.collect_daily_snapshot import generate_report
         from gmx_historical_data.coverage_gate import SkipDecision
+        from scripts.collect_daily_snapshot import generate_report
 
         markets_df = pd.DataFrame(
             {

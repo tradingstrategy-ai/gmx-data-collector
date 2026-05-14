@@ -1,11 +1,10 @@
 """End-to-end test: gate prevents API calls when daily files exist."""
 
-from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 import polars as pl
 import pyarrow.feather as feather
-import pandas as pd
 import pytest
 
 
@@ -103,11 +102,12 @@ def test_gate_skips_tickers_and_apy_api(seeded_dir):
 
     argv = [
         "collect_daily_snapshot.py",
-        "--output-dir", str(seeded_dir),
-        "--date", "2026-05-14",
+        "--output-dir",
+        str(seeded_dir),
+        "--date",
+        "2026-05-14",
     ]
-    with patch("scripts.collect_daily_snapshot.GMXAPI", StubAPI), \
-         patch.object(sys, "argv", argv):
+    with patch("scripts.collect_daily_snapshot.GMXAPI", StubAPI), patch.object(sys, "argv", argv):
         cds.main()
 
     # Report lands at output_dir.parent / data_report.txt

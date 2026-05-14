@@ -6,7 +6,6 @@ from pathlib import Path
 import pandas as pd
 import polars as pl
 import pyarrow.feather as feather
-import pyarrow.parquet as pq
 import pytest
 
 
@@ -94,7 +93,9 @@ class TestHasOhlcvThrough:
     def _write_feather(self, path: Path, max_iso: str) -> None:
         df = pd.DataFrame(
             {
-                "date": pd.to_datetime(["2026-05-01", max_iso], utc=True, format="mixed").as_unit("ns"),
+                "date": pd.to_datetime(["2026-05-01", max_iso], utc=True, format="mixed").as_unit(
+                    "ns"
+                ),
                 "open": [1.0, 2.0],
                 "high": [1.0, 2.0],
                 "low": [1.0, 2.0],
@@ -119,9 +120,7 @@ class TestHasOhlcvThrough:
 
         p = tmp_path / "stale.feather"
         self._write_feather(p, max_iso="2026-05-14 12:00")
-        d = has_ohlcv_through(
-            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
-        )
+        d = has_ohlcv_through(p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"))
         assert d.skip is False
         assert d.reason == "stale"
 
@@ -130,9 +129,7 @@ class TestHasOhlcvThrough:
 
         p = tmp_path / "ok.feather"
         self._write_feather(p, max_iso="2026-05-14 16:00")
-        d = has_ohlcv_through(
-            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
-        )
+        d = has_ohlcv_through(p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"))
         assert d.skip is True
         assert d.reason == "current"
 
@@ -141,9 +138,7 @@ class TestHasOhlcvThrough:
 
         p = tmp_path / "ahead.feather"
         self._write_feather(p, max_iso="2026-05-14 18:00")
-        d = has_ohlcv_through(
-            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
-        )
+        d = has_ohlcv_through(p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"))
         assert d.skip is True
         assert d.reason == "current"
 
@@ -165,8 +160,6 @@ class TestHasOhlcvThrough:
 
         p = tmp_path / "corrupt.feather"
         p.write_bytes(b"not a feather")
-        d = has_ohlcv_through(
-            p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC")
-        )
+        d = has_ohlcv_through(p, expected_max_date=pd.Timestamp("2026-05-14 16:00", tz="UTC"))
         assert d.skip is False
         assert d.reason == "missing"
