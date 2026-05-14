@@ -374,8 +374,16 @@ class FreqtradeExporter:
         OHLCV columns set to 0.  Uses ``funding_rate_hourly`` as the
         rate value (falls back to ``funding_rate`` if hourly is missing).
 
+        The output is restricted to the canonical Freqtrade schema
+        (``date, open, high, low, close, volume``).  Earlier versions of
+        this method passed source columns through, which caused width
+        drift as the upstream funding parquet schema evolved (added
+        ``is_gap_filled`` / ``source``).  Pinning the output schema
+        keeps merges into older feathers compatible.
+
         :param df: Funding rate Polars dataframe from parquet.
-        :returns: Freqtrade-compatible Polars dataframe.
+        :returns: Freqtrade-compatible Polars dataframe with exactly
+            six columns: ``date, open, high, low, close, volume``.
         """
         col = "funding_rate_hourly" if "funding_rate_hourly" in df.columns else "funding_rate"
         df = df.rename({"timestamp": "date", col: "open"})
@@ -390,6 +398,7 @@ class FreqtradeExporter:
             ]
         )
         df = df.drop_nulls(subset=["open"])
+        df = df.select(["date", "open", "high", "low", "close", "volume"])
         return (
             df.sort("date").unique(subset=["date"], keep="first", maintain_order=False).sort("date")
         )
@@ -479,6 +488,36 @@ class FreqtradeExporter:
         # Both default and overwrite=True paths run the merge + history guard.
         file_size = path.stat().st_size
         existing = pl.read_ipc(path) if fmt == "feather" else pl.read_parquet(path)
+
+        # Schema-tolerant alignment.  If the existing feather has columns the
+        # incoming dataframe does not (legacy schema with extra source-side
+        # columns), project it down to the incoming column set so polars'
+        # ``concat`` accepts the merge.  Extra columns are dropped — the
+        # canonical Freqtrade schema is whatever the current transform
+        # produces.  If incoming has columns the existing file lacks, that
+        # is a genuine schema regression and we surface it instead of
+        # silently filling nulls.
+        if set(df.columns) != set(existing.columns):
+            extra_in_existing = set(existing.columns) - set(df.columns)
+            extra_in_incoming = set(df.columns) - set(existing.columns)
+            if extra_in_incoming:
+                raise ValueError(
+                    f"Schema regression while merging {path.name}: incoming "
+                    f"dataframe has columns the existing file lacks: "
+                    f"{sorted(extra_in_incoming)}.  Refusing to fill nulls — "
+                    "regenerate the file with --unsafe-overwrite if this is "
+                    "intentional."
+                )
+            logger.info(
+                "Schema realignment on %s: dropping legacy columns %s "
+                "(existing width %d -> incoming width %d)",
+                path.name,
+                sorted(extra_in_existing),
+                len(existing.columns),
+                len(df.columns),
+            )
+            existing = existing.select(df.columns)
+
         existing_stats = _coverage_stats(existing, ts_col="date")
         incoming_stats = _coverage_stats(df, ts_col="date")
         merged = (
