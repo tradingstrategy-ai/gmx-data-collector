@@ -29,7 +29,7 @@ jobs:
       - name: Checkout code from master
         uses: actions/checkout@v4
         with:
-          ref: add-date-range-to-reports
+          ref: master
 
       - name: Free disk space
         run: |
