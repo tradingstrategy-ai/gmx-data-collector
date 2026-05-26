@@ -51,14 +51,18 @@ def test_exporter_writes_zstd_compressed_feather(tmp_path: Path) -> None:
 
     assert out.exists(), "writer did not produce a file"
 
-    # Compressed size should be < 60 % of in-memory size (LINK 1m benchmark
-    # measured 22 %; we allow generous headroom for synthetic data).
-    in_memory_bytes = df.estimated_size()
+    # Baseline: write the same dataframe explicitly uncompressed.  The
+    # exporter's output must be strictly smaller — proves compression was
+    # applied without relying on data-dependent ratios.
+    baseline = tmp_path / "baseline.feather"
+    df.write_ipc(baseline, compression="uncompressed")
+
+    baseline_bytes = baseline.stat().st_size
     compressed_bytes = out.stat().st_size
-    assert compressed_bytes < in_memory_bytes * 0.6, (
-        f"feather not compressed: {compressed_bytes} bytes vs "
-        f"{in_memory_bytes} in-memory (ratio "
-        f"{compressed_bytes / in_memory_bytes:.2%})"
+    assert compressed_bytes < baseline_bytes * 0.95, (
+        f"exporter feather is not compressed: {compressed_bytes} bytes vs "
+        f"{baseline_bytes} uncompressed baseline (ratio "
+        f"{compressed_bytes / baseline_bytes:.2%})"
     )
 
     # FreqTrade reads via pandas.read_feather — must succeed and match shape.

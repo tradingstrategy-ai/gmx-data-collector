@@ -480,7 +480,7 @@ class FreqtradeExporter:
         """
         if unsafe_overwrite or not path.exists():
             if fmt == "feather":
-                df.write_ipc(path)
+                df.write_ipc(path, compression="zstd")
             else:
                 df.write_parquet(str(path))
             return
@@ -539,7 +539,7 @@ class FreqtradeExporter:
         )
 
         if fmt == "feather":
-            merged.write_ipc(path)
+            merged.write_ipc(path, compression="zstd")
         else:
             merged.write_parquet(str(path))
 
