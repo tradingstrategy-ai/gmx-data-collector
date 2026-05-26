@@ -75,9 +75,6 @@ def rewrite_one(path: Path, *, dry_run: bool) -> tuple[int, int]:
 
     df = pl.read_ipc(path)
     original_rows = len(df)
-    original_checksum: float | None = None
-    if "close" in df.columns:
-        original_checksum = float(df["close"].sum())
 
     if dry_run:
         logger.info("DRY-RUN would rewrite: %s (%d bytes)", path.name, before)
@@ -87,22 +84,20 @@ def rewrite_one(path: Path, *, dry_run: bool) -> tuple[int, int]:
     try:
         df.write_ipc(tmp_path, compression="zstd")
 
-        # Round-trip check before overwriting the original.
+        # Round-trip check before overwriting the original.  zstd is
+        # lossless, so we verify the actual values are bit-identical
+        # (a sum-checksum would drift in the last ULP because record
+        # batch layout changes the float summation order).
         check = pl.read_ipc(tmp_path)
         if len(check) != original_rows:
             raise RuntimeError(
                 f"row-count mismatch after rewrite: original={original_rows}, "
                 f"rewritten={len(check)}"
             )
-        if original_checksum is not None:
-            new_checksum = float(check["close"].sum())
-            # Float equality with a tight tolerance — zstd is lossless,
-            # so checksums must match exactly modulo float-sum order.
-            if abs(new_checksum - original_checksum) > 1e-6:
-                raise RuntimeError(
-                    f"close-sum drift: original={original_checksum}, "
-                    f"rewritten={new_checksum}"
-                )
+        if "close" in df.columns and not check["close"].equals(df["close"]):
+            raise RuntimeError(
+                "close column drift after rewrite (values not bit-identical)"
+            )
 
         # Atomic replace.
         os.replace(tmp_path, path)
