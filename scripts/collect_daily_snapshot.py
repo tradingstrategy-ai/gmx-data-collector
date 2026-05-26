@@ -104,7 +104,7 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
-    feather.write_feather(combined, filepath)
+    feather.write_feather(combined, filepath, compression="zstd", compression_level=3)
 
 
 def _expected_last_bar(
