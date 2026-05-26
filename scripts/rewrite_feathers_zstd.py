@@ -154,12 +154,17 @@ def main() -> int:
         logger.error("Not a directory: %s", args.directory)
         return 1
 
-    files = sorted(args.directory.glob(args.pattern))
-    logger.info("Found %d files matching %s", len(files), args.pattern)
+    # Skip macOS AppleDouble resource forks (``._*``) that appear when an
+    # external drive is mounted on macOS.  They are not real feather files.
+    files = sorted(
+        p for p in args.directory.glob(args.pattern) if not p.name.startswith("._")
+    )
+    logger.info("Found %d files matching %s (after ._ filter)", len(files), args.pattern)
 
     total_before = 0
     total_after = 0
     rewritten = 0
+    would_rewrite = 0  # dry-run only — files that *would* be rewritten
     skipped = 0
     failed = 0
 
@@ -168,26 +173,43 @@ def main() -> int:
             before, after = rewrite_one(path, dry_run=args.dry_run)
             total_before += before
             total_after += after
-            if before != after:
-                rewritten += 1
+            if args.dry_run:
+                # In dry-run mode rewrite_one always returns (before, before),
+                # so we tag intent based on whether the file is a candidate.
+                if is_probably_uncompressed(path):
+                    would_rewrite += 1
+                else:
+                    skipped += 1
             else:
-                skipped += 1
+                if before != after:
+                    rewritten += 1
+                else:
+                    skipped += 1
         except Exception as exc:
             logger.error("FAIL %s: %s", path.name, exc)
             failed += 1
 
     saved = total_before - total_after
     pct = (saved / total_before * 100) if total_before else 0
-    logger.info(
-        "Done: rewrote=%d, skipped=%d, failed=%d | %.1f GB -> %.1f GB (saved %.1f GB, %.0f%%)",
-        rewritten,
-        skipped,
-        failed,
-        total_before / 1e9,
-        total_after / 1e9,
-        saved / 1e9,
-        pct,
-    )
+    if args.dry_run:
+        logger.info(
+            "Dry-run: would_rewrite=%d, already_compressed=%d, failed=%d | %.1f GB on disk",
+            would_rewrite,
+            skipped,
+            failed,
+            total_before / 1e9,
+        )
+    else:
+        logger.info(
+            "Done: rewrote=%d, skipped=%d, failed=%d | %.1f GB -> %.1f GB (saved %.1f GB, %.0f%%)",
+            rewritten,
+            skipped,
+            failed,
+            total_before / 1e9,
+            total_after / 1e9,
+            saved / 1e9,
+            pct,
+        )
     return 0 if failed == 0 else 2
 
 
