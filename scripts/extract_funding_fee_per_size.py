@@ -876,7 +876,7 @@ def save_feather_freqtrade(
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        out.write_ipc(filepath)
+        out.write_ipc(filepath, compression="zstd")
         console.print(f"  Feather: [cyan]{len(out):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 

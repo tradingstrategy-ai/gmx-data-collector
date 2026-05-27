@@ -109,7 +109,7 @@ FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b506040516106833803
 def prefetch_block_timestamps(
     rpc_config: str,
     block_numbers: list[int],
-    batch_size: int = 200,
+    batch_size: int = 50,
     timeout: int = 60,
 ) -> dict[int, int]:
     """Pre-fetch timestamps for many blocks via JSON-RPC batch requests.
@@ -117,7 +117,7 @@ def prefetch_block_timestamps(
     Sends groups of ``eth_getBlockByNumber`` calls in a single HTTP request,
     reducing N sequential round-trips to ceil(N / batch_size) round-trips.
     This is the primary speedup for the DataStore phase: timestamps for all
-    ~17,000 sample blocks can be fetched in ~85 HTTP requests instead of 17,000.
+    ~17,000 sample blocks can be fetched in ~340 HTTP requests instead of 17,000.
     Batches are distributed across all configured providers in round-robin order.
 
     :param rpc_config: Space-separated archive node URL(s). ``mev+`` prefixed
@@ -147,8 +147,18 @@ def prefetch_block_timestamps(
             for j, bn in enumerate(chunk)
         ]
         url = call_urls[i % len(call_urls)]
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
+        # Retry with exponential backoff on transient connection errors
+        for attempt in range(5):
+            try:
+                resp = requests.post(url, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                break
+            except Exception as exc:
+                if attempt == 4:
+                    raise
+                delay = min(4 ** attempt, 60)
+                console.print(f"  [yellow]Timestamp batch {i} error (attempt {attempt+1}/5): {exc} — retry in {delay}s[/yellow]")
+                time.sleep(delay)
         for item in resp.json():
             result = item.get("result")
             if result:
@@ -375,14 +385,14 @@ def extract_funding_rates(
         f"  Interval:      {interval_blocks} blocks (~{interval_blocks / BLOCKS_PER_HOUR:.1f}h)"
     )
     console.print(f"  Sample points: {total_samples:,}")
-    ts_batches = (total_samples + 199) // 200
+    ts_batches = (total_samples + 49) // 50
     ds_batches = (total_samples + 129) // 130
     console.print(
         f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total"
     )
 
     # --- Phase 1: batch-fetch all block timestamps upfront ---
-    console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 200...")
+    console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 50...")
     t_ts = time.monotonic()
     block_timestamps = prefetch_block_timestamps(rpc_config, sample_blocks)
     console.print(f"  Timestamps ready in {time.monotonic() - t_ts:.1f}s")

@@ -605,7 +605,7 @@ def merge_symbol(
     unified_path = rates_dir / symbol / f"1h.{ext}"
     unified_path.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "feather":
-        unified.write_ipc(unified_path)
+        unified.write_ipc(unified_path, compression="zstd")
     else:
         unified.write_parquet(unified_path)
 
@@ -758,7 +758,7 @@ def export_feather(
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        result.write_ipc(filepath)
+        result.write_ipc(filepath, compression="zstd")
         exported += 1
         console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
 

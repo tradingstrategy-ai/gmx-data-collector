@@ -137,7 +137,7 @@ def upsert_live_rates_to_feather(
         df = df.sort_values("date").reset_index(drop=True)
         df["date"] = df["date"].dt.as_unit("ns")
 
-        feather.write_feather(df, filepath)
+        feather.write_feather(df, filepath, compression="zstd", compression_level=3)
         updated += 1
 
     return updated
