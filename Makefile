@@ -96,7 +96,7 @@ SKIP_DOWNLOAD    ?=
 # ==============================================================================
 
 .PHONY: help install show-config monitor \
-        refresh-data full-data full-data-nn \
+        refresh-data refresh-data-nn full-data full-data-nn \
         collect-update collect-update-nn collect-candles collect-candles-nn \
         export-freqtrade export-candles export-funding \
         funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
@@ -170,6 +170,10 @@ help:
 refresh-data: collect-update funding-unified-resume extract-all-resume export-candles export-funding
 	@echo ""
 	@echo "Incremental refresh complete: candles + funding + OI + liquidity + isolated FT exports"
+
+refresh-data-nn: collect-update-nn funding-unified-resume extract-all-resume export-candles export-funding
+	@echo ""
+	@echo "Incremental refresh complete (no-nice): candles + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download — collects everything from genesis. Slow but complete.
