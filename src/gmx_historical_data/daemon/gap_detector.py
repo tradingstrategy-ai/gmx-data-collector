@@ -368,16 +368,22 @@ class AdaptiveGapDetector:
 
         # Case 3: Check for data loss
         if our_latest < api_earliest:
-            # DATA LOSS: Our data is older than API's earliest available
+            # DATA LOSS: Our data is older than API's earliest available.
+            # For short timeframes (1min/5min) the GMX API window is only ~5h/34d,
+            # so data loss is expected with daily collection — log at WARNING not CRITICAL.
+            # CEX gap-fill (fill-gaps-cex / refresh-data-cex-nn) can recover these gaps.
             lost_timespan_delta = api_earliest - our_latest
             lost_candles = int(lost_timespan_delta / interval_delta)
             lost_timespan = self._format_timespan(lost_timespan_delta)
 
-            logger.critical(
+            short_tf = timeframe in ("1min", "5min")
+            log_fn = logger.warning if short_tf else logger.critical
+            log_fn(
                 f"DATA LOSS DETECTED: {symbol} {timeframe} - "
                 f"Our latest: {our_latest.isoformat()}, "
                 f"API earliest: {api_earliest.isoformat()}, "
                 f"Lost: ~{lost_candles} candles ({lost_timespan})"
+                + (" [recoverable via CEX fill]" if short_tf else "")
             )
 
             return GapDetectionResult(

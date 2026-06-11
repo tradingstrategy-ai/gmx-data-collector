@@ -96,7 +96,7 @@ SKIP_DOWNLOAD    ?=
 # ==============================================================================
 
 .PHONY: help install show-config monitor \
-        refresh-data refresh-data-nn full-data full-data-nn \
+        refresh-data refresh-data-nn refresh-data-cex-nn full-data full-data-nn \
         collect-update collect-update-nn collect-candles collect-candles-nn \
         export-freqtrade export-candles export-funding \
         funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
@@ -174,6 +174,10 @@ refresh-data: collect-update funding-unified-resume extract-all-resume export-ca
 refresh-data-nn: collect-update-nn funding-unified-resume extract-all-resume export-candles export-funding
 	@echo ""
 	@echo "Incremental refresh complete (no-nice): candles + funding + OI + liquidity + isolated FT exports"
+
+refresh-data-cex-nn: collect-update-nn funding-unified-resume extract-all-resume fill-gaps-cex export-candles export-funding
+	@echo ""
+	@echo "Incremental refresh complete (no-nice + CEX gap-fill): candles + CEX fill + funding + OI + liquidity + isolated FT exports"
 	@echo "Data ready in $(DATA_DIR)"
 
 # Full historical download — collects everything from genesis. Slow but complete.
@@ -213,18 +217,19 @@ endef
 collect-update:
 	$(call COLLECT_CMD,incremental,update,)
 
-# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency 10.
+# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency=$(CONCURRENCY).
+# Override concurrency on the CLI: make collect-update-nn CONCURRENCY=20
 collect-update-nn:
-	@echo "Starting incremental candle collection (no-nice, concurrency 10)..."
+	@echo "Starting incremental candle collection (no-nice, concurrency $(CONCURRENCY))..."
 	@echo "  Output:      $(DATA_DIR)"
-	@echo "  Concurrency: 10"
+	@echo "  Concurrency: $(CONCURRENCY)"
 	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
 	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
 	@echo ""
 	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
 	poetry run python -m gmx_historical_data.cli collect --update \
 		--output-dir "$(DATA_DIR)" \
-		--concurrency 10 \
+		--concurrency $(CONCURRENCY) \
 		$(if $(SYMBOL),--symbol $(SYMBOL),) \
 		$(ARGS)
 
@@ -234,12 +239,13 @@ QUICKSTART ?=
 collect-candles:
 	$(call COLLECT_CMD,full historical,full,$(QUICKSTART))
 
-# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency 10.
+# No-nice variant: no OS-level nice, no --nice auto-tune, concurrency=$(CONCURRENCY).
 # Use this when you want maximum throughput (e.g. dedicated machine / overnight run).
+# Override concurrency on the CLI: make collect-candles-nn CONCURRENCY=20
 collect-candles-nn:
-	@echo "Starting full historical candle collection (no-nice, concurrency 10)..."
+	@echo "Starting full historical candle collection (no-nice, concurrency $(CONCURRENCY))..."
 	@echo "  Output:      $(DATA_DIR)"
-	@echo "  Concurrency: 10"
+	@echo "  Concurrency: $(CONCURRENCY)"
 	$(if $(SYMBOL),@echo "  Symbol:      $(SYMBOL)",)
 	$(if $(QUICKSTART),@echo "  Quickstart:  $(QUICKSTART)",)
 	$(if $(ARGS),@echo "  Extra args:  $(ARGS)",)
@@ -247,7 +253,7 @@ collect-candles-nn:
 	@mkdir -p "$(DATA_DIR)" "$(LOG_DIR)"
 	poetry run python -m gmx_historical_data.cli collect --full \
 		--output-dir "$(DATA_DIR)" \
-		--concurrency 10 \
+		--concurrency $(CONCURRENCY) \
 		$(if $(SYMBOL),--symbol $(SYMBOL),) \
 		$(QUICKSTART) \
 		$(ARGS)

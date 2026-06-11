@@ -214,11 +214,21 @@ class DataCollector:
                 if gap_result.has_data_loss and self.data_loss_handler:
                     event = self.data_loss_handler.handle_gap_result(symbol, timeframe, gap_result)
                     if event:
-                        console.print(
-                            f"  [red bold]DATA LOSS[/red bold] {timeframe}: "
-                            f"~{gap_result.lost_candles_estimate} candles lost "
-                            f"({gap_result.lost_timespan})"
-                        )
+                        short_tf = timeframe in ("1min", "5min")
+                        if short_tf:
+                            # Short-TF loss is expected with daily collection (GMX API
+                            # window: 1min≈5h, 5min≈34d). CEX fill recovers these gaps.
+                            console.print(
+                                f"  [yellow]DATA LOSS[/yellow] {timeframe}: "
+                                f"~{gap_result.lost_candles_estimate} candles "
+                                f"({gap_result.lost_timespan}) — recoverable via CEX fill"
+                            )
+                        else:
+                            console.print(
+                                f"  [red bold]DATA LOSS[/red bold] {timeframe}: "
+                                f"~{gap_result.lost_candles_estimate} candles lost "
+                                f"({gap_result.lost_timespan})"
+                            )
 
             except Exception as e:
                 console.print(f"  [yellow]Warning: Could not check {timeframe}: {e}[/yellow]")
