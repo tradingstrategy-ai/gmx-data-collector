@@ -82,6 +82,13 @@ UNSAFE_OVERWRITE ?=
 # a successful feather export.  Default is to keep sources (was the opposite
 # pre-2026-05-11 and led to data loss).
 DELETE_SOURCE ?=
+# Output format for FreqTrade exports: 'feather' (default) or 'parquet'.
+# FreqTrade reads either via ``--data-format-ohlcv {feather|parquet}``.  Set
+# FORMAT=parquet to write {PAIR}-{tf}-futures.parquet so FreqTrade/CCXT work
+# WITHOUT any feather files (e.g. ``make export-candles FORMAT=parquet``), or
+# use the ``export-candles-parquet`` / ``export-candles-both`` convenience
+# targets below.
+FORMAT ?= feather
 
 # CEX gap-fill knobs (additive, optional)
 GAP_THRESHOLD    ?= 0.20
@@ -98,7 +105,7 @@ SKIP_DOWNLOAD    ?=
 .PHONY: help install show-config monitor \
         refresh-data refresh-data-nn refresh-data-cex-nn full-data full-data-nn \
         collect-update collect-update-nn collect-candles collect-candles-nn \
-        export-freqtrade export-candles export-funding \
+        export-freqtrade export-candles export-candles-parquet export-candles-both export-funding \
         funding-unified funding-unified-nn funding-unified-resume funding-unified-merge \
         funding-feather funding-full \
         oi oi-resume \
@@ -271,21 +278,36 @@ export-freqtrade:
 		$(OVERWRITE) \
 		$(UNSAFE_OVERWRITE)
 
-# Isolated OHLCV export.  Writes only -futures / -mark / -index feathers.
-# Will NOT touch funding feathers.
+# Isolated OHLCV export.  Writes only -futures / -mark / -index files.
+# Will NOT touch funding files.  Output format controlled by FORMAT (default
+# feather); pass FORMAT=parquet to emit FreqTrade-format parquet instead.
 export-candles:
 	@echo "Exporting OHLCV candles to FreqTrade format..."
 	@echo "  Data:       $(DATA_DIR)"
 	@echo "  Output:     $(FEATHER_DIR)"
+	@echo "  Format:     $(FORMAT)"
 	@echo ""
 	@mkdir -p "$(FEATHER_DIR)"
 	$(NICE) poetry run python -m gmx_historical_data.cli export-candles \
 		--data-dir "$(DATA_DIR)" \
 		--output-dir "$(FEATHER_DIR)" \
+		--format $(FORMAT) \
 		$(if $(SYMBOL),--symbol $(SYMBOL),) \
 		$(DELETE_SOURCE) \
 		$(OVERWRITE) \
 		$(UNSAFE_OVERWRITE)
+
+# Convenience: write FreqTrade-format PARQUET ({PAIR}-{tf}-futures.parquet).
+# Use this when you want to skip feather entirely — FreqTrade/CCXT read parquet
+# via ``freqtrade ... --data-format-ohlcv parquet``.
+export-candles-parquet:
+	$(MAKE) export-candles FORMAT=parquet
+
+# Convenience: write BOTH feather and parquet so either --data-format-ohlcv
+# works without re-running collection.
+export-candles-both:
+	$(MAKE) export-candles FORMAT=feather
+	$(MAKE) export-candles FORMAT=parquet
 
 # Isolated funding-rate export.  Writes only -funding_rate feathers.
 # Will NOT touch OHLCV feathers.  Never deletes the funding parquet source.

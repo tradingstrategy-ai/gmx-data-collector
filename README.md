@@ -33,6 +33,81 @@ Daily data collection now ships as **GitHub Releases** instead of the `data/dail
 
 ---
 
+## ⚠️ Data depth: where full history lives, and two residual limits
+
+**Status (2026-06-12, after a full recovery pass.)** All **117 tradeable tokens**
+(`wstETH` excluded — ETH-denominated feed only, not tradeable) have full **1d / 4h**
+history to genesis, and are FreqTrade-readable in **both feather and parquet**
+(`gmx/futures/{PAIR}-{tf}-futures.{feather,parquet}`). Two limitations remain — see
+below.
+
+> **The Freqtrade feather export is NOT broken.** Its history-preservation merge
+> guard (`FreqtradeExporter._write` → `_assert_history_preserved`) is what kept the
+> deep history intact while the *source* candle parquets shrank — that is why the
+> feathers were deeper than the source parquets, not a bug. **Never** run the
+> exporter with `--unsafe-overwrite` against these tokens: it bypasses the guard and
+> would overwrite the deep feathers/parquets with shallow source data, destroying
+> history irrecoverably.
+
+### The two stores (don't confuse them)
+
+| Store | Path | Schema | Role |
+|-------|------|--------|------|
+| Source candles | `candles/arbitrum/{TOKEN}/{tf}.parquet` | `timestamp,…,symbol` | collector output |
+| FreqTrade exports | `gmx/futures/{PAIR}-{tf}-futures.{feather,parquet}` | `date,o,h,l,c,volume` | what FreqTrade reads |
+
+The **FreqTrade exports are the deepest copy** for non-Chainlink tokens — the source
+candles are *not*. Treat `gmx/futures/` as the source of truth for those.
+
+### Limit 1 — non-Chainlink source candle parquets stay shallow
+
+The GMX API only serves a shallow rolling window (`limit=10000`, ~7 days of 1m).
+Deep history needs a backfill source:
+
+- **Chainlink-backed tokens** rebuild full history from Chainlink RPC on a
+  `--force` collect (all timeframes, to genesis). This works — verified.
+- **Non-Chainlink tokens cannot be rebuilt by the collector.**
+  `collect_non_chainlink_markets()` only layers a thin oracle-event pass on top of
+  the GMX window (≈10–11k 1m rows), **not** a genesis backfill. Their deep history
+  exists **only in the feathers** (captured by an earlier, more complete run).
+  So the source `candles/` parquets for these tokens remain shallow by design; the
+  deep data is preserved in `gmx/futures/` (feather + parquet).
+
+### Limit 2 — intraday (1m/5m/15m/1h) truncated for ~47 non-Chainlink tokens
+
+For ~47 non-Chainlink pairs (e.g. `ADA, DOT, BCH, TRX, FIL, INJ, XLM, ICP, SUI`),
+**1d / 4h reach 2022 but 1m/5m/15m/1h only start ~2024-11** (their deep daily came
+from a coarse CEX backfill that never pulled fine-resolution data). Not yet fixed.
+The only fix is the **CEX gap-fill at fine resolution** (`make fill-gaps-cex`,
+Binance/Bybit have deep 1m) followed by a re-export.
+
+### Recovery procedure (what actually works)
+
+```bash
+export JSON_RPC_ARBITRUM=$ARBITRUM_CHAIN_JSON_RPC
+DATA=/Volumes/WD\ Blue\ 1tb/VMs/data/gmx   # external-drive data root
+
+# Chainlink-backed tokens — genesis re-backfill (ignores checkpoints), all timeframes:
+poetry run python -m gmx_historical_data.cli collect --full --force \
+  --symbol ETH,BNB,DOGE --output-dir "$DATA" --concurrency 4
+
+# Non-Chainlink tokens — the collector CANNOT deepen these.  The deep history lives
+# in the feathers, so derive the FreqTrade parquet directly from them instead of a
+# fresh export (a fresh export reads the shallow source candles):
+freqtrade convert-data --datadir user_data/data/gmx --trading-mode futures \
+  --format-from feather --format-to parquet -t 1m 5m 15m 1h 4h 1d
+
+# Then (re)export — the merge guard only ever ADDS, never truncates.  FORMAT=parquet
+# emits FreqTrade-format parquet so FT/CCXT work WITHOUT feather files:
+make export-candles-both DATA_DIR="$DATA" FEATHER_DIR=./user_data/data OVERWRITE=--overwrite
+```
+
+Note: tokens listed on GMX only recently (e.g. `MEGA`, `SPCX`) have no deeper data
+at any source — the GMX window already covers their entire life, so a short history
+for them is complete, not truncated.
+
+---
+
 ## Quick Start
 
 ```bash
