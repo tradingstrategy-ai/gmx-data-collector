@@ -488,7 +488,9 @@ class FreqtradeExporter:
         # Both default and overwrite=True paths run the merge + history guard.
         file_size = path.stat().st_size
         # memory_map=False: polars cannot memory-map zstd-compressed IPC files
-        existing = pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
+        existing = (
+            pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
+        )
 
         # Schema-tolerant alignment.  If the existing feather has columns the
         # incoming dataframe does not (legacy schema with extra source-side
