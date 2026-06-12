@@ -749,7 +749,8 @@ async def async_main(args: argparse.Namespace) -> None:
     with console.status("Fetching token decimals from GMX API..."):
         token_decimals = fetch_token_decimals()
 
-    api_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    raw_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    api_token = raw_token.replace(",", " ").split()[0] if raw_token else None
     if api_token:
         console.print(f"  Using HyperSync API token: [cyan]{api_token[:8]}...[/cyan]")
     else:

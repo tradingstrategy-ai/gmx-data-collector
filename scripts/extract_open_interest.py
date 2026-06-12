@@ -570,7 +570,8 @@ async def create_client(network: str) -> HypersyncClient:
     url = HYPERSYNC_URLS.get(network)
     if not url:
         raise ValueError(f"Unsupported network: {network}")
-    api_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    raw_token = os.environ.get("HYPERSYNC_API_TOKEN")
+    api_token = raw_token.replace(",", " ").split()[0] if raw_token else None
     return HypersyncClient(ClientConfig(url=url, bearer_token=api_token))
 
 
