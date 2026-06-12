@@ -109,7 +109,4 @@ class HyperSyncKeyRotator:
         :param endpoint: HyperSync endpoint URL.
         :return: List of clients, one per key.
         """
-        return [
-            HypersyncClient(ClientConfig(url=endpoint, bearer_token=key))
-            for key in self.keys
-        ]
+        return [HypersyncClient(ClientConfig(url=endpoint, bearer_token=key)) for key in self.keys]

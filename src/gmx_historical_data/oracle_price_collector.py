@@ -113,7 +113,7 @@ async def retry_with_backoff(
     max_delay: float = DEFAULT_MAX_DELAY,
     operation_name: str = "operation",
     key_rotator: Optional["HyperSyncKeyRotator"] = None,
-    on_key_rotated: Optional[Callable] = None,
+    on_key_rotated: Callable | None = None,
 ):
     """Execute async function with progressive backoff retry and key rotation.
 
@@ -318,7 +318,9 @@ class OraclePriceCollector:
         if key_rotator is not None:
             self.clients = key_rotator.get_clients(hypersync_endpoint)
         else:
-            self.clients = [HypersyncClient(ClientConfig(url=hypersync_endpoint, bearer_token=api_token))]
+            self.clients = [
+                HypersyncClient(ClientConfig(url=hypersync_endpoint, bearer_token=api_token))
+            ]
         self.client_index = 0
 
         # Create a Web3 instance with a mock provider that returns Arbitrum chain_id
@@ -326,9 +328,7 @@ class OraclePriceCollector:
         self._web3 = Web3(ArbitrumMockProvider())
 
         if key_rotator:
-            logger.info(
-                f"HyperSync key rotation enabled with {key_rotator.total_keys} API key(s)"
-            )
+            logger.info(f"HyperSync key rotation enabled with {key_rotator.total_keys} API key(s)")
 
     @property
     def client(self) -> HypersyncClient:
@@ -726,6 +726,7 @@ class OraclePriceCollector:
         """
         # Get current block if end_block not specified (using HyperSync, no RPC needed)
         if end_block is None:
+
             def _advance_client_height():
                 self.client_index = (self.client_index + 1) % len(self.clients)
 
