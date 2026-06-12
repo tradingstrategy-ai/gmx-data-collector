@@ -1054,7 +1054,9 @@ class DataCollector:
 
         # Initialize key rotator if multiple keys provided
         key_rotator = None
-        if self.config.hypersync_api_token and " " in self.config.hypersync_api_token:
+        if self.config.hypersync_api_token and (
+            "," in self.config.hypersync_api_token or " " in self.config.hypersync_api_token
+        ):
             key_rotator = HyperSyncKeyRotator(self.config.hypersync_api_token)
             console.print(
                 f"[green]✓[/green] Initialized HyperSync key rotation "

@@ -6,24 +6,26 @@ to handle rate limiting when collecting oracle data.
 
 import logging
 
+from hypersync import ClientConfig, HypersyncClient
+
 logger = logging.getLogger(__name__)
 
 
 class HyperSyncKeyRotator:
     """Rotates between multiple HyperSync API keys to handle rate limits.
 
-    :param api_keys: Space-separated string of API keys
+    :param api_keys: Comma- or space-separated string of API keys (e.g. ``KEY1,KEY2,KEY3``)
     :raises ValueError: If no API keys are provided
     """
 
     def __init__(self, api_keys: str):
         """Initialize the key rotator.
 
-        :param api_keys: Space-separated string of API keys
+        :param api_keys: Comma- or space-separated string of API keys
         :raises ValueError: If no API keys are provided
         """
-        # Parse space-separated keys
-        self.keys = [k.strip() for k in api_keys.split() if k.strip()]
+        # Accept comma- or space-separated keys (normalize commas → spaces first)
+        self.keys = [k for k in api_keys.replace(",", " ").split() if k]
 
         if not self.keys:
             raise ValueError("At least one API key must be provided")
@@ -97,3 +99,17 @@ class HyperSyncKeyRotator:
         """
         self.failed_keys.clear()
         logger.info("Reset all failed API keys")
+
+    def get_clients(self, endpoint: str) -> list[HypersyncClient]:
+        """Build one :class:`HypersyncClient` per parsed key.
+
+        The returned list has the same order as the parsed keys so that
+        ``client_index`` and the rotator's internal ``current_index`` stay aligned.
+
+        :param endpoint: HyperSync endpoint URL.
+        :return: List of clients, one per key.
+        """
+        return [
+            HypersyncClient(ClientConfig(url=endpoint, bearer_token=key))
+            for key in self.keys
+        ]

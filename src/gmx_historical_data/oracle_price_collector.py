@@ -113,6 +113,7 @@ async def retry_with_backoff(
     max_delay: float = DEFAULT_MAX_DELAY,
     operation_name: str = "operation",
     key_rotator: Optional["HyperSyncKeyRotator"] = None,
+    on_key_rotated: Optional[Callable] = None,
 ):
     """Execute async function with progressive backoff retry and key rotation.
 
@@ -125,6 +126,8 @@ async def retry_with_backoff(
     :param max_delay: Maximum delay between retries (seconds, legacy parameter)
     :param operation_name: Name for logging
     :param key_rotator: Optional HyperSyncKeyRotator for API key rotation
+    :param on_key_rotated: Optional zero-arg callback invoked after each key rotation
+        (used to advance the collector's active client index)
     :return: Result from successful call
     :raises: Last exception if all retries fail or all keys exhausted
     """
@@ -154,15 +157,16 @@ async def retry_with_backoff(
             )
 
             if is_rate_limit and key_rotator is not None:
-                # Rate limit detected - try rotating key
                 logger.warning(f"Rate limit detected: {e}")
                 try:
                     next_key = key_rotator.rotate()
-                    logger.info(f"Rotated to next API key: {next_key[:8]}...")
+                    logger.info(f"Rotated to API key index {key_rotator.current_index}")
+                    # Advance the caller's active client to match
+                    if on_key_rotated is not None:
+                        on_key_rotated()
                     # Don't count rate limit as retry, don't sleep, retry immediately
                     continue
                 except RuntimeError as rotate_error:
-                    # All keys exhausted
                     logger.error(f"All API keys exhausted: {rotate_error}")
                     raise rotate_error
 
@@ -300,19 +304,30 @@ class OraclePriceCollector:
         self.retry_max_delay = retry_max_delay
         self.key_rotator = key_rotator
 
-        # Initialize HyperSync client
-        config = ClientConfig(url=hypersync_endpoint, bearer_token=api_token)
-        self.client = HypersyncClient(config)
+        # Build client pool — one client per key so rotation actually switches endpoints.
+        # With no rotator we wrap the single token in a 1-element list for uniform access.
+        if key_rotator is not None:
+            self.clients = key_rotator.get_clients(hypersync_endpoint)
+        else:
+            self.clients = [HypersyncClient(ClientConfig(url=hypersync_endpoint, bearer_token=api_token))]
+        self.client_index = 0
 
         # Create a Web3 instance with a mock provider that returns Arbitrum chain_id
         # This avoids RPC calls while allowing eth_defi decoder to work
         self._web3 = Web3(ArbitrumMockProvider())
 
-        # Log if key rotation is enabled
         if key_rotator:
             logger.info(
-                f"Enhanced error handling enabled with {key_rotator.total_keys} API key(s) for rotation"
+                f"HyperSync key rotation enabled with {key_rotator.total_keys} API key(s)"
             )
+
+    @property
+    def client(self) -> HypersyncClient:
+        """Return the currently active HyperSync client.
+
+        :return: Active :class:`HypersyncClient` for the current key index.
+        """
+        return self.clients[self.client_index]
 
     def _address_to_bytes32(self, address: str) -> str:
         """Convert address to bytes32 format (left-padded with zeros).
@@ -546,6 +561,9 @@ class OraclePriceCollector:
                 flush_callback,
             )
 
+        def _advance_client():
+            self.client_index = (self.client_index + 1) % len(self.clients)
+
         return await retry_with_backoff(
             collect_chunk_operation,
             max_retries=self.max_retries,
@@ -553,6 +571,7 @@ class OraclePriceCollector:
             max_delay=self.retry_max_delay,
             operation_name=f"HyperSync chunk collection (blocks {chunk_start:,}-{chunk_end:,})",
             key_rotator=self.key_rotator,
+            on_key_rotated=_advance_client if self.key_rotator else None,
         )
 
     async def _collect_chunk(
@@ -698,6 +717,9 @@ class OraclePriceCollector:
         """
         # Get current block if end_block not specified (using HyperSync, no RPC needed)
         if end_block is None:
+            def _advance_client_height():
+                self.client_index = (self.client_index + 1) % len(self.clients)
+
             end_block = await retry_with_backoff(
                 self.client.get_height,
                 max_retries=self.max_retries,
@@ -705,6 +727,7 @@ class OraclePriceCollector:
                 max_delay=self.retry_max_delay,
                 operation_name="HyperSync get_height",
                 key_rotator=self.key_rotator,
+                on_key_rotated=_advance_client_height if self.key_rotator else None,
             )
 
         total_blocks = end_block - start_block
