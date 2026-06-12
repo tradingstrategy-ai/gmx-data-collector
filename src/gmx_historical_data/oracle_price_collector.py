@@ -149,26 +149,35 @@ async def retry_with_backoff(
                 f"{operation_name} failed (attempt {attempt + 1}/{max_retries + 1}): {e}"
             )
 
-            # Check if this is a rate limit error
+            # Check if this is a rate limit or auth error that warrants key rotation
             error_msg_lower = str(e).lower()
             is_rate_limit = any(
                 keyword in error_msg_lower
                 for keyword in ["rate limit", "too many requests", "429", "quota"]
             )
+            is_auth_error = any(
+                keyword in error_msg_lower
+                for keyword in ["401", "unauthorized", "authentication failed", "invalid token"]
+            )
 
-            if is_rate_limit and key_rotator is not None:
-                logger.warning(f"Rate limit detected: {e}")
+            if (is_rate_limit or is_auth_error) and key_rotator is not None:
+                label = "Rate limit" if is_rate_limit else "Auth error (401)"
+                logger.warning(f"{label} detected, rotating key: {e}")
                 try:
-                    next_key = key_rotator.rotate()
+                    key_rotator.rotate()
                     logger.info(f"Rotated to API key index {key_rotator.current_index}")
-                    # Advance the caller's active client to match
                     if on_key_rotated is not None:
                         on_key_rotated()
-                    # Don't count rate limit as retry, don't sleep, retry immediately
+                    # Don't count as retry attempt, retry immediately
                     continue
                 except RuntimeError as rotate_error:
                     logger.error(f"All API keys exhausted: {rotate_error}")
                     raise rotate_error
+
+            if is_auth_error and key_rotator is None:
+                # 401 with no rotator — retrying the same key won't help
+                logger.error(f"Auth error with no key rotator, failing fast: {e}")
+                raise
 
             # Not a rate limit error, or no key rotator - use normal retry logic
             if attempt < max_retries:
@@ -721,7 +730,7 @@ class OraclePriceCollector:
                 self.client_index = (self.client_index + 1) % len(self.clients)
 
             end_block = await retry_with_backoff(
-                self.client.get_height,
+                lambda: self.client.get_height(),
                 max_retries=self.max_retries,
                 base_delay=self.retry_base_delay,
                 max_delay=self.retry_max_delay,
