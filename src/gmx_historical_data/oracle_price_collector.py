@@ -165,7 +165,7 @@ async def retry_with_backoff(
                 logger.warning(f"{label} detected, rotating key: {e}")
                 try:
                     key_rotator.rotate()
-                    logger.info(f"Rotated to API key index {key_rotator.current_index}")
+                    logger.info(f"Rotated to API key: {key_rotator.current_key[:8]}...")
                     if on_key_rotated is not None:
                         on_key_rotated()
                     # Don't count as retry attempt, retry immediately
