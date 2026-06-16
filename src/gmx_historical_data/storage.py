@@ -5,6 +5,7 @@ and fast querying.
 """
 
 import logging
+import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -170,12 +171,18 @@ class ParquetStorage:
         events: list[AnswerUpdatedEvent],
         symbol: str,
         partition_id: int = 0,
+        overwrite: bool = False,
     ) -> Path:
         """Save raw events to partitioned Parquet file.
 
         :param events: List of AnswerUpdated events
         :param symbol: Token symbol (e.g., 'ETH')
         :param partition_id: Partition ID for file organization
+        :param overwrite: If True, remove all existing ``partition=*`` directories
+            for the symbol before writing, so a forced/full re-collection replaces
+            the entire raw store. Required because ``read_raw_events`` reads every
+            partition: overwriting only ``partition=0`` would otherwise leave stale
+            partitions (created by ``append_raw_events``) to be resampled.
         :return: Path to saved Parquet file
         """
         if not events:
@@ -183,6 +190,14 @@ class ParquetStorage:
 
         # Create symbol directory
         symbol_dir = self._ensure_dir(self.raw_dir / symbol)
+
+        # Forced/full re-collection: drop every existing partition first so no
+        # stale appended partitions survive into read_raw_events().
+        if overwrite:
+            for old_partition in symbol_dir.glob("partition=*"):
+                if old_partition.is_dir():
+                    shutil.rmtree(old_partition)
+
         partition_dir = self._ensure_dir(symbol_dir / f"partition={partition_id}")
 
         # Convert events to DataFrame

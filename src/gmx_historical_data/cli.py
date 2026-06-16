@@ -548,10 +548,14 @@ class DataCollector:
                         )
 
                         # Save raw events. Under ``force`` (or full mode) the
-                        # stored events are overwritten via save_raw_events;
-                        # otherwise new events are appended.
+                        # entire raw store is replaced (overwrite=True drops all
+                        # existing partitions first), so no stale appended
+                        # partitions survive into read_raw_events(); otherwise new
+                        # events are appended as a new partition.
                         if full or force:
-                            self.storage.save_raw_events(events, symbol, partition_id=0)
+                            self.storage.save_raw_events(
+                                events, symbol, partition_id=0, overwrite=True
+                            )
                         else:
                             self.storage.append_raw_events(events, symbol)
 
@@ -1050,16 +1054,21 @@ class DataCollector:
         end_block: int | None = None,
         symbols: list[str] | None = None,
         concurrency: int = 1,
+        force: bool = False,
     ) -> None:
         """Collect data for non-Chainlink markets via GMX API + OraclePriceUpdate events.
 
         Uses GMX API for recent data (~6 months) and backfills historical data
-        with OraclePriceUpdate events from GMX EventEmitter.
+        with OraclePriceUpdate events from GMX EventEmitter. By default the per-symbol
+        coverage analysis fetches only the missing block range and appends/merges.
 
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
         :param symbols: List of specific symbols to collect (None = all non-Chainlink)
         :param concurrency: Number of symbols to process concurrently in Step 2 (default: 1)
+        :param force: If True, ignore existing coverage and re-collect from genesis,
+            overwriting stored candles instead of merging. Without it, only the
+            missing slice is fetched and appended.
         """
         if concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -1178,22 +1187,12 @@ class DataCollector:
                 f"[green]✓[/green] Found [cyan]{len(symbols_to_collect)}[/cyan] non-Chainlink markets"
             )
 
-        # Skip already-checkpointed symbols for resume
-        if symbols_to_collect:
-            pending = []
-            skipped = []
-            for s in symbols_to_collect:
-                cp = self.checkpoint_mgr.load_checkpoint(s)
-                if cp and cp.total_events > 0:
-                    skipped.append(s)
-                else:
-                    pending.append(s)
-            if skipped:
-                console.print(
-                    f"  [green]✓[/green] Skipping [cyan]{len(skipped)}[/cyan] "
-                    f"already-collected non-Chainlink symbols"
-                )
-            symbols_to_collect = pending
+        # NOTE: no wholesale checkpoint skip here. The per-symbol coverage
+        # analysis below (analyze_symbol_coverage + get_missing_block_range)
+        # is the real gate: it fetches only the missing block range and reports
+        # "data already complete" when there is nothing to do. A coarse
+        # checkpoint skip on top would drop symbols *before* that check and leave
+        # them stale, so it has been removed. --force bypasses the coverage check.
 
         # Get token decimals for price conversion
         try:
@@ -1256,40 +1255,48 @@ class DataCollector:
             async with sem:
                 console.print(f"\n[cyan]{symbol}[/cyan]")
 
-                # Analyze existing coverage
-                console.print("  [dim]Analyzing existing data coverage...[/dim]")
-                coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
-
-                if coverage.has_data:
+                if force:
+                    # --force: ignore existing coverage and re-collect the full
+                    # history from genesis (saves below overwrite the candles).
                     console.print(
-                        f"  [green]✓[/green] Found existing data covering "
-                        f"{len(coverage.timeframe_coverage)} timeframe(s)"
+                        "  [yellow]![/yellow] --force: re-collecting from genesis (overwrite)"
                     )
-                    for tf, tf_cov in coverage.timeframe_coverage.items():
-                        earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
-                        latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
-                        console.print(
-                            f"    {tf}: {tf_cov.candle_count:,} candles "
-                            f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
-                        )
+                    symbol_start, symbol_end = default_start, end_block
                 else:
-                    console.print(
-                        "  [yellow]○[/yellow] No existing data - full historical collection"
+                    # Analyze existing coverage
+                    console.print("  [dim]Analyzing existing data coverage...[/dim]")
+                    coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
+
+                    if coverage.has_data:
+                        console.print(
+                            f"  [green]✓[/green] Found existing data covering "
+                            f"{len(coverage.timeframe_coverage)} timeframe(s)"
+                        )
+                        for tf, tf_cov in coverage.timeframe_coverage.items():
+                            earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
+                            latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
+                            console.print(
+                                f"    {tf}: {tf_cov.candle_count:,} candles "
+                                f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
+                            )
+                    else:
+                        console.print(
+                            "  [yellow]○[/yellow] No existing data - full historical collection"
+                        )
+
+                    # Calculate missing block range
+                    symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
+                        coverage,
+                        block_cache,
+                        genesis_block=default_start,
+                        safety_margin=1000,  # 1000 blocks overlap for safety
                     )
 
-                # Calculate missing block range
-                symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
-                    coverage,
-                    block_cache,
-                    genesis_block=default_start,
-                    safety_margin=1000,  # 1000 blocks overlap for safety
-                )
-
-                if symbol_start is None and symbol_end is None:
-                    console.print(
-                        "  [green]✓[/green] Data already complete - no oracle events needed"
-                    )
-                    return symbol, []
+                    if symbol_start is None and symbol_end is None:
+                        console.print(
+                            "  [green]✓[/green] Data already complete - no oracle events needed"
+                        )
+                        return symbol, []
 
                 # Display range to fetch
                 if symbol_end is None:
@@ -1401,7 +1408,8 @@ class DataCollector:
                         timeframe,
                         oracle_df,
                         gmx_df,
-                        merge_with_existing=True,
+                        merge_with_existing=not force,
+                        force=force,
                     )
                     if count > 0:
                         sources = []
@@ -1830,6 +1838,7 @@ def _cli_impl(
                         end_block=end_block,
                         symbols=non_chainlink_symbols,
                         concurrency=concurrency,
+                        force=force,
                     )
                 )
             elif non_chainlink_symbols and chainlink_only:
@@ -1857,6 +1866,7 @@ def _cli_impl(
                         start_block=start_block,
                         end_block=end_block,
                         concurrency=concurrency,
+                        force=force,
                     )
                 )
     except KeyboardInterrupt:
