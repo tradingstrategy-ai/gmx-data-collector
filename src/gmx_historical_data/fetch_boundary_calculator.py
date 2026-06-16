@@ -216,11 +216,15 @@ class FetchBoundaryCalculator:
 
                 # Only backfill if we have GMX data but no older Chainlink data
                 chainlink_needed = False
+                chainlink_start = None
                 chainlink_end = None
                 if chainlink_available and gmx_earliest and our_earliest:
                     if our_earliest > gmx_earliest:
-                        # We need historical data before our storage
+                        # We need historical data before our storage. Bound the
+                        # start to the gap analyzer's feed floor (not None /
+                        # genesis) so we only re-fetch the missing older slice.
                         chainlink_needed = True
+                        chainlink_start = self.gap_analyzer.feed_floor_timestamp
                         chainlink_end = int(our_earliest.timestamp()) - 1
 
                 return FetchBoundaries(
@@ -228,7 +232,7 @@ class FetchBoundaryCalculator:
                     gmx_api_start=gmx_start,
                     gmx_api_end=gmx_end,
                     chainlink_needed=chainlink_needed,
-                    chainlink_start_timestamp=None,  # Fetch all available
+                    chainlink_start_timestamp=chainlink_start,  # Bounded feed floor
                     chainlink_end_timestamp=chainlink_end,
                     oracle_needed=False,  # Incremental mode doesn't use oracle events
                     oracle_start_block=None,
@@ -245,7 +249,11 @@ class FetchBoundaryCalculator:
                     gmx_api_start=gap_result.api_earliest,
                     gmx_api_end=now,
                     chainlink_needed=chainlink_available,
-                    chainlink_start_timestamp=None,
+                    chainlink_start_timestamp=(
+                        # Bound the backfill start to the feed floor (not genesis)
+                        # whenever a backfill is actually requested.
+                        self.gap_analyzer.feed_floor_timestamp if chainlink_available else None
+                    ),
                     chainlink_end_timestamp=(
                         int(gap_result.api_earliest.timestamp()) - 1
                         if gap_result.api_earliest
@@ -258,9 +266,43 @@ class FetchBoundaryCalculator:
                 )
 
             else:  # NO_EXISTING_DATA or API_UNAVAILABLE
-                # Fall back to full collection
-                return self._calculate_full_boundaries(
-                    symbol, timeframe, chainlink_available, gmx_earliest
+                # Only fall back to full (genesis) collection when storage truly
+                # has no rows for this symbol. A symbol that DOES hold candles
+                # must not be re-walked from genesis just because the adaptive
+                # detector mis-reported NO_EXISTING_DATA / API_UNAVAILABLE.
+                existing_df = self.storage.read_candles(timeframe, symbol)
+                if existing_df.empty:
+                    return self._calculate_full_boundaries(
+                        symbol, timeframe, chainlink_available, gmx_earliest
+                    )
+
+                # We have stored data: treat as incremental. Bound any Chainlink
+                # backfill to the feed floor and only request it when GMX has
+                # older history than we store.
+                now = datetime.now(UTC)
+                our_earliest = existing_df["timestamp"].min()
+                if our_earliest.tzinfo is None:
+                    our_earliest = our_earliest.replace(tzinfo=UTC)
+
+                chainlink_needed = False
+                chainlink_start = None
+                chainlink_end = None
+                if chainlink_available and gmx_earliest and our_earliest > gmx_earliest:
+                    chainlink_needed = True
+                    chainlink_start = self.gap_analyzer.feed_floor_timestamp
+                    chainlink_end = int(our_earliest.timestamp()) - 1
+
+                return FetchBoundaries(
+                    gmx_api_needed=True,
+                    gmx_api_start=None,  # Fetch full available GMX window
+                    gmx_api_end=now,
+                    chainlink_needed=chainlink_needed,
+                    chainlink_start_timestamp=chainlink_start,
+                    chainlink_end_timestamp=chainlink_end,
+                    oracle_needed=False,
+                    oracle_start_block=None,
+                    oracle_end_block=None,
+                    mode=FetchMode.INCREMENTAL,
                 )
 
         # Fallback if no adaptive detector - use full collection
