@@ -15,6 +15,25 @@ Collect historical price data for all 118 GMX V2 tokens with smart incremental u
 
 ## Changelog
 
+### 2026-06-16 — incremental updates actually update (append by default)
+
+`collect --update` previously skipped any symbol that had a checkpoint *wholesale*
+(in three separate code paths), so once a token was collected it was never
+refreshed again — "smart incremental" silently did nothing on the second run, and
+the only way to update was `--force`, which re-walked each Chainlink feed from
+genesis (hours). Fixed:
+
+- **Append by default.** In `--update` mode every symbol now flows through the gap
+  detector, which checks existing coverage and fetches **only the missing slice**
+  (recent gap via GMX API; older history via Chainlink/oracle only when genuinely
+  missing), then merges/appends. No more genesis re-walks. Verified: a current
+  symbol fetches ~0 rounds; `--symbol BTC` finished in ~37s with full history
+  preserved.
+- **`--force` = rewrite.** `--force` re-fetches from genesis **and** overwrites
+  stored files (`overwrite=True`), bypassing the coverage check and the
+  checkpoint skip. Without it, writes always append.
+- The wholesale checkpoint skip now applies only to `--full`-mode resume.
+
 ### 2026-04-27 — GitHub Releases migration
 
 Daily data collection now ships as **GitHub Releases** instead of the `data/daily-collection` git branch.
