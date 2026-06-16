@@ -305,6 +305,7 @@ class DataCollector:
         timeframe: str,
         *dataframes: pd.DataFrame | None,
         merge_with_existing: bool = False,
+        force: bool = False,
     ) -> int:
         """Combine, deduplicate, and save candle DataFrames for one timeframe.
 
@@ -312,7 +313,11 @@ class DataCollector:
         :param timeframe: Timeframe string (e.g., '1h').
         :param dataframes: One or more DataFrames to combine (None values ignored).
         :param merge_with_existing: If True, load existing candles from storage
-            and merge with them (for incremental mode).
+            and merge with them (for incremental mode). Ignored when ``force``
+            is set.
+        :param force: If True, do not load/merge existing candles and overwrite
+            the stored file (``save_candles(overwrite=True)``). Intentionally
+            bypasses the merge/history-preservation path.
         :returns: Number of candles saved, or 0 if nothing to save.
         """
         # Collect non-empty DataFrames
@@ -320,8 +325,9 @@ class DataCollector:
         if not dfs:
             return 0
 
-        # Merge with existing storage if incremental
-        if merge_with_existing:
+        # Merge with existing storage if incremental (never under force, which
+        # intentionally re-writes the file from the freshly fetched data).
+        if merge_with_existing and not force:
             existing = self.storage.read_candles(timeframe, symbol)
             if not existing.empty:
                 dfs = [existing, *dfs]
@@ -338,7 +344,7 @@ class DataCollector:
         combined = combined.unique(subset=["timestamp"], keep="last", maintain_order=False)
         combined = combined.sort("timestamp")
 
-        self.storage.save_candles(combined.to_pandas(), timeframe, symbol)
+        self.storage.save_candles(combined.to_pandas(), timeframe, symbol, overwrite=force)
         count = len(combined)
         del combined
         gc.collect()
@@ -380,11 +386,14 @@ class DataCollector:
         self,
         symbol: str,
         full: bool = False,
+        force: bool = False,
     ) -> None:
         """Collect data for a single symbol using GMX-first approach.
 
         :param symbol: Token symbol (e.g., 'ETH')
         :param full: If True, collect from genesis; if False, resume from checkpoint
+        :param force: If True, re-fetch from genesis (full boundaries) and
+            overwrite stored files instead of merging/appending.
         """
         console.print()
         console.print(
@@ -537,8 +546,10 @@ class DataCollector:
                             f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink rounds via RPC"
                         )
 
-                        # Save raw events
-                        if full:
+                        # Save raw events. Under ``force`` (or full mode) the
+                        # stored events are overwritten via save_raw_events;
+                        # otherwise new events are appended.
+                        if full or force:
                             self.storage.save_raw_events(events, symbol, partition_id=0)
                         else:
                             self.storage.append_raw_events(events, symbol)
@@ -629,6 +640,7 @@ class DataCollector:
                 timeframe,
                 merged_df,
                 merge_with_existing=is_incremental,
+                force=force,
             )
 
             if count > 0:
@@ -969,7 +981,7 @@ class DataCollector:
                 # Create tasks for parallel execution
                 tasks = []
                 for symbol in batch:
-                    tasks.append(self.collect_symbol(symbol, full=full))
+                    tasks.append(self.collect_symbol(symbol, full=full, force=force))
 
                 # Execute batch in parallel, capturing exceptions
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1768,7 +1780,7 @@ def _cli_impl(
                             f"({checkpoint.total_events:,} candles) — skipping"
                         )
                         continue
-                asyncio.run(collector.collect_symbol(sym, full=full))
+                asyncio.run(collector.collect_symbol(sym, full=full, force=force))
 
             # Collect non-Chainlink symbols (if not --chainlink-only)
             if non_chainlink_symbols and not chainlink_only:
