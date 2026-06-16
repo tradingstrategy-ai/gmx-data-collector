@@ -5,17 +5,24 @@ Behaviours pinned here:
 1. ``DataCollector._merge_and_save_candles`` writes with ``overwrite=True`` when
    ``force`` is set (re-write path), and merges (``overwrite`` defaulting False)
    otherwise.
+2. ``FetchBoundaryCalculator.calculate_boundaries`` short-circuits to FULL
+   (genesis, ``chainlink_start_timestamp is None``) when ``force`` is set, even
+   for a symbol that already has stored candles.
 
-Small fakes stub storage so no real RPC or disk access is required. The
-collector is built with ``object.__new__`` to bypass the heavy ``__init__``
-(RPC providers, Web3, HyperSync).
+Small fakes stub storage / the adaptive detector so no real RPC or disk access
+is required. The collector is built with ``object.__new__`` to bypass the heavy
+``__init__`` (RPC providers, Web3, HyperSync).
 """
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pandas as pd
 
 from gmx_historical_data.cli import DataCollector
+from gmx_historical_data.config import FetchMode
+from gmx_historical_data.daemon.gap_detector import GapDetectionResult, GapStatus
+from gmx_historical_data.fetch_boundary_calculator import FetchBoundaryCalculator
+from gmx_historical_data.gap_analyzer import DataGapAnalyzer
 
 
 class _RecordingStorage:
@@ -118,3 +125,75 @@ def test_default_passes_overwrite_false():
 
     assert len(storage.save_candles_calls) == 1
     assert storage.save_candles_calls[0]["overwrite"] is False
+
+
+class _FakeStorage:
+    """Storage stub returning a fixed candles DataFrame (boundary tests).
+
+    :param existing_df: DataFrame returned by :meth:`read_candles`.
+    """
+
+    def __init__(self, existing_df: pd.DataFrame) -> None:
+        self._existing_df = existing_df
+
+    def read_candles(self, timeframe: str, symbol: str) -> pd.DataFrame:
+        """Return the canned existing candles DataFrame.
+
+        :param timeframe: Ignored.
+        :param symbol: Ignored.
+        :return: The DataFrame provided at construction.
+        """
+        return self._existing_df
+
+
+class _FakeGapDetector:
+    """Adaptive gap detector stub returning a fixed :class:`GapDetectionResult`.
+
+    :param result: Result returned by :meth:`detect_gap_adaptive`.
+    """
+
+    def __init__(self, result: GapDetectionResult) -> None:
+        self._result = result
+
+    def detect_gap_adaptive(self, symbol: str, timeframe: str) -> GapDetectionResult:
+        """Return the canned gap-detection result.
+
+        :param symbol: Ignored.
+        :param timeframe: Ignored.
+        :return: The fixed result provided at construction.
+        """
+        return self._result
+
+
+def test_force_uses_full_boundaries_even_with_existing_data():
+    """``force=True`` -> FULL (genesis) boundaries despite stored candles.
+
+    A symbol with stored data and a NORMAL_GAP would normally be INCREMENTAL.
+    Under ``force`` the calculator must short-circuit to full collection:
+    FULL mode with ``chainlink_start_timestamp is None`` (genesis re-walk).
+    """
+    existing = _candles_df("2026-01-01", 100)
+    gmx_earliest = datetime(2025, 6, 1, tzinfo=UTC)
+
+    result = GapDetectionResult(
+        status=GapStatus.NORMAL_GAP,
+        fetch_start=datetime(2026, 1, 5, tzinfo=UTC),
+        fetch_end=datetime(2026, 1, 6, tzinfo=UTC),
+    )
+    calc = FetchBoundaryCalculator(
+        storage=_FakeStorage(existing),
+        adaptive_gap_detector=_FakeGapDetector(result),
+        gap_analyzer=DataGapAnalyzer(),
+    )
+
+    b = calc.calculate_boundaries(
+        symbol="ETH",
+        timeframe="1h",
+        mode=FetchMode.INCREMENTAL,
+        chainlink_available=True,
+        gmx_earliest=gmx_earliest,
+        force=True,
+    )
+
+    assert b.mode == FetchMode.FULL
+    assert b.chainlink_start_timestamp is None

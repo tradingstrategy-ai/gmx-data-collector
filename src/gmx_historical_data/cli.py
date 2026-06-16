@@ -443,6 +443,7 @@ class DataCollector:
                     mode=fetch_mode,
                     chainlink_available=chainlink_available,
                     gmx_earliest=None,  # Will be determined from GMX API response
+                    force=force,
                 )
                 fetch_boundaries_by_tf[tf] = boundaries
 

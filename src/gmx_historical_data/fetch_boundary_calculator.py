@@ -85,6 +85,7 @@ class FetchBoundaryCalculator:
         mode: FetchMode,
         chainlink_available: bool,
         gmx_earliest: datetime | None = None,
+        force: bool = False,
     ) -> FetchBoundaries:
         """Calculate fetch boundaries based on mode and existing data.
 
@@ -93,9 +94,12 @@ class FetchBoundaryCalculator:
         :param mode: FULL or INCREMENTAL
         :param chainlink_available: Whether Chainlink feed exists
         :param gmx_earliest: Earliest timestamp from GMX API query (optional)
+        :param force: If True, short-circuit to full (genesis) boundaries
+            regardless of stored data or requested mode. Used by ``--force`` to
+            re-fetch everything from genesis.
         :return: FetchBoundaries with all source ranges
         """
-        if mode == FetchMode.FULL:
+        if force or mode == FetchMode.FULL:
             return self._calculate_full_boundaries(
                 symbol, timeframe, chainlink_available, gmx_earliest
             )
