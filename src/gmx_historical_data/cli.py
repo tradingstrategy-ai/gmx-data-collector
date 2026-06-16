@@ -577,7 +577,7 @@ class DataCollector:
                             "[cyan]  Falling back to oracle events for historical data...[/cyan]"
                         )
                         try:
-                            await self._collect_symbol_via_oracle_fallback(symbol)
+                            await self._collect_symbol_via_oracle_fallback(symbol, force=force)
                             # Read back from storage into chainlink_candles
                             # so the combining step can merge historical + GMX data
                             for tf in TIMEFRAMES:
@@ -601,20 +601,38 @@ class DataCollector:
                 )
                 console.print("[dim]This symbol requires oracle events, which need HyperSync[/dim]")
             else:
-                console.print("\n[bold]Backfilling with oracle events...[/bold]")
-                try:
-                    await self._collect_symbol_via_oracle_fallback(symbol)
-                    # Read back from storage into chainlink_candles
-                    # so the combining step can merge historical + GMX data
-                    for tf in TIMEFRAMES:
-                        stored_df = self.storage.read_candles(tf, symbol)
-                        if not stored_df.empty:
-                            chainlink_candles[tf] = stored_df
-                            console.print(
-                                f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
-                            )
-                except Exception as fallback_e:
-                    console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
+                # Gate the oracle backfill exactly like the Chainlink one: only
+                # fetch older history when it is genuinely missing (no stored data,
+                # or our earliest stored candle is newer than the GMX window start),
+                # or when forced. Otherwise we would re-walk oracle events we
+                # already have. --force re-backfills from genesis and overwrites.
+                existing_1h = self.storage.read_candles("1h", symbol)
+                gmx_1h = gmx_candles.get("1h")
+                _, hole_end = self.gap_analyzer._calculate_incremental_gap(
+                    gmx_1h if gmx_1h is not None else pd.DataFrame(),
+                    existing_1h if not existing_1h.empty else None,
+                )
+                oracle_needed = force or existing_1h.empty or hole_end is not None
+
+                if not oracle_needed:
+                    console.print(
+                        "\n[green]✓[/green] Oracle backfill not needed - data is complete"
+                    )
+                else:
+                    console.print("\n[bold]Backfilling with oracle events...[/bold]")
+                    try:
+                        await self._collect_symbol_via_oracle_fallback(symbol, force=force)
+                        # Read back from storage into chainlink_candles
+                        # so the combining step can merge historical + GMX data
+                        for tf in TIMEFRAMES:
+                            stored_df = self.storage.read_candles(tf, symbol)
+                            if not stored_df.empty:
+                                chainlink_candles[tf] = stored_df
+                                console.print(
+                                    f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
+                                )
+                    except Exception as fallback_e:
+                        console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
 
         # Step 4: Merge and save (incremental mode merges with existing data)
         console.print("\n[bold]Saving candles...[/bold]")
@@ -668,14 +686,17 @@ class DataCollector:
         symbol: str,
         start_block: int | None = None,
         end_block: int | None = None,
+        force: bool = False,
     ) -> None:
         """Fallback collection for a single symbol via oracle events.
 
-        Used when GMX API or Chainlink collection fails.
+        Used when GMX API or Chainlink collection fails, and for the historical
+        backfill of non-Chainlink symbols.
 
         :param symbol: Token symbol
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
+        :param force: If True, overwrite stored candles instead of merging/appending
         """
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.oracle_event_aggregator import (
@@ -749,8 +770,14 @@ class DataCollector:
                 if ohlcv.empty:
                     continue
 
-                # Merge with existing data and save
-                self._merge_and_save_candles(symbol, timeframe, ohlcv, merge_with_existing=True)
+                # Append (merge) by default; --force overwrites stored history.
+                self._merge_and_save_candles(
+                    symbol,
+                    timeframe,
+                    ohlcv,
+                    merge_with_existing=not force,
+                    force=force,
+                )
                 console.print(
                     f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles via oracle fallback"
                 )
