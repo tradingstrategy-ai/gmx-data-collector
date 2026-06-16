@@ -305,6 +305,7 @@ class DataCollector:
         timeframe: str,
         *dataframes: pd.DataFrame | None,
         merge_with_existing: bool = False,
+        force: bool = False,
     ) -> int:
         """Combine, deduplicate, and save candle DataFrames for one timeframe.
 
@@ -312,7 +313,11 @@ class DataCollector:
         :param timeframe: Timeframe string (e.g., '1h').
         :param dataframes: One or more DataFrames to combine (None values ignored).
         :param merge_with_existing: If True, load existing candles from storage
-            and merge with them (for incremental mode).
+            and merge with them (for incremental mode). Ignored when ``force``
+            is set.
+        :param force: If True, do not load/merge existing candles and overwrite
+            the stored file (``save_candles(overwrite=True)``). Intentionally
+            bypasses the merge/history-preservation path.
         :returns: Number of candles saved, or 0 if nothing to save.
         """
         # Collect non-empty DataFrames
@@ -320,8 +325,9 @@ class DataCollector:
         if not dfs:
             return 0
 
-        # Merge with existing storage if incremental
-        if merge_with_existing:
+        # Merge with existing storage if incremental (never under force, which
+        # intentionally re-writes the file from the freshly fetched data).
+        if merge_with_existing and not force:
             existing = self.storage.read_candles(timeframe, symbol)
             if not existing.empty:
                 dfs = [existing, *dfs]
@@ -338,7 +344,7 @@ class DataCollector:
         combined = combined.unique(subset=["timestamp"], keep="last", maintain_order=False)
         combined = combined.sort("timestamp")
 
-        self.storage.save_candles(combined.to_pandas(), timeframe, symbol)
+        self.storage.save_candles(combined.to_pandas(), timeframe, symbol, overwrite=force)
         count = len(combined)
         del combined
         gc.collect()
@@ -380,11 +386,14 @@ class DataCollector:
         self,
         symbol: str,
         full: bool = False,
+        force: bool = False,
     ) -> None:
         """Collect data for a single symbol using GMX-first approach.
 
         :param symbol: Token symbol (e.g., 'ETH')
         :param full: If True, collect from genesis; if False, resume from checkpoint
+        :param force: If True, re-fetch from genesis (full boundaries) and
+            overwrite stored files instead of merging/appending.
         """
         console.print()
         console.print(
@@ -434,6 +443,7 @@ class DataCollector:
                     mode=fetch_mode,
                     chainlink_available=chainlink_available,
                     gmx_earliest=None,  # Will be determined from GMX API response
+                    force=force,
                 )
                 fetch_boundaries_by_tf[tf] = boundaries
 
@@ -537,9 +547,15 @@ class DataCollector:
                             f"  [green]✓[/green] Collected [cyan]{len(events):,}[/cyan] Chainlink rounds via RPC"
                         )
 
-                        # Save raw events
-                        if full:
-                            self.storage.save_raw_events(events, symbol, partition_id=0)
+                        # Save raw events. Under ``force`` (or full mode) the
+                        # entire raw store is replaced (overwrite=True drops all
+                        # existing partitions first), so no stale appended
+                        # partitions survive into read_raw_events(); otherwise new
+                        # events are appended as a new partition.
+                        if full or force:
+                            self.storage.save_raw_events(
+                                events, symbol, partition_id=0, overwrite=True
+                            )
                         else:
                             self.storage.append_raw_events(events, symbol)
 
@@ -565,7 +581,7 @@ class DataCollector:
                             "[cyan]  Falling back to oracle events for historical data...[/cyan]"
                         )
                         try:
-                            await self._collect_symbol_via_oracle_fallback(symbol)
+                            await self._collect_symbol_via_oracle_fallback(symbol, force=force)
                             # Read back from storage into chainlink_candles
                             # so the combining step can merge historical + GMX data
                             for tf in TIMEFRAMES:
@@ -589,20 +605,38 @@ class DataCollector:
                 )
                 console.print("[dim]This symbol requires oracle events, which need HyperSync[/dim]")
             else:
-                console.print("\n[bold]Backfilling with oracle events...[/bold]")
-                try:
-                    await self._collect_symbol_via_oracle_fallback(symbol)
-                    # Read back from storage into chainlink_candles
-                    # so the combining step can merge historical + GMX data
-                    for tf in TIMEFRAMES:
-                        stored_df = self.storage.read_candles(tf, symbol)
-                        if not stored_df.empty:
-                            chainlink_candles[tf] = stored_df
-                            console.print(
-                                f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
-                            )
-                except Exception as fallback_e:
-                    console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
+                # Gate the oracle backfill exactly like the Chainlink one: only
+                # fetch older history when it is genuinely missing (no stored data,
+                # or our earliest stored candle is newer than the GMX window start),
+                # or when forced. Otherwise we would re-walk oracle events we
+                # already have. --force re-backfills from genesis and overwrites.
+                existing_1h = self.storage.read_candles("1h", symbol)
+                gmx_1h = gmx_candles.get("1h")
+                _, hole_end = self.gap_analyzer._calculate_incremental_gap(
+                    gmx_1h if gmx_1h is not None else pd.DataFrame(),
+                    existing_1h if not existing_1h.empty else None,
+                )
+                oracle_needed = force or existing_1h.empty or hole_end is not None
+
+                if not oracle_needed:
+                    console.print(
+                        "\n[green]✓[/green] Oracle backfill not needed - data is complete"
+                    )
+                else:
+                    console.print("\n[bold]Backfilling with oracle events...[/bold]")
+                    try:
+                        await self._collect_symbol_via_oracle_fallback(symbol, force=force)
+                        # Read back from storage into chainlink_candles
+                        # so the combining step can merge historical + GMX data
+                        for tf in TIMEFRAMES:
+                            stored_df = self.storage.read_candles(tf, symbol)
+                            if not stored_df.empty:
+                                chainlink_candles[tf] = stored_df
+                                console.print(
+                                    f"  [green]✓[/green] {tf}: Loaded {len(stored_df):,} historical candles from storage"
+                                )
+                    except Exception as fallback_e:
+                        console.print(f"[yellow]  Oracle fallback failed: {fallback_e}[/yellow]")
 
         # Step 4: Merge and save (incremental mode merges with existing data)
         console.print("\n[bold]Saving candles...[/bold]")
@@ -629,6 +663,7 @@ class DataCollector:
                 timeframe,
                 merged_df,
                 merge_with_existing=is_incremental,
+                force=force,
             )
 
             if count > 0:
@@ -655,14 +690,17 @@ class DataCollector:
         symbol: str,
         start_block: int | None = None,
         end_block: int | None = None,
+        force: bool = False,
     ) -> None:
         """Fallback collection for a single symbol via oracle events.
 
-        Used when GMX API or Chainlink collection fails.
+        Used when GMX API or Chainlink collection fails, and for the historical
+        backfill of non-Chainlink symbols.
 
         :param symbol: Token symbol
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
+        :param force: If True, overwrite stored candles instead of merging/appending
         """
         from gmx_historical_data.gmx_token_mapper import GMXTokenMapper
         from gmx_historical_data.oracle_event_aggregator import (
@@ -736,8 +774,14 @@ class DataCollector:
                 if ohlcv.empty:
                     continue
 
-                # Merge with existing data and save
-                self._merge_and_save_candles(symbol, timeframe, ohlcv, merge_with_existing=True)
+                # Append (merge) by default; --force overwrites stored history.
+                self._merge_and_save_candles(
+                    symbol,
+                    timeframe,
+                    ohlcv,
+                    merge_with_existing=not force,
+                    force=force,
+                )
                 console.print(
                     f"  [green]✓[/green] {timeframe}: {len(ohlcv):,} candles via oracle fallback"
                 )
@@ -916,7 +960,11 @@ class DataCollector:
             # Use --force to ignore checkpoints and re-collect everything.
             skipped_symbols = []
             pending_symbols = []
-            if force:
+            if force or not full:
+                # --force, or incremental (--update): route every symbol through
+                # collect_symbol so its gap detector checks existing coverage and
+                # fetches only the missing slice (append). Only full-mode resume
+                # skips already-collected symbols wholesale.
                 pending_symbols = list(symbols)
             else:
                 for s in symbols:
@@ -969,7 +1017,7 @@ class DataCollector:
                 # Create tasks for parallel execution
                 tasks = []
                 for symbol in batch:
-                    tasks.append(self.collect_symbol(symbol, full=full))
+                    tasks.append(self.collect_symbol(symbol, full=full, force=force))
 
                 # Execute batch in parallel, capturing exceptions
                 results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1006,16 +1054,21 @@ class DataCollector:
         end_block: int | None = None,
         symbols: list[str] | None = None,
         concurrency: int = 1,
+        force: bool = False,
     ) -> None:
         """Collect data for non-Chainlink markets via GMX API + OraclePriceUpdate events.
 
         Uses GMX API for recent data (~6 months) and backfills historical data
-        with OraclePriceUpdate events from GMX EventEmitter.
+        with OraclePriceUpdate events from GMX EventEmitter. By default the per-symbol
+        coverage analysis fetches only the missing block range and appends/merges.
 
         :param start_block: Starting block (default: GMX_V2_GENESIS_BLOCK)
         :param end_block: Ending block (default: latest)
         :param symbols: List of specific symbols to collect (None = all non-Chainlink)
         :param concurrency: Number of symbols to process concurrently in Step 2 (default: 1)
+        :param force: If True, ignore existing coverage and re-collect from genesis,
+            overwriting stored candles instead of merging. Without it, only the
+            missing slice is fetched and appended.
         """
         if concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -1134,22 +1187,12 @@ class DataCollector:
                 f"[green]✓[/green] Found [cyan]{len(symbols_to_collect)}[/cyan] non-Chainlink markets"
             )
 
-        # Skip already-checkpointed symbols for resume
-        if symbols_to_collect:
-            pending = []
-            skipped = []
-            for s in symbols_to_collect:
-                cp = self.checkpoint_mgr.load_checkpoint(s)
-                if cp and cp.total_events > 0:
-                    skipped.append(s)
-                else:
-                    pending.append(s)
-            if skipped:
-                console.print(
-                    f"  [green]✓[/green] Skipping [cyan]{len(skipped)}[/cyan] "
-                    f"already-collected non-Chainlink symbols"
-                )
-            symbols_to_collect = pending
+        # NOTE: no wholesale checkpoint skip here. The per-symbol coverage
+        # analysis below (analyze_symbol_coverage + get_missing_block_range)
+        # is the real gate: it fetches only the missing block range and reports
+        # "data already complete" when there is nothing to do. A coarse
+        # checkpoint skip on top would drop symbols *before* that check and leave
+        # them stale, so it has been removed. --force bypasses the coverage check.
 
         # Get token decimals for price conversion
         try:
@@ -1212,40 +1255,48 @@ class DataCollector:
             async with sem:
                 console.print(f"\n[cyan]{symbol}[/cyan]")
 
-                # Analyze existing coverage
-                console.print("  [dim]Analyzing existing data coverage...[/dim]")
-                coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
-
-                if coverage.has_data:
+                if force:
+                    # --force: ignore existing coverage and re-collect the full
+                    # history from genesis (saves below overwrite the candles).
                     console.print(
-                        f"  [green]✓[/green] Found existing data covering "
-                        f"{len(coverage.timeframe_coverage)} timeframe(s)"
+                        "  [yellow]![/yellow] --force: re-collecting from genesis (overwrite)"
                     )
-                    for tf, tf_cov in coverage.timeframe_coverage.items():
-                        earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
-                        latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
-                        console.print(
-                            f"    {tf}: {tf_cov.candle_count:,} candles "
-                            f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
-                        )
+                    symbol_start, symbol_end = default_start, end_block
                 else:
-                    console.print(
-                        "  [yellow]○[/yellow] No existing data - full historical collection"
+                    # Analyze existing coverage
+                    console.print("  [dim]Analyzing existing data coverage...[/dim]")
+                    coverage = coverage_analyzer.analyze_symbol_coverage(symbol)
+
+                    if coverage.has_data:
+                        console.print(
+                            f"  [green]✓[/green] Found existing data covering "
+                            f"{len(coverage.timeframe_coverage)} timeframe(s)"
+                        )
+                        for tf, tf_cov in coverage.timeframe_coverage.items():
+                            earliest_dt = pd.to_datetime(tf_cov.earliest, unit="s", utc=True)
+                            latest_dt = pd.to_datetime(tf_cov.latest, unit="s", utc=True)
+                            console.print(
+                                f"    {tf}: {tf_cov.candle_count:,} candles "
+                                f"({earliest_dt.strftime('%Y-%m-%d')} to {latest_dt.strftime('%Y-%m-%d')})"
+                            )
+                    else:
+                        console.print(
+                            "  [yellow]○[/yellow] No existing data - full historical collection"
+                        )
+
+                    # Calculate missing block range
+                    symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
+                        coverage,
+                        block_cache,
+                        genesis_block=default_start,
+                        safety_margin=1000,  # 1000 blocks overlap for safety
                     )
 
-                # Calculate missing block range
-                symbol_start, symbol_end = coverage_analyzer.get_missing_block_range(
-                    coverage,
-                    block_cache,
-                    genesis_block=default_start,
-                    safety_margin=1000,  # 1000 blocks overlap for safety
-                )
-
-                if symbol_start is None and symbol_end is None:
-                    console.print(
-                        "  [green]✓[/green] Data already complete - no oracle events needed"
-                    )
-                    return symbol, []
+                    if symbol_start is None and symbol_end is None:
+                        console.print(
+                            "  [green]✓[/green] Data already complete - no oracle events needed"
+                        )
+                        return symbol, []
 
                 # Display range to fetch
                 if symbol_end is None:
@@ -1357,7 +1408,8 @@ class DataCollector:
                         timeframe,
                         oracle_df,
                         gmx_df,
-                        merge_with_existing=True,
+                        merge_with_existing=not force,
+                        force=force,
                     )
                     if count > 0:
                         sources = []
@@ -1760,15 +1812,19 @@ def _cli_impl(
                         "Use collect_all_symbols instead.[/red]"
                     )
                     raise typer.Exit(1)
-                if not force:
+                # Wholesale skip applies only to full-mode resume. In incremental
+                # (--update) mode we always run collect_symbol so its gap detector
+                # inspects existing coverage and fetches only the missing slice
+                # (append), instead of treating a checkpoint as "done forever".
+                if full and not force:
                     checkpoint = collector.checkpoint_mgr.load_checkpoint(sym)
                     if checkpoint and checkpoint.total_events > 0:
                         console.print(
                             f"  [green]✓[/green] {sym}: Already collected "
-                            f"({checkpoint.total_events:,} candles) — skipping"
+                            f"({checkpoint.total_events:,} candles) — skipping (full-mode resume)"
                         )
                         continue
-                asyncio.run(collector.collect_symbol(sym, full=full))
+                asyncio.run(collector.collect_symbol(sym, full=full, force=force))
 
             # Collect non-Chainlink symbols (if not --chainlink-only)
             if non_chainlink_symbols and not chainlink_only:
@@ -1782,6 +1838,7 @@ def _cli_impl(
                         end_block=end_block,
                         symbols=non_chainlink_symbols,
                         concurrency=concurrency,
+                        force=force,
                     )
                 )
             elif non_chainlink_symbols and chainlink_only:
@@ -1809,6 +1866,7 @@ def _cli_impl(
                         start_block=start_block,
                         end_block=end_block,
                         concurrency=concurrency,
+                        force=force,
                     )
                 )
     except KeyboardInterrupt:
