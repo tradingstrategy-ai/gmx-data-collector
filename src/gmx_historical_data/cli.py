@@ -929,7 +929,11 @@ class DataCollector:
             # Use --force to ignore checkpoints and re-collect everything.
             skipped_symbols = []
             pending_symbols = []
-            if force:
+            if force or not full:
+                # --force, or incremental (--update): route every symbol through
+                # collect_symbol so its gap detector checks existing coverage and
+                # fetches only the missing slice (append). Only full-mode resume
+                # skips already-collected symbols wholesale.
                 pending_symbols = list(symbols)
             else:
                 for s in symbols:
@@ -1773,12 +1777,16 @@ def _cli_impl(
                         "Use collect_all_symbols instead.[/red]"
                     )
                     raise typer.Exit(1)
-                if not force:
+                # Wholesale skip applies only to full-mode resume. In incremental
+                # (--update) mode we always run collect_symbol so its gap detector
+                # inspects existing coverage and fetches only the missing slice
+                # (append), instead of treating a checkpoint as "done forever".
+                if full and not force:
                     checkpoint = collector.checkpoint_mgr.load_checkpoint(sym)
                     if checkpoint and checkpoint.total_events > 0:
                         console.print(
                             f"  [green]✓[/green] {sym}: Already collected "
-                            f"({checkpoint.total_events:,} candles) — skipping"
+                            f"({checkpoint.total_events:,} candles) — skipping (full-mode resume)"
                         )
                         continue
                 asyncio.run(collector.collect_symbol(sym, full=full, force=force))
