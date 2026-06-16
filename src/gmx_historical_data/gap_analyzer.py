@@ -1,17 +1,38 @@
 """Analyze data gaps between GMX and Chainlink data sources."""
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 import pandas as pd
 
 from gmx_historical_data.config import FetchMode
+
+#: Default feed floor for incremental backfill: GMX v2 launch (2021-07-13 UTC),
+#: expressed as a unix timestamp in seconds. Used to bound the incremental
+#: Chainlink backfill start so we never imply "walk from genesis".
+DEFAULT_FEED_FLOOR_TS = int(datetime(2021, 7, 13, tzinfo=UTC).timestamp())
 
 
 class DataGapAnalyzer:
     """Calculate what historical data needs to be backfilled.
 
     Now supports both FULL and INCREMENTAL modes for smart data collection.
+
+    :param feed_floor_timestamp: Lower bound (unix seconds) for the incremental
+        Chainlink backfill start. The incremental path uses this floor instead
+        of ``None`` (genesis) so we only re-fetch the missing older slice.
+        Defaults to :data:`DEFAULT_FEED_FLOOR_TS` (GMX v2 launch).
     """
+
+    def __init__(self, feed_floor_timestamp: int | None = None) -> None:
+        """Initialize the gap analyzer.
+
+        :param feed_floor_timestamp: Lower bound (unix seconds) for the
+            incremental backfill start. Defaults to
+            :data:`DEFAULT_FEED_FLOOR_TS` when ``None``.
+        """
+        self.feed_floor_timestamp = (
+            feed_floor_timestamp if feed_floor_timestamp is not None else DEFAULT_FEED_FLOOR_TS
+        )
 
     def calculate_gap(
         self,
@@ -82,7 +103,9 @@ class DataGapAnalyzer:
 
         :param gmx_df: GMX OHLCV DataFrame
         :param existing_df: Existing stored data
-        :return: (None, backfill_end_timestamp) if backfill needed, else (None, None)
+        :return: ``(feed_floor_timestamp, backfill_end_timestamp)`` if a backfill
+            of older data is needed (bounded start, never genesis), else
+            ``(None, None)`` when storage already covers the GMX range.
         """
         # No backfill if GMX data is empty or no existing data to compare
         if gmx_df.empty or existing_df is None or existing_df.empty:
@@ -100,9 +123,10 @@ class DataGapAnalyzer:
 
         # Only backfill if our data doesn't cover the GMX range
         if our_earliest > gmx_earliest:
-            # We need historical data before our storage
+            # We need historical data before our storage. Bound the start to the
+            # feed floor (not None/genesis) so we only fetch the missing slice.
             our_earliest_unix = int(our_earliest.timestamp())
-            return None, our_earliest_unix - 1
+            return self.feed_floor_timestamp, our_earliest_unix - 1
 
         # We already have sufficient historical data
         return None, None
