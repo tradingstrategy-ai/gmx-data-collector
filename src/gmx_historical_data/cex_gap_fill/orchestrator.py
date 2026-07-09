@@ -180,14 +180,21 @@ def _resolve_cex_feather(datadir: Path | None, exchange: str, pair: str, tf: str
 
 
 def _load_cex_feather(path: Path, gmx_df: pl.DataFrame) -> pl.DataFrame:
-    """Load a CEX feather file; return empty frame on missing/error."""
+    """Load a CEX feather file; return empty frame on missing/error.
+
+    Real freqtrade feathers are millisecond-precision, but
+    :func:`~gmx_historical_data.cex_gap_fill.detector.reindex_and_mark_missing`
+    normalises the GMX side to microsecond-precision before reconciliation —
+    cast here too, or the reconciler's ``.is_in()`` filter raises
+    ``InvalidOperationError`` on real (non-synthetic) CEX data.
+    """
     if not path.exists():
         return pl.DataFrame(schema=gmx_df.schema)
     try:
         df = pl.read_ipc(path)
         if "date" in df.columns and "timestamp" not in df.columns:
             df = df.rename({"date": "timestamp"})
-        return df
+        return df.with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
     except Exception as exc:
         log.warning("failed to load CEX feather %s: %s", path, exc)
         return pl.DataFrame(schema=gmx_df.schema)

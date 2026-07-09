@@ -338,3 +338,55 @@ def test_fill_gaps_from_cex_downloads_multiple_exchanges_without_collision(tmp_p
         call.args[0][call.args[0].index("--datadir") + 1] for call in mock_run.call_args_list
     }
     assert datadirs == {str(cex_datadir / "binance"), str(cex_datadir / "bybit")}
+
+
+def test_fill_gaps_from_cex_handles_millisecond_precision_cex_feather(tmp_path: Path):
+    """Real freqtrade feathers are ms-precision; reindex_and_mark_missing normalises
+    the GMX side to us-precision, so the CEX side must be cast to match or the
+    reconciler's `.is_in()` filter raises InvalidOperationError."""
+    data_dir = tmp_path / "user_data"
+    cex_datadir = tmp_path / "cex"
+
+    parquet_path = data_dir / "candles" / "arbitrum" / "BTC" / "1h.parquet"
+    _write_gmx_parquet(parquet_path, [100, 100, 200, 200, 200], [1, 1, 1, 1, 1])
+
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    ts_ms = [start + timedelta(hours=i) for i in range(5)]
+    cex_feather = cex_datadir / "binance" / "futures" / "BTC_USDT_USDT-1h-futures.feather"
+    cex_feather.parent.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {
+            "date": ts_ms,
+            "open": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "high": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "low": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "close": [100.0, 101.0, 102.0, 103.0, 104.0],
+            "volume": [10.0, 10.0, 10.0, 10.0, 10.0],
+        },
+        schema_overrides={"date": pl.Datetime("ms", "UTC")},
+    ).write_ipc(cex_feather, compression=None)
+
+    routing_file = tmp_path / "cex_routing.json"
+    routing_file.write_text(
+        '{"version":1,"defaults":{"primary":"binance","fallback":"bybit","skip_unresolved":true},'
+        '"overrides":{"BTC":{"exchange":"binance","pair":"BTC/USDT:USDT"}},"auto":{}}'
+    )
+
+    with patch("gmx_historical_data.cex_gap_fill.freqtrade_runner.subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+        summary = fill_gaps_from_cex(
+            data_dir=data_dir,
+            symbols=["BTC"],
+            timeframes=["1h"],
+            routing_file=routing_file,
+            cex_datadir=cex_datadir,
+            exchanges=["binance"],
+            gap_threshold=0.20,
+            merge_gap_bars=0,
+            log_dir=tmp_path / "logs",
+            dry_run=False,
+        )
+
+    out = pl.read_parquet(parquet_path)
+    assert out["close"][2] == pytest.approx(102)
+    assert summary.totals["full_replaced"] >= 1
