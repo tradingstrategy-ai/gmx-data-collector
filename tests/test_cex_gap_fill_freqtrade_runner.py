@@ -46,8 +46,24 @@ def test_build_download_argv_passes_all_pairs_and_timeframes():
     )
     assert "SUI/USDT:USDT" in argv
     assert "APT/USDT:USDT" in argv
-    assert "1min" in argv
+    assert "1m" in argv
+    assert "1min" not in argv
     assert "1h" in argv
+
+
+def test_build_download_argv_translates_gmx_timeframes_to_freqtrade():
+    argv = build_download_argv(
+        exchange="binance",
+        pairs=["1000BONK/USDT:USDT"],
+        timeframes=["1min", "5min", "15min", "1h", "4h", "1d"],
+        timerange_start="20230801",
+        datadir=None,
+    )
+    i = argv.index("--timeframes")
+    assert argv[i + 1 : i + 7] == ["1m", "5m", "15m", "1h", "4h", "1d"]
+    assert "1min" not in argv
+    assert "5min" not in argv
+    assert "15min" not in argv
 
 
 def test_build_download_argv_with_datadir(tmp_path: Path):
@@ -147,5 +163,16 @@ def test_resolve_feather_path_handles_1000_prefix(tmp_path: Path):
         pair="1000BONK/USDT:USDT",
         timeframe="5min",
     )
-    expected = tmp_path / "bybit" / "futures" / "1000BONK_USDT_USDT-5min-futures.feather"
+    expected = tmp_path / "bybit" / "futures" / "1000BONK_USDT_USDT-5m-futures.feather"
+    assert path == expected
+
+
+def test_resolve_feather_path_translates_minute_timeframe(tmp_path: Path):
+    path = resolve_feather_path(
+        datadir=tmp_path,
+        exchange="binance",
+        pair="1000BONK/USDT:USDT",
+        timeframe="1min",
+    )
+    expected = tmp_path / "binance" / "futures" / "1000BONK_USDT_USDT-1m-futures.feather"
     assert path == expected

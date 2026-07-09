@@ -62,6 +62,10 @@ def fill_gaps_from_cex(
     :param timeframes: Timeframe whitelist; ``None`` = all six defaults.
     :param routing_file: Path to ``configs/cex_routing.json``.
     :param cex_datadir: Override freqtrade data dir; ``None`` = freqtrade default.
+        When set, a per-exchange subdirectory (``{cex_datadir}/{exchange}``) is
+        passed to freqtrade so multi-exchange downloads do not collide — freqtrade
+        treats an explicit ``--datadir`` as the exact leaf dir, unlike its own
+        default layout which already nests by exchange.
     :param exchanges: CEX venues to use, in preference order.
     :param gap_threshold: Fractional price-jump threshold for gap detection.
     :param merge_gap_bars: Max gap between flagged bars to merge into one range.
@@ -102,7 +106,7 @@ def fill_gaps_from_cex(
                     pairs=sorted(pairs),
                     timeframes=tfs,
                     timerange_start=download_start,
-                    datadir=cex_datadir,
+                    datadir=cex_datadir / exch if cex_datadir is not None else None,
                     cwd=REPO_ROOT,
                     timeout=download_timeout,
                 )
