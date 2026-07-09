@@ -14,6 +14,25 @@ class CEXDownloadError(RuntimeError):
     """Raised when ``freqtrade download-data`` fails for an exchange call."""
 
 
+#: GMX/pandas-style timeframe tokens -> freqtrade/ccxt tokens.
+#: Hour/day tokens are identical in both styles and pass through unchanged.
+_GMX_TF_TO_FREQTRADE: dict[str, str] = {
+    "1min": "1m",
+    "5min": "5m",
+    "15min": "15m",
+}
+
+
+def to_freqtrade_timeframe(tf: str) -> str:
+    """Translate a GMX-style timeframe (``"1min"``) to freqtrade style (``"1m"``).
+
+    Tokens already valid for freqtrade (``"1h"``, ``"4h"``, ``"1d"``) pass through.
+    Freqtrade exits 0 even on invalid-timeframe configuration errors, so this
+    translation is the only guard against silently downloading nothing.
+    """
+    return _GMX_TF_TO_FREQTRADE.get(tf, tf)
+
+
 def build_download_argv(
     exchange: str,
     pairs: list[str],
@@ -26,7 +45,8 @@ def build_download_argv(
 
     :param exchange: Exchange name, e.g. ``"binance"``.
     :param pairs: Freqtrade pair strings, e.g. ``["BTC/USDT:USDT"]``.
-    :param timeframes: Timeframe strings, e.g. ``["1h", "4h"]``.
+    :param timeframes: GMX-style timeframe strings, e.g. ``["1h", "4h"]``;
+        translated to freqtrade/ccxt tokens before being passed on.
     :param timerange_start: Start date as ``"YYYYMMDD"``. Becomes ``--timerange
         YYYYMMDD-`` so freqtrade fetches forward to the present.
     :param datadir: Override freqtrade data dir. If ``None``, the flag is omitted
@@ -42,7 +62,7 @@ def build_download_argv(
         "--pairs",
         *pairs,
         "--timeframes",
-        *timeframes,
+        *[to_freqtrade_timeframe(tf) for tf in timeframes],
         "--timerange",
         f"{timerange_start}-",
         "--data-format-ohlcv",
@@ -99,10 +119,11 @@ def resolve_feather_path(datadir: Path, exchange: str, pair: str, timeframe: str
     :param datadir: Freqtrade data directory root.
     :param exchange: Exchange name, e.g. ``"binance"``.
     :param pair: Freqtrade pair, e.g. ``"BTC/USDT:USDT"``.
-    :param timeframe: Timeframe string, e.g. ``"1h"``.
+    :param timeframe: GMX-style timeframe string, e.g. ``"1h"`` or ``"1min"``;
+        translated to the freqtrade/ccxt token freqtrade actually names files with.
     :returns: Absolute path to the expected feather file.
     """
     base, rest = pair.split("/", 1)
     quote, settle = rest.split(":", 1)
-    fname = f"{base}_{quote}_{settle}-{timeframe}-futures.feather"
+    fname = f"{base}_{quote}_{settle}-{to_freqtrade_timeframe(timeframe)}-futures.feather"
     return datadir / exchange / "futures" / fname

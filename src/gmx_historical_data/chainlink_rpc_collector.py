@@ -9,6 +9,7 @@ which work with JSON-RPC batching (getRoundData has access control issues).
 Reference: https://docs.chain.link/data-feeds/api-reference
 """
 
+import logging
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -19,7 +20,33 @@ from rich.console import Console
 from web3 import Web3
 from web3.exceptions import BadFunctionCallOutput, ContractLogicError
 
+from gmx_historical_data.event_decoder import scale_price
+
 console = Console()
+logger = logging.getLogger(__name__)
+
+#: Chainlink price decimals used when decoding a phase's representative answer.
+#: All USD feeds mapped in ``chainlink_feeds_complete`` use 8 decimals, and the
+#: downstream :class:`~gmx_historical_data.resampler.OHLCVResampler` scales every
+#: raw answer by this same constant.  We only need it here to put two phases on a
+#: comparable scale — the exact value cancels out of the *ratio* comparison, so
+#: even a feed with a different decimals count is still classified correctly.
+PHASE_SAMPLE_DECIMALS = 8
+
+#: Scale-discontinuity threshold for repurposed-proxy contamination detection.
+#:
+#: When a Chainlink proxy is *repurposed* (its address reused for a completely
+#: different asset) the historical phases hold a different asset's price at a
+#: different order of magnitude — e.g. PEPE's proxy phase-1 served a ~$15,000
+#: asset while phase-2 serves PEPE at ~9e-7, a ratio of ~1e10.  A *legitimate*
+#: aggregator rotation (ETH/USD phase-1 → phase-2, same asset) keeps the price on
+#: the same scale (ratio well under 10×).  Any phase whose representative price
+#: differs from the current phase's by at least this factor is treated as a
+#: different asset and dropped.  100× (two orders of magnitude) sits far above the
+#: widest legitimate intra-asset drawdown/rally seen across a phase boundary yet
+#: far below the billion-× substitutions we must reject, so the threshold is
+#: unambiguous for the known contamination cases.
+PHASE_SCALE_DISCONTINUITY_RATIO = 100.0
 
 
 @dataclass
@@ -229,6 +256,46 @@ class ChainlinkRPCCollector:
                     continue
 
         raise last_error
+
+    def get_feed_decimals(self, feed_address: str, default: int = 8) -> int:
+        """Return the price ``decimals()`` reported by a Chainlink feed proxy.
+
+        Chainlink USD feeds are **not** uniformly 8-decimal: crypto pairs whose
+        price is a tiny fraction of a dollar (e.g. PEPE/USD, SHIB/USD) report 18
+        decimals so the on-chain integer answer retains precision.  Scaling such a
+        feed's raw answer by the wrong power of ten corrupts every candle by many
+        orders of magnitude (raw ``2334410000000`` reads as ``23344.1`` at 8
+        decimals but the true price ``2.33e-6`` at 18).  Callers must therefore
+        resample each feed with its own ``decimals()`` rather than a hard-coded 8.
+
+        The proxy's ``decimals()`` is authoritative and identical across all of a
+        feed's phase aggregators, so a single value is correct for the whole
+        multi-phase backfill.
+
+        :param feed_address: Feed proxy contract address.
+        :param default: Value to return if the call fails (defaults to 8, the
+            most common Chainlink USD-feed convention).
+        :returns: Number of price decimals for the feed.
+        """
+        try:
+            contract = self.web3.eth.contract(
+                address=Web3.to_checksum_address(feed_address), abi=self.AGGREGATOR_V3_ABI
+            )
+            decimals = int(self._call_with_retry(contract.functions.decimals()))
+            console.print(f"  [dim]Feed decimals: {decimals}[/dim]")
+            return decimals
+        except Exception as exc:  # noqa: BLE001 - fall back to default on any RPC error
+            console.print(
+                f"  [yellow]⚠ Could not read feed decimals ({exc}); "
+                f"defaulting to {default}[/yellow]"
+            )
+            logger.warning(
+                "Could not read decimals() for feed %s (%s); defaulting to %d",
+                feed_address,
+                exc,
+                default,
+            )
+            return default
 
     def get_latest_round(self, aggregator_address: str) -> ChainlinkRound | None:
         """Get latest round data from aggregator.
@@ -681,7 +748,9 @@ class ChainlinkRPCCollector:
         proxy_address = Web3.to_checksum_address(feed_address)
         proxy_contract = self.web3.eth.contract(address=proxy_address, abi=self.PROXY_ABI)
 
-        ranges: list[tuple[int, int]] = []
+        # Collect per-phase (phase_id, first_valid, last_round_id) triples first so
+        # the contamination filter can compare each phase against the current one.
+        phases: list[tuple[int, int, int]] = []
 
         for phase_id in range(1, current_phase_id + 1):
             if phase_id == current_phase_id:
@@ -721,9 +790,178 @@ class ChainlinkRPCCollector:
                 f"  [dim]Phase {phase_id}: rounds {first_valid:,} → {last_round_id:,} "
                 f"({last_round_id - first_valid + 1:,} rounds)[/dim]"
             )
-            ranges.append((first_valid, last_round_id))
+            phases.append((phase_id, first_valid, last_round_id))
 
-        return ranges
+        # Drop scale-discontinuous (repurposed-proxy) phases before returning.
+        kept = self._filter_contaminated_phases(feed_address, phases)
+        return [(first_valid, last_round_id) for _phase_id, first_valid, last_round_id in kept]
+
+    def _sample_phase_representative_price(
+        self,
+        feed_address: str,
+        first_round_id: int,
+        last_round_id: int,
+    ) -> float | None:
+        """Return a representative (scaled, absolute) price for a single phase.
+
+        Samples a few rounds spread across the phase and returns the *median* of
+        the valid, non-zero decoded answers.  A median is used (rather than a
+        single round) so a one-off zero/garbage answer at a phase boundary does
+        not skew the representative price used for the scale comparison.
+
+        The price is decoded with :func:`~gmx_historical_data.event_decoder.scale_price`
+        using :data:`PHASE_SAMPLE_DECIMALS` and returned as an absolute value; the
+        caller only compares *ratios* of magnitudes, so sign and the exact decimals
+        constant are irrelevant.
+
+        :param feed_address: Feed proxy contract address.
+        :param first_round_id: First valid round ID in the phase.
+        :param last_round_id: Last round ID in the phase.
+        :returns: Representative absolute price, or ``None`` if no round in the
+            sample returned a valid non-zero answer.
+        """
+        if last_round_id < first_round_id:
+            return None
+
+        # Sample first, middle and last valid rounds of the phase. Three cheap
+        # reads per phase is enough to characterise its scale robustly.
+        mid_round_id = first_round_id + (last_round_id - first_round_id) // 2
+        sample_round_ids = sorted({first_round_id, mid_round_id, last_round_id})
+
+        prices: list[float] = []
+        for round_id in sample_round_ids:
+            round_data = self.get_round_data(feed_address, round_id)
+            if round_data is None or round_data.answer == 0:
+                continue
+            prices.append(abs(scale_price(round_data.answer, PHASE_SAMPLE_DECIMALS)))
+
+        if not prices:
+            return None
+
+        prices.sort()
+        n = len(prices)
+        if n % 2 == 1:
+            return prices[n // 2]
+        return (prices[n // 2 - 1] + prices[n // 2]) / 2.0
+
+    def _filter_contaminated_phases(
+        self,
+        feed_address: str,
+        phases: list[tuple[int, int, int]],
+    ) -> list[tuple[int, int, int]]:
+        """Drop repurposed-proxy phases whose price scale is discontinuous.
+
+        Some Chainlink proxy addresses were reused for a *different* asset before
+        being repurposed for the token GMX now lists (e.g. PEPE's proxy served a
+        ~$15,000 asset in phase 1, then PEPE at ~9e-7 in phase 2).  Walking such a
+        phase stores a foreign asset's price under the wrong symbol.
+
+        Each phase's representative price is compared against the **current
+        (newest) phase's** representative price.  A phase is dropped when the ratio
+        of the larger to the smaller price is at least
+        :data:`PHASE_SCALE_DISCONTINUITY_RATIO` (a clean two-orders-of-magnitude
+        gap).  Because contamination affects a contiguous block of the *oldest*
+        phases, once a discontinuity is found every phase at or below it is dropped
+        as well — we never re-admit an older phase across a detected boundary.
+
+        Legitimate same-asset aggregator rotations (ETH/USD phase-1 ↔ phase-2)
+        stay on the same scale (ratio ≪ 10×) and are always kept.
+
+        :param feed_address: Feed proxy contract address.
+        :param phases: List of ``(phase_id, first_round_id, last_round_id)`` triples,
+            sorted oldest-first (ascending ``phase_id``).
+        :returns: The subset of ``phases`` that share the current phase's price
+            scale, preserving order.  If the current phase cannot be sampled the
+            input is returned unchanged (fail-open — never silently drop history).
+        """
+        if len(phases) <= 1:
+            return phases
+
+        # The current phase is the newest = highest phase_id = last entry.
+        current_phase_id, current_first, current_last = phases[-1]
+        current_price = self._sample_phase_representative_price(
+            feed_address, current_first, current_last
+        )
+        if current_price is None or current_price == 0:
+            # Cannot establish a reference scale — keep everything rather than
+            # risk dropping legitimate history on a transient sampling failure.
+            console.print(
+                "  [yellow]⚠ Could not sample current phase price; "
+                "skipping phase-continuity validation[/yellow]"
+            )
+            return phases
+
+        kept: list[tuple[int, int, int]] = []
+        contamination_boundary_hit = False
+
+        # Walk newest → oldest so that once we cross a discontinuity we can drop
+        # every remaining (older) phase.
+        for phase_id, first_id, last_id in reversed(phases):
+            if phase_id == current_phase_id:
+                kept.append((phase_id, first_id, last_id))
+                continue
+
+            if contamination_boundary_hit:
+                console.print(
+                    f"  [yellow]⚠ Phase {phase_id}: dropped (older than a "
+                    f"scale-discontinuous phase)[/yellow]"
+                )
+                logger.info(
+                    "Dropping Chainlink phase %d for feed %s (older than a "
+                    "scale-discontinuous phase)",
+                    phase_id,
+                    feed_address,
+                )
+                continue
+
+            phase_price = self._sample_phase_representative_price(feed_address, first_id, last_id)
+            if phase_price is None or phase_price == 0:
+                # No usable sample: treat as suspect and drop, since a phase we
+                # cannot price cannot be validated against the current scale.
+                console.print(
+                    f"  [yellow]⚠ Phase {phase_id}: dropped (no valid price "
+                    f"sample to validate scale)[/yellow]"
+                )
+                logger.info(
+                    "Dropping Chainlink phase %d for feed %s (no valid price sample)",
+                    phase_id,
+                    feed_address,
+                )
+                contamination_boundary_hit = True
+                continue
+
+            ratio = max(phase_price, current_price) / min(phase_price, current_price)
+            if ratio >= PHASE_SCALE_DISCONTINUITY_RATIO:
+                console.print(
+                    f"  [yellow]⚠ Phase {phase_id}: DROPPED — scale discontinuity "
+                    f"(phase price {phase_price:.3e} vs current {current_price:.3e}, "
+                    f"ratio {ratio:.2e} ≥ {PHASE_SCALE_DISCONTINUITY_RATIO:g}×) — "
+                    f"repurposed-proxy contamination[/yellow]"
+                )
+                logger.info(
+                    "Dropping Chainlink phase %d for feed %s: scale discontinuity "
+                    "(phase price %.6e vs current phase %.6e, ratio %.6e >= %g) — "
+                    "repurposed-proxy contamination",
+                    phase_id,
+                    feed_address,
+                    phase_price,
+                    current_price,
+                    ratio,
+                    PHASE_SCALE_DISCONTINUITY_RATIO,
+                )
+                contamination_boundary_hit = True
+                continue
+
+            console.print(
+                f"  [dim]Phase {phase_id}: kept (price {phase_price:.3e} vs current "
+                f"{current_price:.3e}, ratio {ratio:.2f}× < "
+                f"{PHASE_SCALE_DISCONTINUITY_RATIO:g}×)[/dim]"
+            )
+            kept.append((phase_id, first_id, last_id))
+
+        # Restore oldest-first ordering for downstream range assembly.
+        kept.reverse()
+        return kept
 
     def _find_first_valid_round_in_phase(
         self,

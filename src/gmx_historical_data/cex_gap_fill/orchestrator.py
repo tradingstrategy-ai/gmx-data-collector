@@ -62,6 +62,10 @@ def fill_gaps_from_cex(
     :param timeframes: Timeframe whitelist; ``None`` = all six defaults.
     :param routing_file: Path to ``configs/cex_routing.json``.
     :param cex_datadir: Override freqtrade data dir; ``None`` = freqtrade default.
+        When set, a per-exchange subdirectory (``{cex_datadir}/{exchange}``) is
+        passed to freqtrade so multi-exchange downloads do not collide — freqtrade
+        treats an explicit ``--datadir`` as the exact leaf dir, unlike its own
+        default layout which already nests by exchange.
     :param exchanges: CEX venues to use, in preference order.
     :param gap_threshold: Fractional price-jump threshold for gap detection.
     :param merge_gap_bars: Max gap between flagged bars to merge into one range.
@@ -102,7 +106,7 @@ def fill_gaps_from_cex(
                     pairs=sorted(pairs),
                     timeframes=tfs,
                     timerange_start=download_start,
-                    datadir=cex_datadir,
+                    datadir=cex_datadir / exch if cex_datadir is not None else None,
                     cwd=REPO_ROOT,
                     timeout=download_timeout,
                 )
@@ -176,14 +180,21 @@ def _resolve_cex_feather(datadir: Path | None, exchange: str, pair: str, tf: str
 
 
 def _load_cex_feather(path: Path, gmx_df: pl.DataFrame) -> pl.DataFrame:
-    """Load a CEX feather file; return empty frame on missing/error."""
+    """Load a CEX feather file; return empty frame on missing/error.
+
+    Real freqtrade feathers are millisecond-precision, but
+    :func:`~gmx_historical_data.cex_gap_fill.detector.reindex_and_mark_missing`
+    normalises the GMX side to microsecond-precision before reconciliation —
+    cast here too, or the reconciler's ``.is_in()`` filter raises
+    ``InvalidOperationError`` on real (non-synthetic) CEX data.
+    """
     if not path.exists():
         return pl.DataFrame(schema=gmx_df.schema)
     try:
         df = pl.read_ipc(path)
         if "date" in df.columns and "timestamp" not in df.columns:
             df = df.rename({"date": "timestamp"})
-        return df
+        return df.with_columns(pl.col("timestamp").dt.cast_time_unit("us"))
     except Exception as exc:
         log.warning("failed to load CEX feather %s: %s", path, exc)
         return pl.DataFrame(schema=gmx_df.schema)
