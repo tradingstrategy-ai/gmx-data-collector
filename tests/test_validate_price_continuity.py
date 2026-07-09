@@ -16,8 +16,7 @@ _SPEC.loader.exec_module(vpc)
 def _frame(closes, start="2024-01-01", freq="1h", ts_col="date"):
     idx = pd.date_range(start, periods=len(closes), freq=freq, tz="UTC")
     return pd.DataFrame(
-        {ts_col: idx, "open": closes, "high": closes, "low": closes,
-         "close": closes, "volume": 0.0}
+        {ts_col: idx, "open": closes, "high": closes, "low": closes, "close": closes, "volume": 0.0}
     )
 
 

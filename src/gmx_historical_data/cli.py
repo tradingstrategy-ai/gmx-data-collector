@@ -565,9 +565,7 @@ class DataCollector:
                         # answers by 8 inflates every candle by ~1e10 and splices
                         # a "$15k"-scale Chainlink segment onto the correctly
                         # priced GMX segment. See ChainlinkRPCCollector.get_feed_decimals.
-                        feed_decimals = self.rpc_collector.get_feed_decimals(
-                            chainlink_feed_address
-                        )
+                        feed_decimals = self.rpc_collector.get_feed_decimals(chainlink_feed_address)
                         feed_resampler = (
                             self.resampler
                             if feed_decimals == self.resampler.decimals
