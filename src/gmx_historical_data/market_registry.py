@@ -35,6 +35,7 @@ import json
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,15 @@ _DEFAULT_CACHE_DIR = Path.home() / ".cache" / "gmx_historical_data"
 
 # Cache TTL in seconds (24 hours)
 _CACHE_MAX_AGE = 86_400
+
+# Minimum number of markets a live registry must contain before we trust it
+# enough to treat "absent from the registry" as "removed by GMX". The GMX
+# arbitrum registry normally has ~130 markets; a successful-but-partial API
+# response (e.g. a transient response truncated to a handful of markets)
+# would otherwise cause absence-based filtering to wrongly mark most major
+# markets as unavailable. 50 is well below the normal count and far above
+# what a partial/truncated response would return.
+_MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER = 50
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +177,7 @@ def _build_registry(raw_markets: list[dict]) -> dict[str, dict]:
                 "shortTokenSymbol": short_sym if not is_swap_only else None,
                 "listingDate": m.get("listingDate", ""),
                 "isListed": m.get("isListed", True),
+                "isDisabled": m.get("isDisabled", False),
             }
 
     return registry
@@ -271,6 +282,64 @@ def market_symbol(address: str, markets: dict[str, dict]) -> str:
         return f"{base}_{suffix}"
     # Sanitise: remove chars that break filesystems / polars glob
     return base.replace("[", "").replace("]", "").replace(" ", "_")
+
+
+def get_disabled_market_symbols(
+    chain: str = "arbitrum",
+    cache_dir: Path | None = None,
+    force_refresh: bool = True,
+    candidate_symbols: Iterable[str] | None = None,
+) -> set[str]:
+    """Return collector symbols for markets currently marked disabled.
+
+    Disabled status is live operational state, so this refreshes the GMX market
+    registry by default.  :func:`fetch_markets` still falls back to its stale
+    cache when the API is unavailable.  The collector stores index-token
+    symbols (``OM``), not market display names (``OM/USD``), so return the
+    canonical index token wherever one exists.
+
+    Two exclusion sources feed the result:
+
+    (a) **Explicit**: markets whose live info has ``isDisabled`` true. This
+        is fail-safe and always applied, regardless of registry size.
+    (b) **Absence-based**: when ``candidate_symbols`` is supplied, a
+        candidate symbol missing from the live registry's symbol set is
+        also treated as unavailable (to catch markets GMX removed entirely,
+        e.g. ``OM``). This branch only fires when the live registry looks
+        complete/healthy — i.e. it has at least
+        :data:`_MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER` markets. A
+        successful-but-partial API response (e.g. a transient response
+        that returns only a handful of markets) would otherwise cause this
+        branch to wrongly mark most valid major markets as absent and
+        exclude them from collection. When the registry looks partial, a
+        warning is logged and branch (b) is skipped entirely; branch (a)
+        is unaffected.
+    """
+    markets = fetch_markets(chain=chain, cache_dir=cache_dir, force_refresh=force_refresh)
+    unavailable = {
+        (info.get("indexToken") or market_symbol(address, markets)).upper()
+        for address, info in markets.items()
+        if info.get("isDisabled") and (info.get("indexToken") or info.get("symbol"))
+    }
+    if candidate_symbols is not None:
+        live_symbols = {
+            (info.get("indexToken") or market_symbol(address, markets)).upper()
+            for address, info in markets.items()
+            if info.get("indexToken") or info.get("symbol")
+        }
+        if len(live_symbols) >= _MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER:
+            unavailable.update(
+                symbol.upper() for symbol in candidate_symbols if symbol.upper() not in live_symbols
+            )
+        else:
+            logger.warning(
+                "Live GMX registry for %s only has %d market(s) (< %d); "
+                "skipping absence-based archival filtering to avoid excluding valid markets.",
+                chain,
+                len(live_symbols),
+                _MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER,
+            )
+    return unavailable
 
 
 def get_index_token(address: str, markets: dict[str, dict]) -> str | None:

@@ -18,9 +18,15 @@ Funding rate parquet files are read from
 
 import logging
 from pathlib import Path
+from uuid import uuid4
 
 import polars as pl
 
+from gmx_historical_data.ohlcv_validation import (
+    assert_export_parity,
+    ordering_tolerance_for_timeframe,
+    validate_ohlcv,
+)
 from gmx_historical_data.storage import (
     ParquetStorage,
     _assert_history_preserved,
@@ -99,47 +105,75 @@ class FreqtradeExporter:
                 if raw.empty:
                     continue
                 df = pl.from_pandas(raw)
+                tolerance = ordering_tolerance_for_timeframe(tf)
 
-                ft_df = self._transform_dataframe(df)
+                ft_df = validate_ohlcv(
+                    self._transform_dataframe(df),
+                    timestamp_column="date",
+                    location=f"export_candles({symbol}/{tf})",
+                    ordering_tolerance=tolerance,
+                )
                 self._write(
                     ft_df,
                     gmx_dir
                     / self._get_freqtrade_filename(
-                        symbol, tf, output_format, trading_mode, quote_currency
+                        symbol,
+                        tf,
+                        "feather" if output_format == "both" else output_format,
+                        trading_mode,
+                        quote_currency,
                     ),
                     output_format,
                     overwrite,
                     unsafe_overwrite,
+                    ordering_tolerance=tolerance,
                 )
-                ohlcv_files += 1
+                ohlcv_files += 2 if output_format == "both" else 1
                 total_candles += len(ft_df)
 
-                mark_df = self._transform_mark_price(df)
+                mark_df = validate_ohlcv(
+                    self._transform_mark_price(df),
+                    timestamp_column="date",
+                    location=f"export_candles({symbol}/{tf}) mark",
+                    ordering_tolerance=tolerance,
+                )
                 self._write(
                     mark_df,
                     gmx_dir
                     / self._get_freqtrade_filename(
-                        symbol, tf, output_format, trading_mode, quote_currency, candle_type="mark"
+                        symbol,
+                        tf,
+                        "feather" if output_format == "both" else output_format,
+                        trading_mode,
+                        quote_currency,
+                        candle_type="mark",
                     ),
                     output_format,
                     overwrite,
                     unsafe_overwrite,
+                    ordering_tolerance=tolerance,
                 )
-                mark_files += 1
+                mark_files += 2 if output_format == "both" else 1
 
                 self._write(
                     mark_df,
                     gmx_dir
                     / self._get_freqtrade_filename(
-                        symbol, tf, output_format, trading_mode, quote_currency, candle_type="index"
+                        symbol,
+                        tf,
+                        "feather" if output_format == "both" else output_format,
+                        trading_mode,
+                        quote_currency,
+                        candle_type="index",
                     ),
                     output_format,
                     overwrite,
                     unsafe_overwrite,
+                    ordering_tolerance=tolerance,
                 )
-                index_files += 1
+                index_files += 2 if output_format == "both" else 1
 
-                if not keep_parquet and output_format == "feather":
+                if not keep_parquet and output_format in {"feather", "both"}:
                     self._cleanup_candle_source(symbol, tf)
 
             results[symbol] = {
@@ -202,14 +236,19 @@ class FreqtradeExporter:
                 funding_df = self._read_funding_rate(symbol, tf)
                 if funding_df is None or funding_df.is_empty():
                     continue
-                ft_funding = self._transform_funding_rate(funding_df)
+                ft_funding = validate_ohlcv(
+                    self._transform_funding_rate(funding_df),
+                    timestamp_column="date",
+                    location=f"export_funding({symbol}/{tf})",
+                    allow_nonpositive_prices=True,
+                )
                 self._write(
                     ft_funding,
                     gmx_dir
                     / self._get_freqtrade_filename(
                         symbol,
                         tf,
-                        output_format,
+                        "feather" if output_format == "both" else output_format,
                         trading_mode,
                         quote_currency,
                         candle_type="funding_rate",
@@ -217,8 +256,9 @@ class FreqtradeExporter:
                     output_format,
                     overwrite,
                     unsafe_overwrite,
+                    allow_nonpositive_prices=True,
                 )
-                funding_files += 1
+                funding_files += 2 if output_format == "both" else 1
 
             results[symbol] = {
                 "files": funding_files,
@@ -437,6 +477,222 @@ class FreqtradeExporter:
             candle_path.unlink()
             logger.debug("Removed source candle parquet: %s", candle_path)
 
+    def _read_existing_export_frame(
+        self,
+        path: Path,
+        fmt: str,
+        *,
+        allow_nonpositive_prices: bool,
+        ordering_tolerance: float,
+    ) -> pl.DataFrame:
+        """Read and validate an existing export destination."""
+        existing = (
+            pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
+        )
+        validate_ohlcv(
+            existing,
+            timestamp_column="date",
+            location=str(path),
+            allow_nonpositive_prices=allow_nonpositive_prices,
+            ordering_tolerance=ordering_tolerance,
+        )
+        return existing
+
+    def _merge_export_frames(
+        self,
+        incoming: pl.DataFrame,
+        existing: pl.DataFrame,
+        path: Path,
+        *,
+        file_size: int,
+        allow_nonpositive_prices: bool,
+        ordering_tolerance: float,
+    ) -> pl.DataFrame:
+        """Merge validated export frames while preserving history."""
+        if set(incoming.columns) != set(existing.columns):
+            extra_in_existing = set(existing.columns) - set(incoming.columns)
+            extra_in_incoming = set(incoming.columns) - set(existing.columns)
+            if extra_in_incoming:
+                raise ValueError(
+                    f"Schema regression while merging {path.name}: incoming "
+                    f"dataframe has columns the existing file lacks: "
+                    f"{sorted(extra_in_incoming)}.  Refusing to fill nulls — "
+                    "regenerate the file with --unsafe-overwrite if this is intentional."
+                )
+            logger.info(
+                "Schema realignment on %s: dropping legacy columns %s "
+                "(existing width %d -> incoming width %d)",
+                path.name,
+                sorted(extra_in_existing),
+                len(existing.columns),
+                len(incoming.columns),
+            )
+            existing = existing.select(incoming.columns)
+
+        existing_stats = _coverage_stats(existing, ts_col="date")
+        incoming_stats = _coverage_stats(incoming, ts_col="date")
+        merged = (
+            pl.concat([existing, incoming])
+            .unique(subset=["date"], keep="last", maintain_order=False)
+            .sort("date")
+        )
+        validate_ohlcv(
+            merged,
+            timestamp_column="date",
+            location=str(path),
+            allow_nonpositive_prices=allow_nonpositive_prices,
+            ordering_tolerance=ordering_tolerance,
+        )
+        merged_stats = _coverage_stats(merged, ts_col="date")
+        _assert_history_preserved(
+            existing_stats, incoming_stats, merged_stats, ts_label="date", location=str(path)
+        )
+        logger.debug(
+            "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
+            path,
+            existing_stats["rows"],
+            file_size / 1024,
+            incoming_stats["rows"],
+            merged_stats["rows"],
+        )
+        return merged
+
+    def _prepare_export_frame(
+        self,
+        df: pl.DataFrame,
+        path: Path,
+        *,
+        fmt: str,
+        unsafe_overwrite: bool,
+        allow_nonpositive_prices: bool,
+        ordering_tolerance: float,
+    ) -> pl.DataFrame:
+        """Merge incoming export data with any existing destination file.
+
+        ``unsafe_overwrite`` bypasses reading the destination entirely so a
+        corrupt existing file can be regenerated — validation of the existing
+        frame must not run before that escape hatch.
+        """
+        if unsafe_overwrite or not path.exists():
+            return df
+
+        existing = self._read_existing_export_frame(
+            path,
+            fmt,
+            allow_nonpositive_prices=allow_nonpositive_prices,
+            ordering_tolerance=ordering_tolerance,
+        )
+        return self._merge_export_frames(
+            df,
+            existing,
+            path,
+            file_size=path.stat().st_size,
+            allow_nonpositive_prices=allow_nonpositive_prices,
+            ordering_tolerance=ordering_tolerance,
+        )
+
+    def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
+        """Write a single export file in the requested format."""
+        if fmt == "feather":
+            df.write_ipc(path, compression="zstd")
+        elif fmt == "parquet":
+            df.write_parquet(str(path))
+        else:
+            raise ValueError(f"Unsupported export format: {fmt}")
+
+    def _write_both(
+        self,
+        df: pl.DataFrame,
+        feather_path: Path,
+        parquet_path: Path,
+        unsafe_overwrite: bool,
+        allow_nonpositive_prices: bool,
+        ordering_tolerance: float,
+    ) -> None:
+        """Publish matching Feather and Parquet files from one canonical frame.
+
+        ``unsafe_overwrite`` bypasses reading and merging both destinations so a
+        corrupt pre-existing file can be regenerated from ``df`` alone.
+        """
+        if not unsafe_overwrite:
+            existing_frames: list[pl.DataFrame] = []
+            if feather_path.exists():
+                existing_frames.append(
+                    self._read_existing_export_frame(
+                        feather_path,
+                        "feather",
+                        allow_nonpositive_prices=allow_nonpositive_prices,
+                        ordering_tolerance=ordering_tolerance,
+                    )
+                )
+            if parquet_path.exists():
+                existing_frames.append(
+                    self._read_existing_export_frame(
+                        parquet_path,
+                        "parquet",
+                        allow_nonpositive_prices=allow_nonpositive_prices,
+                        ordering_tolerance=ordering_tolerance,
+                    )
+                )
+
+            if len(existing_frames) == 2:
+                assert_export_parity(
+                    existing_frames[0], existing_frames[1], location=str(feather_path)
+                )
+
+            existing = existing_frames[0] if existing_frames else None
+            if existing is not None:
+                df = self._merge_export_frames(
+                    df,
+                    existing,
+                    feather_path,
+                    file_size=feather_path.stat().st_size if feather_path.exists() else 0,
+                    allow_nonpositive_prices=allow_nonpositive_prices,
+                    ordering_tolerance=ordering_tolerance,
+                )
+
+        feather_tmp = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.tmp")
+        parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
+        feather_backup = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.bak")
+        parquet_backup = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.bak")
+        feather_had_original = feather_path.exists()
+        parquet_had_original = parquet_path.exists()
+        try:
+            self._write_single_frame(df, feather_tmp, "feather")
+            self._write_single_frame(df, parquet_tmp, "parquet")
+            assert_export_parity(
+                pl.read_ipc(feather_tmp, memory_map=False),
+                pl.read_parquet(parquet_tmp),
+                location=str(feather_path),
+            )
+            if feather_path.exists():
+                feather_path.replace(feather_backup)
+            if parquet_path.exists():
+                parquet_path.replace(parquet_backup)
+            feather_tmp.replace(feather_path)
+            parquet_tmp.replace(parquet_path)
+        except Exception:
+            for destination, backup, had_original in (
+                (feather_path, feather_backup, feather_had_original),
+                (parquet_path, parquet_backup, parquet_had_original),
+            ):
+                if backup.exists():
+                    if destination.exists():
+                        destination.unlink()
+                    backup.replace(destination)
+                elif not had_original and destination.exists():
+                    # No original file existed, so a partially published new
+                    # destination must not survive a failed paired publish.
+                    destination.unlink()
+            for temp_path in (feather_tmp, parquet_tmp):
+                if temp_path.exists():
+                    temp_path.unlink()
+            raise
+        finally:
+            for backup_path in (feather_backup, parquet_backup):
+                if backup_path.exists():
+                    backup_path.unlink()
+
     def _write(
         self,
         df: pl.DataFrame,
@@ -444,6 +700,8 @@ class FreqtradeExporter:
         fmt: str,
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
+        allow_nonpositive_prices: bool = False,
+        ordering_tolerance: float = 0.0,
     ) -> None:
         """Merge-write dataframe into an existing file or create it.
 
@@ -478,73 +736,31 @@ class FreqtradeExporter:
         :raises ValueError: If a merge would shrink existing history and
             ``unsafe_overwrite`` is not set.
         """
-        if unsafe_overwrite or not path.exists():
-            if fmt == "feather":
-                df.write_ipc(path, compression="zstd")
-            else:
-                df.write_parquet(str(path))
+        if fmt == "both":
+            feather_path = path if path.suffix == ".feather" else path.with_suffix(".feather")
+            parquet_path = feather_path.with_suffix(".parquet")
+            self._write_both(
+                df,
+                feather_path,
+                parquet_path,
+                unsafe_overwrite,
+                allow_nonpositive_prices,
+                ordering_tolerance,
+            )
             return
 
-        # Both default and overwrite=True paths run the merge + history guard.
-        file_size = path.stat().st_size
-        # memory_map=False: polars cannot memory-map zstd-compressed IPC files
-        existing = (
-            pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
-        )
+        if fmt not in {"feather", "parquet"}:
+            raise ValueError(f"Unsupported export format: {fmt}")
 
-        # Schema-tolerant alignment.  If the existing feather has columns the
-        # incoming dataframe does not (legacy schema with extra source-side
-        # columns), project it down to the incoming column set so polars'
-        # ``concat`` accepts the merge.  Extra columns are dropped — the
-        # canonical Freqtrade schema is whatever the current transform
-        # produces.  If incoming has columns the existing file lacks, that
-        # is a genuine schema regression and we surface it instead of
-        # silently filling nulls.
-        if set(df.columns) != set(existing.columns):
-            extra_in_existing = set(existing.columns) - set(df.columns)
-            extra_in_incoming = set(df.columns) - set(existing.columns)
-            if extra_in_incoming:
-                raise ValueError(
-                    f"Schema regression while merging {path.name}: incoming "
-                    f"dataframe has columns the existing file lacks: "
-                    f"{sorted(extra_in_incoming)}.  Refusing to fill nulls — "
-                    "regenerate the file with --unsafe-overwrite if this is "
-                    "intentional."
-                )
-            logger.info(
-                "Schema realignment on %s: dropping legacy columns %s "
-                "(existing width %d -> incoming width %d)",
-                path.name,
-                sorted(extra_in_existing),
-                len(existing.columns),
-                len(df.columns),
-            )
-            existing = existing.select(df.columns)
-
-        existing_stats = _coverage_stats(existing, ts_col="date")
-        incoming_stats = _coverage_stats(df, ts_col="date")
-        merged = (
-            pl.concat([existing, df])
-            .unique(subset=["date"], keep="last", maintain_order=False)
-            .sort("date")
-        )
-        merged_stats = _coverage_stats(merged, ts_col="date")
-        _assert_history_preserved(
-            existing_stats, incoming_stats, merged_stats, ts_label="date", location=str(path)
-        )
-        logger.debug(
-            "Merged %s: existing=%d rows (%.1f KB), new=%d rows, merged=%d rows",
+        merged = self._prepare_export_frame(
+            df,
             path,
-            existing_stats["rows"],
-            file_size / 1024,
-            incoming_stats["rows"],
-            merged_stats["rows"],
+            fmt=fmt,
+            unsafe_overwrite=unsafe_overwrite,
+            allow_nonpositive_prices=allow_nonpositive_prices,
+            ordering_tolerance=ordering_tolerance,
         )
-
-        if fmt == "feather":
-            merged.write_ipc(path, compression="zstd")
-        else:
-            merged.write_parquet(str(path))
+        self._write_single_frame(merged, path, fmt)
 
     # ------------------------------------------------------------------
     # Filename generation

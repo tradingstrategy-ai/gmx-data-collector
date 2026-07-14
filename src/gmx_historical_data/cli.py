@@ -49,7 +49,7 @@ from gmx_historical_data.gmx_api_integration import (
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
 from gmx_historical_data.hypersync_collector import HyperSyncCollector
-from gmx_historical_data.market_registry import fetch_markets
+from gmx_historical_data.market_registry import fetch_markets, get_disabled_market_symbols
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
@@ -66,6 +66,7 @@ console = Console()
 def _filter_and_categorize_symbols(
     symbols: list[str],
     chainlink_only: bool = False,
+    disabled_symbols: set[str] | None = None,
 ) -> tuple[list[str], list[str], int]:
     """Filter excluded symbols and categorize into Chainlink vs non-Chainlink.
 
@@ -74,12 +75,16 @@ def _filter_and_categorize_symbols(
     :returns: Tuple of (chainlink_symbols, non_chainlink_symbols, excluded_count).
     """
     non_chainlink_set = set(get_gmx_markets_without_chainlink_feeds())
+    disabled_set = {s.upper() for s in disabled_symbols} if disabled_symbols else set()
     chainlink = []
     non_chainlink = []
     excluded = 0
 
     for s in symbols:
         if is_excluded_symbol(s):
+            excluded += 1
+            continue
+        if s.upper() in disabled_set:
             excluded += 1
             continue
         if s in non_chainlink_set:
@@ -810,6 +815,7 @@ class DataCollector:
         use_events: bool = False,
         chainlink_only: bool = False,
         force: bool = False,
+        disabled_symbols: set[str] | None = None,
     ) -> None:
         """Collect data for all supported symbols with parallel processing.
 
@@ -820,6 +826,7 @@ class DataCollector:
         :param force: If True, ignore checkpoints and re-collect all symbols
         """
         if use_events:
+            disabled_upper = {s.upper() for s in disabled_symbols} if disabled_symbols else set()
             # Event-based collection mode requires HyperSync
             if self.hypersync is None:
                 console.print(
@@ -897,6 +904,10 @@ class DataCollector:
                     console.print(f"\n[dim]Skipping {symbol} (excluded)[/dim]")
                     continue
 
+                if symbol.upper() in disabled_upper:
+                    console.print(f"\n[dim]Archived disabled market {symbol}[/dim]")
+                    continue
+
                 # Skip non-Chainlink symbols if --chainlink-only
                 if chainlink_upper_set is not None and symbol.upper() not in chainlink_upper_set:
                     continue
@@ -956,8 +967,21 @@ class DataCollector:
                 console.print("\n[bold]Discovering GMX tokens...[/bold]")
                 all_symbols = self.gmx_discovery.get_supported_symbols()
 
+            # A static discovery list can retain markets that GMX has since
+            # removed. Re-check the concrete candidate list against live
+            # eligibility before collection.
+            try:
+                disabled_symbols = get_disabled_market_symbols(candidate_symbols=all_symbols)
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Warning: could not refresh live market eligibility ({exc}); "
+                    "using the prior archival filter.[/yellow]"
+                )
+
             chainlink_syms, non_chainlink_syms, excluded_count = _filter_and_categorize_symbols(
-                all_symbols, chainlink_only
+                all_symbols,
+                chainlink_only,
+                disabled_symbols=disabled_symbols,
             )
             # For collect_all_symbols we process all non-excluded together
             symbols = chainlink_syms + non_chainlink_syms
@@ -1800,15 +1824,39 @@ def _cli_impl(
         chainlink_concurrency=chainlink_concurrency,
         use_hypersync=use_hypersync,
     )
+    try:
+        disabled_symbols = get_disabled_market_symbols()
+    except Exception as exc:
+        console.print(
+            f"[yellow]Warning: could not load live disabled-market state ({exc}); "
+            "proceeding without archival filtering.[/yellow]"
+        )
+        disabled_symbols = set()
 
     # Run collection
     try:
         if symbol:
             # Parse comma-separated symbols and categorize
             symbols_list = [s.strip().upper() for s in symbol.split(",") if s.strip()]
+            try:
+                disabled_symbols = get_disabled_market_symbols(candidate_symbols=symbols_list)
+            except Exception as exc:
+                console.print(
+                    f"[yellow]Warning: could not refresh live market eligibility ({exc}); "
+                    "using the prior archival filter.[/yellow]"
+                )
             chainlink_symbols, non_chainlink_symbols, excluded_count = (
-                _filter_and_categorize_symbols(symbols_list, chainlink_only)
+                _filter_and_categorize_symbols(
+                    symbols_list,
+                    chainlink_only,
+                    disabled_symbols=disabled_symbols,
+                )
             )
+            archived_disabled = [s for s in symbols_list if s in disabled_symbols]
+            if archived_disabled:
+                console.print(
+                    f"[dim]Archived disabled market(s): {', '.join(archived_disabled)}[/dim]"
+                )
             if excluded_count > 0:
                 console.print(
                     f"[yellow]Warning: {excluded_count} symbol(s) excluded "
@@ -1869,6 +1917,7 @@ def _cli_impl(
                     use_events=use_events,
                     chainlink_only=chainlink_only,
                     force=force,
+                    disabled_symbols=disabled_symbols,
                 )
             )
 
@@ -2343,7 +2392,7 @@ def export_freqtrade_command(
     output_format: str = typer.Option(
         "feather",
         "--format",
-        help="Output format (feather or parquet)",
+        help="Output format (feather, parquet, or both)",
     ),
     overwrite: bool = typer.Option(
         False,
@@ -2590,7 +2639,7 @@ def export_candles_command(
         None, "--timeframe", help="Specific timeframes to export (can be repeated)"
     ),
     output_format: str = typer.Option(
-        "feather", "--format", help="Output format (feather or parquet)"
+        "feather", "--format", help="Output format (feather, parquet, or both)"
     ),
     overwrite: bool = typer.Option(
         False,
@@ -2684,7 +2733,7 @@ def export_funding_command(
         None, "--timeframe", help="Specific timeframes to export (can be repeated)"
     ),
     output_format: str = typer.Option(
-        "feather", "--format", help="Output format (feather or parquet)"
+        "feather", "--format", help="Output format (feather, parquet, or both)"
     ),
     overwrite: bool = typer.Option(
         False,
