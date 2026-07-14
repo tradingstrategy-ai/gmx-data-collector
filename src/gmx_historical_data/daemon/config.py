@@ -1,8 +1,13 @@
 """Configuration for GMX periodic data collection daemon."""
 
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from gmx_historical_data.market_registry import get_disabled_market_symbols
+
+logger = logging.getLogger(__name__)
 
 
 def get_gmx_markets_with_chainlink_feeds() -> list[str]:
@@ -286,6 +291,17 @@ class DaemonConfig:
         collection_symbols = None
         if symbols_str:
             collection_symbols = [s.strip().upper() for s in symbols_str.split(",")]
+            try:
+                disabled_symbols = get_disabled_market_symbols(candidate_symbols=collection_symbols)
+            except Exception as exc:
+                logger.warning(
+                    "Could not load live disabled-market state during config load: %s", exc
+                )
+                disabled_symbols = set()
+            archived = [s for s in collection_symbols if s in disabled_symbols]
+            if archived:
+                logger.warning("Archived disabled market(s): %s", ", ".join(archived))
+                collection_symbols = [s for s in collection_symbols if s not in disabled_symbols]
 
         # Optional - excluded symbols (comma-separated)
         excluded_str = os.getenv("EXCLUDED_SYMBOLS", "").strip()

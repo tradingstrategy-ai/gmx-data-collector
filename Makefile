@@ -82,11 +82,11 @@ UNSAFE_OVERWRITE ?=
 # a successful feather export.  Default is to keep sources (was the opposite
 # pre-2026-05-11 and led to data loss).
 DELETE_SOURCE ?=
-# Output format for FreqTrade exports: 'feather' (default) or 'parquet'.
-# FreqTrade reads either via ``--data-format-ohlcv {feather|parquet}``.  Set
-# FORMAT=parquet to write {PAIR}-{tf}-futures.parquet so FreqTrade/CCXT work
-# WITHOUT any feather files (e.g. ``make export-candles FORMAT=parquet``), or
-# use the ``export-candles-parquet`` / ``export-candles-both`` convenience
+# Output format for FreqTrade exports: 'feather' (default), 'parquet', or
+# 'both'.  FreqTrade reads either via ``--data-format-ohlcv {feather|parquet}``.
+# Set FORMAT=parquet to write {PAIR}-{tf}-futures.parquet so FreqTrade/CCXT
+# work WITHOUT any feather files (e.g. ``make export-candles FORMAT=parquet``),
+# or use the ``export-candles-parquet`` / ``export-candles-both`` convenience
 # targets below.
 FORMAT ?= feather
 
@@ -140,7 +140,7 @@ help:
 	@echo "  oi-resume            Open Interest: incremental (resume from checkpoint)"
 	@echo "  pool-liquidity       Pool Liquidity: full historical from genesis"
 	@echo "  pool-liquidity-resume  Pool Liquidity: incremental (resume from checkpoint)"
-	@echo "  export-candles       Export OHLCV (candles + mark + index) feathers ONLY"
+	@echo "  export-candles       Export OHLCV (candles + mark + index) feathers/parquet/both"
 	@echo "  export-funding       Export funding_rate feathers ONLY"
 	@echo "  export-freqtrade     Legacy: runs export-candles + export-funding in one shot"
 	@echo "  fill-gaps-cex        Run CEX gap-fill stage on existing parquet"
@@ -303,11 +303,9 @@ export-candles:
 export-candles-parquet:
 	$(MAKE) export-candles FORMAT=parquet
 
-# Convenience: write BOTH feather and parquet so either --data-format-ohlcv
-# works without re-running collection.
+# Convenience: write BOTH feather and parquet atomically from one export pass.
 export-candles-both:
-	$(MAKE) export-candles FORMAT=feather
-	$(MAKE) export-candles FORMAT=parquet
+	$(MAKE) export-candles FORMAT=both
 
 # Isolated funding-rate export.  Writes only -funding_rate feathers.
 # Will NOT touch OHLCV feathers.  Never deletes the funding parquet source.

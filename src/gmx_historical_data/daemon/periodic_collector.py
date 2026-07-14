@@ -92,6 +92,7 @@ from gmx_historical_data.gmx_api_integration import (
     map_timeframe_to_gmx_period,
 )
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
+from gmx_historical_data.market_registry import get_disabled_market_symbols
 from gmx_historical_data.storage import ParquetStorage
 
 console = Console()
@@ -208,6 +209,17 @@ class GMXPeriodicCollector:
                 f"[cyan]Collecting {len(symbols)} GMX markets with Chainlink feeds[/cyan]"
             )
             console.print("[dim]  (84 additional markets excluded - no Chainlink feeds)[/dim]")
+
+        try:
+            disabled_symbols = get_disabled_market_symbols(candidate_symbols=symbols)
+        except Exception as exc:
+            logger.warning("Could not load live disabled-market state: %s", exc)
+            disabled_symbols = set()
+
+        archived = [s for s in symbols if s.upper() in disabled_symbols]
+        if archived:
+            console.print(f"[dim]Archived disabled market(s): {', '.join(archived)}[/dim]")
+            symbols = [s for s in symbols if s.upper() not in disabled_symbols]
 
         return symbols
 

@@ -38,3 +38,12 @@ class TestFilterAndCategorizeSymbols:
         assert chainlink == []
         assert non_chainlink == []
         assert excluded == 0
+
+    def test_skips_disabled_symbols(self):
+        """Disabled markets are excluded from both buckets."""
+        chainlink, non_chainlink, excluded = _filter_and_categorize_symbols(
+            ["OM", "BONK"], disabled_symbols={"OM"}
+        )
+        assert chainlink == []
+        assert non_chainlink == ["BONK"]
+        assert excluded == 1

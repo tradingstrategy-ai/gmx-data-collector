@@ -193,6 +193,28 @@ jobs:
           print(f"Validated {len(current)} futures files with no regressions.")
           PY
 
+      - name: Validate futures candle file integrity
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          futures_dir = Path("./user_data/data/gmx/futures")
+          files = sorted(
+              str(path)
+              for path in futures_dir.glob("*-futures.*")
+              if path.suffix in {".feather", ".parquet"}
+          )
+
+          if not files:
+              print("ERROR: no futures candle files found for integrity validation.", file=sys.stderr)
+              sys.exit(1)
+
+          cmd = [sys.executable, "scripts/validate_price_continuity.py", "--allow-gaps", *files]
+          raise SystemExit(subprocess.call(cmd))
+          PY
+
       - name: Collect 24h volume snapshot
         run: |
           PYTHONPATH=src python - <<'EOF'

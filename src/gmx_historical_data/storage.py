@@ -15,6 +15,10 @@ import pyarrow as pa
 from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
+from gmx_historical_data.ohlcv_validation import (
+    ordering_tolerance_for_timeframe,
+    validate_ohlcv,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -297,9 +301,24 @@ class ParquetStorage:
         filename = TIMEFRAME_TO_FILENAME.get(timeframe, timeframe)
         output_path = symbol_dir / f"{filename}.parquet"
 
-        # Normalise incoming to microsecond UTC to match on-disk dtype.
-        incoming = pl.from_pandas(df).with_columns(
-            pl.col("timestamp").cast(pl.Datetime("us", "UTC"))
+        # Normalise incoming to microsecond UTC to match on-disk dtype, and sort
+        # ascending by timestamp so the strictly-increasing check inside
+        # validate_ohlcv() below is meaningful. Collectors are not guaranteed to
+        # hand candles in already-sorted order; without this sort, unsorted-but-
+        # otherwise-valid input would trip a spurious "non-monotonic timestamps"
+        # ValueError. Genuine duplicate timestamps are still caught by the
+        # duplicate check inside validate_ohlcv().
+        incoming = (
+            pl.from_pandas(df)
+            .with_columns(pl.col("timestamp").cast(pl.Datetime("us", "UTC")))
+            .sort("timestamp")
+        )
+        ordering_tolerance = ordering_tolerance_for_timeframe(timeframe)
+        incoming = validate_ohlcv(
+            incoming,
+            timestamp_column="timestamp",
+            location=f"save_candles({symbol}/{timeframe})",
+            ordering_tolerance=ordering_tolerance,
         )
 
         if not overwrite and output_path.exists():
@@ -312,6 +331,12 @@ class ParquetStorage:
                 pl.concat([existing, incoming])
                 .unique(subset=["timestamp"], keep="last", maintain_order=True)
                 .sort("timestamp")
+            )
+            validate_ohlcv(
+                merged,
+                timestamp_column="timestamp",
+                location=f"save_candles({symbol}/{timeframe})",
+                ordering_tolerance=ordering_tolerance,
             )
             merged_stats = _coverage_stats(merged, "timestamp")
             _assert_history_preserved(
