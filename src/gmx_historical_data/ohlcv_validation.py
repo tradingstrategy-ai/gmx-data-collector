@@ -86,7 +86,9 @@ def validate_ohlcv(
     if frame.is_empty():
         raise ValueError(f"{location}: invalid OHLCV empty frame")
 
-    working = frame.select([column for column in frame.columns if column in {*required_columns, "volume"}])
+    working = frame.select(
+        [column for column in frame.columns if column in {*required_columns, "volume"}]
+    )
 
     timestamp_nulls = working.filter(pl.col(timestamp_column).is_null())
     if not timestamp_nulls.is_empty():
@@ -107,7 +109,8 @@ def validate_ohlcv(
     non_monotonic = working.with_columns(
         pl.col(timestamp_column).diff().alias("__timestamp_delta")
     ).filter(
-        pl.col("__timestamp_delta").is_not_null() & (pl.col("__timestamp_delta") <= pl.duration(microseconds=0))
+        pl.col("__timestamp_delta").is_not_null()
+        & (pl.col("__timestamp_delta") <= pl.duration(microseconds=0))
     )
     if not non_monotonic.is_empty():
         first_timestamp = _first_timestamp(non_monotonic, timestamp_column)
@@ -184,9 +187,11 @@ def count_ordering_violations(frame: pl.DataFrame, *, tolerance: float) -> tuple
 
 
 def _canonical_export_frame(frame: pl.DataFrame) -> pl.DataFrame:
-    return frame.select(EXPORT_COLUMNS).with_columns(
-        pl.col("date").cast(pl.Datetime("ns", "UTC"), strict=False)
-    ).sort("date")
+    return (
+        frame.select(EXPORT_COLUMNS)
+        .with_columns(pl.col("date").cast(pl.Datetime("ns", "UTC"), strict=False))
+        .sort("date")
+    )
 
 
 def _invalid_price_expr(column: str, *, allow_nonpositive_prices: bool) -> pl.Expr:

@@ -88,10 +88,14 @@ def test_validate_frame_accepts_clean_bonk_style_series() -> None:
 
 
 def test_validate_frame_rejects_non_monotonic_file_order() -> None:
-    frame = _pandas_frame(
-        [0.000032, 0.000033],
-        start=datetime(2026, 1, 1, tzinfo=UTC),
-    ).iloc[::-1].reset_index(drop=True)
+    frame = (
+        _pandas_frame(
+            [0.000032, 0.000033],
+            start=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        .iloc[::-1]
+        .reset_index(drop=True)
+    )
 
     report = validate_frame(frame, timeframe="1h", path="BONK_USDC_USDC-1h-futures.feather")
 

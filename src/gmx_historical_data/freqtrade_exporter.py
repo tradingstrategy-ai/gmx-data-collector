@@ -486,7 +486,9 @@ class FreqtradeExporter:
         ordering_tolerance: float,
     ) -> pl.DataFrame:
         """Read and validate an existing export destination."""
-        existing = pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
+        existing = (
+            pl.read_ipc(path, memory_map=False) if fmt == "feather" else pl.read_parquet(path)
+        )
         validate_ohlcv(
             existing,
             timestamp_column="date",

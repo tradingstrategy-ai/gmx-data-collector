@@ -13,7 +13,9 @@ from gmx_historical_data.ohlcv_validation import (
 from gmx_historical_data.storage import ParquetStorage
 
 
-def _frame(*, open_: float | None, high: float | None, low: float | None, close: float | None) -> pl.DataFrame:
+def _frame(
+    *, open_: float | None, high: float | None, low: float | None, close: float | None
+) -> pl.DataFrame:
     return pl.DataFrame(
         {
             "date": pl.Series(
@@ -74,9 +76,7 @@ def test_validate_ohlcv_tolerates_small_ordering_overshoot_within_band():
         validate_ohlcv(frame, timestamp_column="date", location="X/1h")
 
     # Within the 0.75% band -> accepted.
-    validate_ohlcv(
-        frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075
-    )
+    validate_ohlcv(frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075)
 
 
 def test_validate_ohlcv_rejects_ordering_overshoot_beyond_tolerance():
@@ -84,9 +84,7 @@ def test_validate_ohlcv_rejects_ordering_overshoot_beyond_tolerance():
     frame = _frame(open_=100.0, high=101.0, low=101.0, close=100.2)
 
     with pytest.raises(ValueError, match="OHLC ordering"):
-        validate_ohlcv(
-            frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075
-        )
+        validate_ohlcv(frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075)
 
 
 def test_ordering_tolerance_for_timeframe_matrix():

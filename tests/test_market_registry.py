@@ -65,7 +65,9 @@ def test_get_disabled_market_symbols_uses_collector_symbol_and_refreshes(monkeyp
     assert calls == [{"chain": "arbitrum", "cache_dir": None, "force_refresh": True}]
 
 
-def test_get_disabled_market_symbols_marks_requested_removed_market_unavailable(monkeypatch) -> None:
+def test_get_disabled_market_symbols_marks_requested_removed_market_unavailable(
+    monkeypatch,
+) -> None:
     # Registry must look healthy (>= threshold markets) for absence-based
     # filtering to fire — see the partial-registry test below for the guard.
     registry = _make_live_registry(_MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER)
@@ -78,7 +80,9 @@ def test_get_disabled_market_symbols_marks_requested_removed_market_unavailable(
     assert get_disabled_market_symbols(candidate_symbols=["OM", "BONK"]) == {"OM"}
 
 
-def test_get_disabled_market_symbols_excludes_absent_candidate_when_registry_healthy(monkeypatch) -> None:
+def test_get_disabled_market_symbols_excludes_absent_candidate_when_registry_healthy(
+    monkeypatch,
+) -> None:
     registry = _make_live_registry(_MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER, disabled_symbols={"SYM0"})
     monkeypatch.setattr(
         "gmx_historical_data.market_registry.fetch_markets",
@@ -92,7 +96,9 @@ def test_get_disabled_market_symbols_excludes_absent_candidate_when_registry_hea
     assert result == {"SYM0", "OM"}
 
 
-def test_get_disabled_market_symbols_keeps_absent_candidate_when_registry_partial(monkeypatch, caplog) -> None:
+def test_get_disabled_market_symbols_keeps_absent_candidate_when_registry_partial(
+    monkeypatch, caplog
+) -> None:
     partial_count = _MIN_LIVE_MARKETS_FOR_ABSENCE_FILTER - 1
     registry = _make_live_registry(partial_count, disabled_symbols={"SYM0"})
     monkeypatch.setattr(

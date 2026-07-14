@@ -270,9 +270,7 @@ def test_export_candles_both_aborts_when_existing_file_is_corrupt(sample_storage
     corrupt = gmx_dir / "ETH_USDC_USDC-1h-futures.parquet"
     pl.DataFrame(
         {
-            "date": pl.Series(
-                [datetime(2026, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")
-            ),
+            "date": pl.Series([datetime(2026, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")),
             "open": [1.0],
             "high": [1.0],
             "low": [1.0],
