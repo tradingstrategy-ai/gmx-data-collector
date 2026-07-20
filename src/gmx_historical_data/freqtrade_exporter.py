@@ -24,7 +24,6 @@ import polars as pl
 
 from gmx_historical_data.ohlcv_validation import (
     assert_export_parity,
-    ordering_tolerance_for_timeframe,
     validate_ohlcv,
 )
 from gmx_historical_data.storage import (
@@ -105,13 +104,11 @@ class FreqtradeExporter:
                 if raw.empty:
                     continue
                 df = pl.from_pandas(raw)
-                tolerance = ordering_tolerance_for_timeframe(tf)
 
                 ft_df = validate_ohlcv(
                     self._transform_dataframe(df),
                     timestamp_column="date",
                     location=f"export_candles({symbol}/{tf})",
-                    ordering_tolerance=tolerance,
                 )
                 self._write(
                     ft_df,
@@ -126,7 +123,6 @@ class FreqtradeExporter:
                     output_format,
                     overwrite,
                     unsafe_overwrite,
-                    ordering_tolerance=tolerance,
                 )
                 ohlcv_files += 2 if output_format == "both" else 1
                 total_candles += len(ft_df)
@@ -135,7 +131,6 @@ class FreqtradeExporter:
                     self._transform_mark_price(df),
                     timestamp_column="date",
                     location=f"export_candles({symbol}/{tf}) mark",
-                    ordering_tolerance=tolerance,
                 )
                 self._write(
                     mark_df,
@@ -151,7 +146,6 @@ class FreqtradeExporter:
                     output_format,
                     overwrite,
                     unsafe_overwrite,
-                    ordering_tolerance=tolerance,
                 )
                 mark_files += 2 if output_format == "both" else 1
 
@@ -169,7 +163,6 @@ class FreqtradeExporter:
                     output_format,
                     overwrite,
                     unsafe_overwrite,
-                    ordering_tolerance=tolerance,
                 )
                 index_files += 2 if output_format == "both" else 1
 
@@ -483,7 +476,6 @@ class FreqtradeExporter:
         fmt: str,
         *,
         allow_nonpositive_prices: bool,
-        ordering_tolerance: float,
     ) -> pl.DataFrame:
         """Read and validate an existing export destination."""
         existing = (
@@ -494,7 +486,6 @@ class FreqtradeExporter:
             timestamp_column="date",
             location=str(path),
             allow_nonpositive_prices=allow_nonpositive_prices,
-            ordering_tolerance=ordering_tolerance,
         )
         return existing
 
@@ -506,7 +497,6 @@ class FreqtradeExporter:
         *,
         file_size: int,
         allow_nonpositive_prices: bool,
-        ordering_tolerance: float,
     ) -> pl.DataFrame:
         """Merge validated export frames while preserving history."""
         if set(incoming.columns) != set(existing.columns):
@@ -541,7 +531,6 @@ class FreqtradeExporter:
             timestamp_column="date",
             location=str(path),
             allow_nonpositive_prices=allow_nonpositive_prices,
-            ordering_tolerance=ordering_tolerance,
         )
         merged_stats = _coverage_stats(merged, ts_col="date")
         _assert_history_preserved(
@@ -565,7 +554,6 @@ class FreqtradeExporter:
         fmt: str,
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
-        ordering_tolerance: float,
     ) -> pl.DataFrame:
         """Merge incoming export data with any existing destination file.
 
@@ -580,7 +568,6 @@ class FreqtradeExporter:
             path,
             fmt,
             allow_nonpositive_prices=allow_nonpositive_prices,
-            ordering_tolerance=ordering_tolerance,
         )
         return self._merge_export_frames(
             df,
@@ -588,7 +575,6 @@ class FreqtradeExporter:
             path,
             file_size=path.stat().st_size,
             allow_nonpositive_prices=allow_nonpositive_prices,
-            ordering_tolerance=ordering_tolerance,
         )
 
     def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
@@ -607,7 +593,6 @@ class FreqtradeExporter:
         parquet_path: Path,
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
-        ordering_tolerance: float,
     ) -> None:
         """Publish matching Feather and Parquet files from one canonical frame.
 
@@ -622,7 +607,6 @@ class FreqtradeExporter:
                         feather_path,
                         "feather",
                         allow_nonpositive_prices=allow_nonpositive_prices,
-                        ordering_tolerance=ordering_tolerance,
                     )
                 )
             if parquet_path.exists():
@@ -631,7 +615,6 @@ class FreqtradeExporter:
                         parquet_path,
                         "parquet",
                         allow_nonpositive_prices=allow_nonpositive_prices,
-                        ordering_tolerance=ordering_tolerance,
                     )
                 )
 
@@ -648,7 +631,6 @@ class FreqtradeExporter:
                     feather_path,
                     file_size=feather_path.stat().st_size if feather_path.exists() else 0,
                     allow_nonpositive_prices=allow_nonpositive_prices,
-                    ordering_tolerance=ordering_tolerance,
                 )
 
         feather_tmp = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.tmp")
@@ -701,7 +683,6 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         allow_nonpositive_prices: bool = False,
-        ordering_tolerance: float = 0.0,
     ) -> None:
         """Merge-write dataframe into an existing file or create it.
 
@@ -745,7 +726,6 @@ class FreqtradeExporter:
                 parquet_path,
                 unsafe_overwrite,
                 allow_nonpositive_prices,
-                ordering_tolerance,
             )
             return
 
@@ -758,7 +738,6 @@ class FreqtradeExporter:
             fmt=fmt,
             unsafe_overwrite=unsafe_overwrite,
             allow_nonpositive_prices=allow_nonpositive_prices,
-            ordering_tolerance=ordering_tolerance,
         )
         self._write_single_frame(merged, path, fmt)
 

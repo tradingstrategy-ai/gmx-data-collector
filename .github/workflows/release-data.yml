@@ -88,6 +88,67 @@ jobs:
           fi
           rm -rf "${TMPDIR}"
 
+      # Delisted markets (e.g. OM) would otherwise ride the release lineage
+      # forever: CI rebuilds user_data/ from the previous tarball, so archiving
+      # them on a maintainer's drive never reaches this runner. Drop them here,
+      # BEFORE the restore manifest is captured, so the regression check below
+      # does not read the removal as "missing futures files after collection".
+      - name: Drop delisted markets from restored data
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          from gmx_historical_data.market_registry import get_disabled_market_symbols
+
+          futures_dir = Path("./user_data/data/gmx/futures")
+          if not futures_dir.is_dir():
+              print("No restored futures directory; nothing to prune.")
+              sys.exit(0)
+
+          pattern = re.compile(r"^(.+?)_[^_]+_[^_]+-(?:1m|5m|15m|1h|4h|1d)-")
+          by_symbol: dict[str, list[Path]] = {}
+          for path in futures_dir.iterdir():
+              match = pattern.match(path.name)
+              if match:
+                  by_symbol.setdefault(match.group(1).upper(), []).append(path)
+
+          if not by_symbol:
+              print("No symbols parsed from restored futures files; nothing to prune.")
+              sys.exit(0)
+
+          try:
+              disabled = get_disabled_market_symbols(candidate_symbols=list(by_symbol))
+          except Exception as exc:  # noqa: BLE001 - never block a release on registry flakiness
+              print(f"WARNING: could not resolve disabled markets ({exc}); skipping prune.")
+              sys.exit(0)
+
+          doomed = sorted(disabled & set(by_symbol))
+          if not doomed:
+              print(f"No delisted markets among {len(by_symbol)} restored symbols.")
+              sys.exit(0)
+
+          # Defence in depth on top of the registry's own partial-response guard:
+          # a healthy registry retires a market at a time, so a bulk removal means
+          # something upstream is wrong. Refuse rather than shed history.
+          if len(doomed) > max(5, len(by_symbol) // 10):
+              print(
+                  f"ERROR: refusing to prune {len(doomed)} of {len(by_symbol)} symbols "
+                  f"({', '.join(doomed[:10])}...); registry looks wrong.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          removed = 0
+          for symbol in doomed:
+              for path in by_symbol[symbol]:
+                  path.unlink()
+                  removed += 1
+              print(f"archived disabled market: {symbol}")
+          print(f"Pruned {removed} file(s) for {len(doomed)} delisted market(s).")
+          PY
+
       - name: Snapshot restored candle history
         run: |
           PYTHONPATH=src python - <<'PY'

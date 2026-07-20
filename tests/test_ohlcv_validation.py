@@ -7,7 +7,7 @@ import polars as pl
 import pytest
 
 from gmx_historical_data.ohlcv_validation import (
-    ordering_tolerance_for_timeframe,
+    count_open_outside_envelope,
     validate_ohlcv,
 )
 from gmx_historical_data.storage import ParquetStorage
@@ -68,31 +68,57 @@ def test_validate_ohlcv_allows_negative_funding_open():
     assert result.height == 1
 
 
-def test_validate_ohlcv_tolerates_small_ordering_overshoot_within_band():
-    """A benign 0.5% low-above-body overshoot passes at 4h but not at 1h."""
-    frame = _frame(open_=100.0, high=101.0, low=100.5, close=100.2)
+def test_validate_ohlcv_accepts_carried_forward_open_outside_envelope():
+    """``open`` is carried from the previous close, so it may sit outside the
+    candle's own high/low whenever price gaps between bars.  That is an export
+    convention, not corruption, and must not fail validation at any timeframe.
+
+    Mirrors NEAR 2024-03-06 16:00, where open=4.79805 sat 0.84% below
+    low=4.83824 and tripped the old 0.75% tolerance band.
+    """
+    frame = _frame(open_=4.79805, high=5.55460, low=4.83824, close=5.39190)
+
+    for timeframe in ("1m", "1h", "4h", "1d"):
+        validate_ohlcv(frame, timestamp_column="date", location=f"NEAR/{timeframe}")
+
+
+def test_validate_ohlcv_rejects_close_outside_envelope():
+    """``close`` is a genuine in-window print, so it must lie within high/low."""
+    frame = _frame(open_=100.0, high=101.0, low=99.0, close=101.5)
 
     with pytest.raises(ValueError, match="OHLC ordering"):
-        validate_ohlcv(frame, timestamp_column="date", location="X/1h")
-
-    # Within the 0.75% band -> accepted.
-    validate_ohlcv(frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075)
+        validate_ohlcv(frame, timestamp_column="date", location="X/4h")
 
 
-def test_validate_ohlcv_rejects_ordering_overshoot_beyond_tolerance():
-    """A 1% low-above-body overshoot breaches even the tolerant bound."""
-    frame = _frame(open_=100.0, high=101.0, low=101.0, close=100.2)
+def test_validate_ohlcv_rejects_decimal_shift_confined_to_open():
+    """Excluding ``open`` from the envelope must not let a unit error in
+    ``open`` alone pass: here only ``open`` is 10x too large while the rest of
+    the row is self-consistent.  Regression guard for the gap found reviewing
+    the carried-open change.
+    """
+    frame = _frame(open_=0.6685, high=0.0669, low=0.0668, close=0.06685)
 
-    with pytest.raises(ValueError, match="OHLC ordering"):
-        validate_ohlcv(frame, timestamp_column="date", location="X/4h", ordering_tolerance=0.0075)
+    with pytest.raises(ValueError, match="open scale"):
+        validate_ohlcv(frame, timestamp_column="date", location="OM/1m")
 
 
-def test_ordering_tolerance_for_timeframe_matrix():
-    assert ordering_tolerance_for_timeframe("4h") == 0.0075
-    assert ordering_tolerance_for_timeframe("1d") == 0.0075
-    assert ordering_tolerance_for_timeframe("1h") == 0.0
-    assert ordering_tolerance_for_timeframe("5m") == 0.0
-    assert ordering_tolerance_for_timeframe(None) == 0.0
+def test_validate_ohlcv_open_scale_bound_admits_real_gaps():
+    """The scale bound must not fire on ordinary carried-open gaps, including
+    the widest one observed in production (wstETH 4h, 2.34%)."""
+    near = _frame(open_=4.79805, high=5.55460, low=4.83824, close=5.39190)
+    wsteth = _frame(open_=2607.36, high=2668.44, low=2668.44, close=2668.44)
+
+    validate_ohlcv(near, timestamp_column="date", location="NEAR/4h")
+    validate_ohlcv(wsteth, timestamp_column="date", location="wstETH/4h")
+
+
+def test_count_open_outside_envelope_reports_without_failing():
+    """The carried-open artifact is counted for visibility, not enforcement."""
+    outside = _frame(open_=4.79805, high=5.55460, low=4.83824, close=5.39190)
+    inside = _frame(open_=100.0, high=101.0, low=99.0, close=100.5)
+
+    assert count_open_outside_envelope(outside) == 1
+    assert count_open_outside_envelope(inside) == 0
 
 
 def test_save_candles_rejects_all_null_bar(tmp_path):
