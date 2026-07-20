@@ -126,7 +126,28 @@ def test_assert_export_parity_accepts_identical_frames() -> None:
     assert_export_parity(left, right, location="BONK_USDC_USDC-1h-futures")
 
 
-def _overshoot_frame(timeframe: str) -> pd.DataFrame:
+def _carried_open_frame(timeframe: str) -> pd.DataFrame:
+    """Row 0 carries ``open`` forward from a lower previous close, leaving it
+    below its own ``low`` while ``close`` stays inside the envelope.
+
+    Mirrors NEAR 2024-03-06 16:00 (open=4.79805 sitting 0.84% below
+    low=4.83824), the shape that blocked every release from 2026-07-15.
+    """
+    delta = {"1h": timedelta(hours=1), "4h": timedelta(hours=4)}[timeframe]
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime([start + i * delta for i in range(3)], utc=True),
+            "open": [4.79805, 5.39190, 5.40000],
+            "high": [5.55460, 5.50000, 5.50000],
+            "low": [4.83824, 5.30000, 5.30000],
+            "close": [5.39190, 5.40000, 5.41000],
+        }
+    )
+
+
+def _close_outside_frame(timeframe: str) -> pd.DataFrame:
+    """Row 0 puts ``close`` below ``low`` -- a genuine defect at any timeframe."""
     delta = {"1h": timedelta(hours=1), "4h": timedelta(hours=4)}[timeframe]
     start = datetime(2026, 1, 1, tzinfo=UTC)
     return pd.DataFrame(
@@ -134,30 +155,33 @@ def _overshoot_frame(timeframe: str) -> pd.DataFrame:
             "date": pd.to_datetime([start + i * delta for i in range(3)], utc=True),
             "open": [100.0, 100.0, 100.0],
             "high": [101.0, 101.0, 101.0],
-            # Row 0: low 0.5% above the body -> benign aggregation overshoot.
             "low": [100.5, 99.0, 99.0],
             "close": [100.2, 100.2, 100.2],
         }
     )
 
 
-def test_validate_frame_reports_tolerated_4h_overshoot_without_failing() -> None:
+@pytest.mark.parametrize("timeframe", ["1h", "4h"])
+def test_validate_frame_reports_carried_open_without_failing(timeframe: str) -> None:
+    """The carried-open artifact is reported but never fatal, and -- unlike the
+    old tolerance band -- behaves identically at every timeframe."""
     report = validate_frame(
-        _overshoot_frame("4h"),
-        timeframe="4h",
-        path="BTC_USDC_USDC-4h-futures.feather",
+        _carried_open_frame(timeframe),
+        timeframe=timeframe,
+        path=f"NEAR_USDC_USDC-{timeframe}-futures.feather",
         allow_gaps=True,
     )
     assert report.malformed_ohlcv == 0
-    assert report.tolerated_ordering == 1
+    assert report.open_outside == 1
     assert report.ok is True
 
 
-def test_validate_frame_rejects_same_overshoot_at_1h() -> None:
+@pytest.mark.parametrize("timeframe", ["1h", "4h"])
+def test_validate_frame_rejects_close_outside_envelope(timeframe: str) -> None:
     report = validate_frame(
-        _overshoot_frame("1h"),
-        timeframe="1h",
-        path="BTC_USDC_USDC-1h-futures.feather",
+        _close_outside_frame(timeframe),
+        timeframe=timeframe,
+        path=f"BTC_USDC_USDC-{timeframe}-futures.feather",
         allow_gaps=True,
     )
     assert report.malformed_ohlcv == 1

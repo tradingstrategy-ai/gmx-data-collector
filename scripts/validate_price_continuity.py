@@ -31,8 +31,7 @@ import polars as pl
 
 from gmx_historical_data.ohlcv_validation import (
     assert_export_parity,
-    count_ordering_violations,
-    ordering_tolerance_for_timeframe,
+    count_open_outside_envelope,
     validate_ohlcv,
 )
 
@@ -58,8 +57,8 @@ class ValidationReport:
     :param duplicate_ts: duplicated timestamps
     :param malformed_ohlcv: 1 when the frame fails OHLCV validation
     :param parity_mismatch: 1 when the paired feather/parquet frames diverge
-    :param tolerated_ordering: benign OHLC-ordering overshoots inside the 4h/1d
-        tolerance band (reported, not a failure)
+    :param open_outside: carried-forward opens sitting outside their own
+        high/low envelope (reported, not a failure)
     :param first: first timestamp (ISO) or ""
     :param last: last timestamp (ISO) or ""
     :param ok: True when all defect counters are zero
@@ -73,7 +72,7 @@ class ValidationReport:
     duplicate_ts: int
     malformed_ohlcv: int
     parity_mismatch: int
-    tolerated_ordering: int
+    open_outside: int
     first: str
     last: str
     ok: bool
@@ -95,7 +94,6 @@ def validate_frame(
     :return: populated :class:`ValidationReport`
     """
     ts_col = "date" if "date" in df.columns else "timestamp"
-    tolerance = ordering_tolerance_for_timeframe(timeframe)
     # Validate the file in its stored order before sorting for the numerical
     # continuity calculations below.  Sorting first would conceal a malformed
     # non-monotonic export.
@@ -106,13 +104,12 @@ def validate_frame(
             frame_pl,
             timestamp_column=ts_col,
             location=path or "<in-memory>",
-            ordering_tolerance=tolerance,
         )
     except ValueError:
         malformed_ohlcv = 1
-    # Benign 4h/1d aggregation overshoots inside the tolerance band are reported
-    # but never fail the run; anything beyond tolerance already set malformed=1.
-    tolerated_ordering, _ = count_ordering_violations(frame_pl, tolerance=tolerance)
+    # Carried-forward opens sitting outside their own high/low envelope are an
+    # export convention, not a defect: reported for visibility, never fatal.
+    open_outside = count_open_outside_envelope(frame_pl)
 
     df = df.sort_values(ts_col).reset_index(drop=True)
     close = df["close"]
@@ -147,7 +144,7 @@ def validate_frame(
         duplicate_ts=duplicate_ts,
         malformed_ohlcv=malformed_ohlcv,
         parity_mismatch=0,
-        tolerated_ordering=tolerated_ordering,
+        open_outside=open_outside,
         first=str(df[ts_col].iloc[0]) if len(df) else "",
         last=str(df[ts_col].iloc[-1]) if len(df) else "",
         ok=ok,
@@ -189,7 +186,9 @@ def main() -> int:
     for f in args.files:
         df = pd.read_feather(f) if f.suffix == ".feather" else pd.read_parquet(f)
         tf = args.timeframe or _timeframe_from_name(f)
-        reports.append(validate_frame(df, tf, args.jump_ratio, path=str(f), allow_gaps=args.allow_gaps))
+        reports.append(
+            validate_frame(df, tf, args.jump_ratio, path=str(f), allow_gaps=args.allow_gaps)
+        )
 
     reports_by_path = {Path(r.path): r for r in reports}
     grouped: dict[str, list[Path]] = defaultdict(list)
@@ -223,7 +222,7 @@ def main() -> int:
                 f"{flag} {Path(r.path).name}: rows={r.rows} jumps={r.decade_jumps} "
                 f"missing={r.missing_bars} zero/nan={r.zero_or_nan} dupes={r.duplicate_ts} "
                 f"malformed={r.malformed_ohlcv} parity={r.parity_mismatch} "
-                f"tolerated={r.tolerated_ordering} "
+                f"open_outside={r.open_outside} "
                 f"[{r.first} .. {r.last}]"
             )
     return 0 if all(r.ok for r in reports) and not parity_failures else 1

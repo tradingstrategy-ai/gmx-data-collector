@@ -16,7 +16,6 @@ from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 from gmx_historical_data.ohlcv_validation import (
-    ordering_tolerance_for_timeframe,
     validate_ohlcv,
 )
 
@@ -313,12 +312,10 @@ class ParquetStorage:
             .with_columns(pl.col("timestamp").cast(pl.Datetime("us", "UTC")))
             .sort("timestamp")
         )
-        ordering_tolerance = ordering_tolerance_for_timeframe(timeframe)
         incoming = validate_ohlcv(
             incoming,
             timestamp_column="timestamp",
             location=f"save_candles({symbol}/{timeframe})",
-            ordering_tolerance=ordering_tolerance,
         )
 
         if not overwrite and output_path.exists():
@@ -336,7 +333,6 @@ class ParquetStorage:
                 merged,
                 timestamp_column="timestamp",
                 location=f"save_candles({symbol}/{timeframe})",
-                ordering_tolerance=ordering_tolerance,
             )
             merged_stats = _coverage_stats(merged, "timestamp")
             _assert_history_preserved(
