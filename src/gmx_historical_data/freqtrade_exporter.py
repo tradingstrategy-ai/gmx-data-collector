@@ -519,6 +519,26 @@ class FreqtradeExporter:
             )
             existing = existing.select(incoming.columns)
 
+        # Timestamp-precision alignment.  ``_transform_*`` always emits ``date``
+        # at nanosecond precision, but a destination feather on disk may carry a
+        # different time unit -- written by an older exporter, by a different
+        # tool, or by a partially-completed run.  ``pl.concat`` rejects that
+        # outright ("failed to vstack column 'date'"), so a single odd-precision
+        # file wedges the whole export.  Normalise the existing frame onto the
+        # incoming dtype, mirroring the canonicalisation
+        # ``ParquetStorage.save_candles`` already applies to the raw candle
+        # store.  Widening (us -> ns) is lossless; the narrowing direction is
+        # safe here because OHLCV timestamps land on whole bar boundaries.
+        incoming_date_dtype = incoming.schema["date"]
+        if existing.schema["date"] != incoming_date_dtype:
+            logger.info(
+                "Timestamp precision realignment on %s: %s -> %s",
+                path.name,
+                existing.schema["date"],
+                incoming_date_dtype,
+            )
+            existing = existing.with_columns(pl.col("date").cast(incoming_date_dtype))
+
         existing_stats = _coverage_stats(existing, ts_col="date")
         incoming_stats = _coverage_stats(incoming, ts_col="date")
         merged = (
