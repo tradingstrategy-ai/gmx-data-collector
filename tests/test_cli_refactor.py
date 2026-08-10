@@ -15,6 +15,15 @@ class TestFilterAndCategorizeSymbols:
         assert "APE_DEPRECATED" not in chainlink
         assert "APE_DEPRECATED" not in non_chainlink
 
+    def test_excludes_wsteth_collateral_token(self):
+        """wstETH is collateral-only, not a tradeable perp market."""
+        chainlink, non_chainlink, excluded = _filter_and_categorize_symbols(
+            ["ETH", "WSTETH", "BTC"]
+        )
+        assert excluded == 1
+        assert "WSTETH" not in chainlink
+        assert "WSTETH" not in non_chainlink
+
     def test_separates_chainlink_and_non_chainlink(self):
         """Symbols are categorized correctly."""
         chainlink, non_chainlink, _ = _filter_and_categorize_symbols(

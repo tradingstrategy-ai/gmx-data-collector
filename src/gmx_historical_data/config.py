@@ -144,6 +144,7 @@ EXCLUDED_SYMBOLS = {
     # Collateral-only tokens — not tradeable perp markets
     "WBTC.B",  # wrapped BTC (WBTC.b)
     "STETH",
+    "WSTETH",  # wrapped stETH (wstETH)
     # Synthetic stablecoins — pegged to $1, no OHLCV value
     "USDE",  # Ethena USDe
 }
