@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 
 from gmx_historical_data.ohlcv_validation import (
+    assert_export_parity,
     count_open_outside_envelope,
     validate_ohlcv,
 )
@@ -165,3 +166,46 @@ def test_save_candles_accepts_unsorted_incoming(tmp_path):
 
     persisted = pd.read_parquet(output_path)
     assert persisted["timestamp"].is_monotonic_increasing
+
+
+def test_validate_ohlcv_raises_export_validation_error_with_reason():
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    frame = pl.DataFrame({"date": [1], "open": [1.0], "high": [1.0], "low": [1.0]})
+    with pytest.raises(ExportValidationError) as excinfo:
+        validate_ohlcv(frame, timestamp_column="date", location="X/1h")
+    assert excinfo.value.reason == "missing_columns"
+    assert excinfo.value.location == "X/1h"
+    assert isinstance(excinfo.value, ValueError)
+
+
+def test_validate_ohlcv_empty_frame_reason_slug():
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    frame = pl.DataFrame(
+        {"date": [], "open": [], "high": [], "low": [], "close": []},
+        schema={
+            "date": pl.Datetime,
+            "open": pl.Float64,
+            "high": pl.Float64,
+            "low": pl.Float64,
+            "close": pl.Float64,
+        },
+    )
+    with pytest.raises(ExportValidationError) as excinfo:
+        validate_ohlcv(frame, timestamp_column="date", location="X/1h")
+    assert excinfo.value.reason == "empty_frame"
+
+
+def test_assert_export_parity_raises_export_validation_error_with_reason():
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    left = pl.DataFrame(
+        {"date": [1], "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [0.0]}
+    )
+    right = pl.DataFrame(
+        {"date": [1], "open": [2.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [0.0]}
+    )
+    with pytest.raises(ExportValidationError) as excinfo:
+        assert_export_parity(left, right, location="X/1h")
+    assert excinfo.value.reason == "parity_mismatch"

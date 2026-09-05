@@ -33,6 +33,27 @@ EXPORT_COLUMNS = ("date", "open", "high", "low", "close", "volume")
 OPEN_SCALE_RATIO = 5.0
 
 
+class ExportValidationError(ValueError):
+    """An OHLCV/export invariant failed — classified as a data defect.
+
+    Subclasses ``ValueError`` so every existing ``except ValueError`` call
+    site keeps working unchanged; new code (the export guards) can catch
+    this type specifically via
+    :data:`~gmx_historical_data.atomic_parquet.DATA_DEFECT_ERRORS`.
+
+    :param location: Human-readable location string, matching the
+        ``location`` this validator was called with.
+    :param reason: Short greppable slug identifying the failure kind (e.g.
+        ``"non_monotonic"``, ``"parity_mismatch"``, ``"history_shrink"``).
+    :param message: Full human-readable message; becomes ``str(exc)``.
+    """
+
+    def __init__(self, location: str, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.location = location
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class OhlcvValidationResult:
     """Structured summary for a successful OHLCV validation."""
@@ -81,10 +102,14 @@ def validate_ohlcv(
     required_columns = [timestamp_column, *PRICE_COLUMNS]
     missing = [column for column in required_columns if column not in frame.columns]
     if missing:
-        raise ValueError(f"{location}: missing required OHLCV columns: {missing}")
+        raise ExportValidationError(
+            location, "missing_columns", f"{location}: missing required OHLCV columns: {missing}"
+        )
 
     if frame.is_empty():
-        raise ValueError(f"{location}: invalid OHLCV empty frame")
+        raise ExportValidationError(
+            location, "empty_frame", f"{location}: invalid OHLCV empty frame"
+        )
 
     working = frame.select(
         [column for column in frame.columns if column in {*required_columns, "volume"}]
@@ -93,17 +118,21 @@ def validate_ohlcv(
     timestamp_nulls = working.filter(pl.col(timestamp_column).is_null())
     if not timestamp_nulls.is_empty():
         first_timestamp = _first_timestamp(timestamp_nulls, timestamp_column)
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "invalid_timestamps",
             f"{location}: invalid OHLCV timestamp values count={timestamp_nulls.height} "
-            f"first_timestamp={first_timestamp}"
+            f"first_timestamp={first_timestamp}",
         )
 
     duplicated_timestamps = working.filter(pl.col(timestamp_column).is_duplicated())
     if not duplicated_timestamps.is_empty():
         first_timestamp = _first_timestamp(duplicated_timestamps, timestamp_column)
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "duplicate_timestamps",
             f"{location}: duplicate timestamps count={duplicated_timestamps.height} "
-            f"first_timestamp={first_timestamp}"
+            f"first_timestamp={first_timestamp}",
         )
 
     non_monotonic = working.with_columns(
@@ -114,9 +143,11 @@ def validate_ohlcv(
     )
     if not non_monotonic.is_empty():
         first_timestamp = _first_timestamp(non_monotonic, timestamp_column)
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "non_monotonic",
             f"{location}: non-monotonic timestamps count={non_monotonic.height} "
-            f"first_timestamp={first_timestamp}"
+            f"first_timestamp={first_timestamp}",
         )
 
     for column in PRICE_COLUMNS:
@@ -125,35 +156,43 @@ def validate_ohlcv(
         )
         if not invalid.is_empty():
             first_timestamp = _first_timestamp(invalid, timestamp_column)
-            raise ValueError(
+            raise ExportValidationError(
+                location,
+                "invalid_price",
                 f"{location}: invalid OHLCV {column} values count={invalid.height} "
-                f"first_timestamp={first_timestamp}"
+                f"first_timestamp={first_timestamp}",
             )
 
     if not allow_nonpositive_prices:
         ordering_violations = working.filter(_ordering_violation_expr())
         if not ordering_violations.is_empty():
             first_timestamp = _first_timestamp(ordering_violations, timestamp_column)
-            raise ValueError(
+            raise ExportValidationError(
+                location,
+                "ohlc_ordering",
                 f"{location}: OHLC ordering violation count={ordering_violations.height} "
-                f"first_timestamp={first_timestamp}"
+                f"first_timestamp={first_timestamp}",
             )
 
         open_scale_violations = working.filter(_open_scale_violation_expr())
         if not open_scale_violations.is_empty():
             first_timestamp = _first_timestamp(open_scale_violations, timestamp_column)
-            raise ValueError(
+            raise ExportValidationError(
+                location,
+                "open_scale",
                 f"{location}: OHLC open scale violation count={open_scale_violations.height} "
-                f"first_timestamp={first_timestamp}"
+                f"first_timestamp={first_timestamp}",
             )
 
     if "volume" in working.columns:
         invalid_volume = working.filter(_invalid_volume_expr("volume"))
         if not invalid_volume.is_empty():
             first_timestamp = _first_timestamp(invalid_volume, timestamp_column)
-            raise ValueError(
+            raise ExportValidationError(
+                location,
+                "invalid_volume",
                 f"{location}: invalid OHLCV volume values count={invalid_volume.height} "
-                f"first_timestamp={first_timestamp}"
+                f"first_timestamp={first_timestamp}",
             )
 
     return frame
@@ -165,9 +204,11 @@ def assert_export_parity(left: pl.DataFrame, right: pl.DataFrame, *, location: s
     missing_left = [column for column in EXPORT_COLUMNS if column not in left.columns]
     missing_right = [column for column in EXPORT_COLUMNS if column not in right.columns]
     if missing_left or missing_right:
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "parity_missing_columns",
             f"{location}: Feather/Parquet export parity mismatch: "
-            f"missing_left={missing_left}, missing_right={missing_right}"
+            f"missing_left={missing_left}, missing_right={missing_right}",
         )
 
     canonical_left = _canonical_export_frame(left)
@@ -175,7 +216,9 @@ def assert_export_parity(left: pl.DataFrame, right: pl.DataFrame, *, location: s
     if canonical_left.equals(canonical_right):
         return
 
-    raise ValueError(f"{location}: Feather/Parquet export parity mismatch")
+    raise ExportValidationError(
+        location, "parity_mismatch", f"{location}: Feather/Parquet export parity mismatch"
+    )
 
 
 def count_open_outside_envelope(frame: pl.DataFrame) -> int:
