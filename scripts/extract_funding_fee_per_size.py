@@ -112,7 +112,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet
+from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
@@ -894,7 +894,7 @@ def save_feather_freqtrade(
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        out.write_ipc(filepath, compression="zstd")
+        atomic_write_ipc(out, filepath)
         console.print(f"  Feather: [cyan]{len(out):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 

@@ -21,9 +21,12 @@ from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
-from pyarrow.lib import ArrowInvalid
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet
+from gmx_historical_data.atomic_parquet import (
+    CORRUPT_PARQUET_ERRORS,
+    atomic_write_ipc,
+    atomic_write_parquet,
+)
 from gmx_historical_data.ohlcv_validation import (
     assert_export_parity,
     validate_ohlcv,
@@ -82,6 +85,16 @@ class FreqtradeExporter:
         This bounds a single corrupt file's blast radius to one symbol instead
         of aborting the whole export (2026-08-25 incident: a truncated
         ``GMX/1m.parquet`` aborted export for 85 of 126 symbols).
+
+        The guard catches :data:`~gmx_historical_data.atomic_parquet.CORRUPT_PARQUET_ERRORS`
+        deliberately covering *both* read engines in play here: the source
+        read (``storage.read_candles()``, pandas + pyarrow) raises
+        ``ArrowInvalid`` on a truncated file, while the destination
+        merge/history-guard read inside :meth:`_write` (existing feather via
+        ``pl.read_ipc``, existing parquet via ``pl.read_parquet``) raises
+        ``pl.exceptions.ComputeError`` on the same corruption. A corrupt
+        *destination* file is exactly the failure this guard exists to
+        contain, just entered from the output side instead of the input side.
 
         :param symbols: Specific symbols (default: all candle symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -192,7 +205,7 @@ class FreqtradeExporter:
                     "mark_files": mark_files,
                     "index_files": index_files,
                 }
-            except (ArrowInvalid, OSError) as e:
+            except CORRUPT_PARQUET_ERRORS as e:
                 logger.error(
                     "export_candles(%s): skipping symbol after read/write failure: %s",
                     symbol,
@@ -226,12 +239,17 @@ class FreqtradeExporter:
         symbol still exports.  Mirrors :meth:`export_candles`'s per-symbol
         guard (C2), applied here after a production dry run found the same
         failure class live in the funding store (650 of 1,949 raw-store
-        Parquet files).  The exception set differs from ``export_candles``'s
-        because the read path differs: funding reads go through Polars
-        (:meth:`_read_funding_rate` calls ``pl.read_parquet`` directly) and
-        raise ``pl.exceptions.ComputeError`` on a corrupt/truncated file,
-        whereas ``export_candles`` reads via ``storage.read_candles()``
-        (pandas + pyarrow), which raises ``ArrowInvalid``.
+        Parquet files).
+
+        Uses the same :data:`~gmx_historical_data.atomic_parquet.CORRUPT_PARQUET_ERRORS`
+        tuple as :meth:`export_candles`.  Funding's own source read
+        (:meth:`_read_funding_rate` calls ``pl.read_parquet`` directly)
+        always raises ``pl.exceptions.ComputeError`` on a corrupt/truncated
+        file, never ``ArrowInvalid`` (there is no pandas/pyarrow read
+        anywhere in this path) -- but the destination merge read inside
+        :meth:`_write` is exactly the same code :meth:`export_candles` uses,
+        so the shared tuple keeps both guards symmetric rather than each
+        hand-rolling a subset that happens to work today.
 
         :param symbols: Specific symbols (default: all funding symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -300,7 +318,7 @@ class FreqtradeExporter:
                     "mark_files": 0,
                     "index_files": 0,
                 }
-            except (pl.exceptions.ComputeError, OSError) as e:
+            except CORRUPT_PARQUET_ERRORS as e:
                 logger.error(
                     "export_funding(%s): skipping symbol after read/write failure: %s",
                     symbol,
@@ -652,13 +670,17 @@ class FreqtradeExporter:
     def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
         """Write a single export file in the requested format.
 
-        The Parquet branch writes atomically (see ``atomic_parquet.py``) so an
+        Both branches write atomically (see ``atomic_parquet.py``) so an
         interrupted write (HyperSync ``429``, kill, timeout) can never leave a
-        truncated ``-futures``/``-funding_rate`` parquet -- this is the direct
+        truncated ``-futures``/``-funding_rate`` feather or parquet -- these
+        exported feathers are themselves production artifacts
+        (``user_data/data/gmx/futures/*.feather`` feeds the downstream
+        regime/drawdown panel that gates live trading), so they get the same
+        guarantee as the source Parquet store. This is the direct
         single-format counterpart of ``_write_both``'s tmp+backup dance below.
         """
         if fmt == "feather":
-            df.write_ipc(path, compression="zstd")
+            atomic_write_ipc(df, path)
         elif fmt == "parquet":
             atomic_write_parquet(df, path)
         else:

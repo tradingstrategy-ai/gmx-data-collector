@@ -60,7 +60,7 @@ from pathlib import Path
 import polars as pl
 from rich.console import Console
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet
+from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_parquet
 
 console = Console()
 
@@ -607,7 +607,7 @@ def merge_symbol(
     unified_path = rates_dir / symbol / f"1h.{ext}"
     unified_path.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "feather":
-        unified.write_ipc(unified_path, compression="zstd")
+        atomic_write_ipc(unified, unified_path)
     else:
         atomic_write_parquet(unified, unified_path)
 
@@ -760,7 +760,7 @@ def export_feather(
 
         filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
         filepath = gmx_dir / filename
-        result.write_ipc(filepath, compression="zstd")
+        atomic_write_ipc(result, filepath)
         exported += 1
         console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
 
