@@ -99,8 +99,9 @@ def test_export_returns_stats(sample_storage):
     """Test export returns statistics."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result = exporter.export()
+        result, failed_symbols = exporter.export()
 
+        assert failed_symbols == []
         assert "ETH" in result
         assert "BTC" in result
         # ETH: 1h + 4h = 2 ohlcv + 2 mark + 2 index = 6
@@ -318,6 +319,11 @@ def test_export_candles_both_leaves_existing_files_intact_on_second_write_failur
 def test_export_candles_both_rolls_back_when_second_publish_fails(
     sample_storage, tmp_path, monkeypatch
 ):
+    """A publish failure is caught by the per-symbol guard (C2): the symbol is
+    recorded in ``failed_symbols`` and skipped rather than raising, and the
+    on-disk targets are left exactly as they were (no partial/truncated write)
+    -- the same invariant the atomic-write fix (C1) gives ``storage.py``.
+    """
     exporter = FreqtradeExporter(sample_storage, tmp_path / "output")
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
@@ -342,9 +348,12 @@ def test_export_candles_both_rolls_back_when_second_publish_fails(
 
     monkeypatch.setattr(Path, "replace", fail_once_on_parquet_publish)
 
-    with pytest.raises(OSError, match="publish failed"):
-        exporter.export_candles(symbols=["ETH"], timeframes=["1h"], output_format="both")
+    results, failed_symbols = exporter.export_candles(
+        symbols=["ETH"], timeframes=["1h"], output_format="both"
+    )
 
+    assert failed_symbols == ["ETH"]
+    assert "ETH" not in results
     assert pl.read_ipc(feather_path).equals(feather_before)
     assert pl.read_parquet(parquet_path).equals(parquet_before)
 
@@ -370,13 +379,14 @@ def test_export_funding_accepts_negative_rates(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
+    result, failed_symbols = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
 
     out = tmp_path / "output" / "gmx" / "futures" / "AAVE_USDC_USDC-1h-funding_rate.feather"
     assert out.exists()
     written = pl.read_ipc(out)
     assert written["open"].min() < 0  # negative funding rate preserved
     assert result["AAVE"]["funding_files"] == 1
+    assert failed_symbols == []
 
 
 def test_export_funding_both_counts_both_files(tmp_path):
@@ -393,11 +403,12 @@ def test_export_funding_both_counts_both_files(tmp_path):
         }
     ).write_parquet(funding_dir / "1h.parquet")
 
-    result = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
+    result, failed_symbols = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
         symbols=["AAVE"], timeframes=["1h"], output_format="both"
     )
 
     assert result["AAVE"]["funding_files"] == 2
+    assert failed_symbols == []
     out = tmp_path / "output" / "gmx" / "futures"
     assert (out / "AAVE_USDC_USDC-1h-funding_rate.feather").exists()
     assert (out / "AAVE_USDC_USDC-1h-funding_rate.parquet").exists()
@@ -428,7 +439,9 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"], output_format="both")
+    result, failed_symbols = exporter.export_funding(
+        symbols=["AAVE"], timeframes=["1h"], output_format="both"
+    )
 
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     feather = gmx_dir / "AAVE_USDC_USDC-1h-funding_rate.feather"
@@ -436,6 +449,7 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     assert feather.exists()
     assert parquet.exists()
     assert result["AAVE"]["funding_files"] == 2
+    assert failed_symbols == []
 
 
 def test_export_candles_both_unsafe_overwrite_regenerates_corrupt_file(sample_storage, tmp_path):

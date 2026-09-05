@@ -12,6 +12,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
@@ -152,6 +153,38 @@ class ParquetStorage:
         self.raw_dir = self.base_dir / "raw" / "arbitrum"
         self.candles_dir = self.base_dir / "candles" / "arbitrum"
 
+    def sweep_orphaned_tmp_files(self) -> list[Path]:
+        """Remove orphaned ``*.parquet.tmp`` files left by an interrupted write.
+
+        Every write path in this class goes through
+        :func:`~gmx_historical_data.atomic_parquet.atomic_write_parquet`, which
+        writes to ``<name>.parquet.tmp`` before ``os.replace()``-ing onto the
+        final target. A process kill, timeout, or HyperSync ``429`` mid-write
+        can therefore only ever strand the ``.tmp`` file itself -- the previous
+        target is never touched. Call this once at collection startup (before
+        any new writes begin) to clear those stragglers; it is deliberately
+        **not** invoked automatically by ``__init__`` because other call sites
+        (e.g. the Freqtrade exporter) construct :class:`ParquetStorage` for
+        reads only and must not race a concurrently-running collection's
+        legitimate in-flight ``.tmp`` file.
+
+        :return: List of removed ``.tmp`` file paths.
+        """
+        removed: list[Path] = []
+        if not self.base_dir.exists():
+            return removed
+
+        for tmp_path in sorted(self.base_dir.rglob("*.parquet.tmp")):
+            try:
+                tmp_path.unlink()
+            except OSError as e:
+                logger.error("Failed to remove orphaned tmp file %s: %s", tmp_path, e)
+                continue
+            removed.append(tmp_path)
+            logger.warning("Removed orphaned tmp file from an interrupted write: %s", tmp_path)
+
+        return removed
+
     @property
     def events_dir(self) -> Path:
         """Directory for raw position events.
@@ -221,11 +254,9 @@ class ParquetStorage:
         # Convert to Arrow table with schema
         table = pa.Table.from_pandas(df, schema=RAW_EVENTS_SCHEMA)
 
-        # Write to Parquet with compression
+        # Write to Parquet with compression (atomic — see atomic_write_parquet)
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path
 
@@ -345,9 +376,7 @@ class ParquetStorage:
             incoming = merged
 
         table = pa.Table.from_pandas(incoming.to_pandas(), schema=OHLCV_SCHEMA)
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path
 
@@ -491,10 +520,8 @@ class ParquetStorage:
         # Convert to Arrow table with schema
         table = pa.Table.from_pandas(df, schema=POSITION_EVENTS_SCHEMA)
 
-        # Write to Parquet with compression
+        # Write to Parquet with compression (atomic — see atomic_write_parquet)
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path

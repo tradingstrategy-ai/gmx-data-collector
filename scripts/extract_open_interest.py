@@ -88,7 +88,6 @@ from eth_abi import decode as abi_decode
 from eth_utils import keccak
 from hypersync import (
     BlockField,
-    ClientConfig,
     FieldSelection,
     HypersyncClient,
     LogField,
@@ -100,6 +99,8 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
+from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.market_registry import fetch_markets as _fetch_markets_cached
 
 # Optional imports
@@ -561,21 +562,32 @@ def save_checkpoint(
 # =============================================================================
 
 
-async def create_client(network: str) -> HypersyncClient:
-    """Create HyperSync client.
+async def create_client(network: str) -> RotatingHypersyncClient:
+    """Create a HyperSync client, rotating across a key pool when configured.
+
+    Reads the ``HYPERSYNC_API_TOKEN`` environment variable for authentication.
+    A comma- or space-separated value builds a rotating pool (via
+    :class:`RotatingHypersyncClient`) that rotates to the next key on a
+    ``429`` instead of silently using only the first configured key.
 
     :param network: Network name (arbitrum, avalanche)
-    :return: HyperSync client instance
+    :return: Rotating HyperSync client-pool instance
     """
     url = HYPERSYNC_URLS.get(network)
     if not url:
         raise ValueError(f"Unsupported network: {network}")
     raw_token = os.environ.get("HYPERSYNC_API_TOKEN")
-    api_token = raw_token.replace(",", " ").split()[0] if raw_token else None
-    return HypersyncClient(ClientConfig(url=url, bearer_token=api_token))
+    pool = RotatingHypersyncClient(raw_token, url)
+    if pool.total_keys > 1:
+        console.print(f"  Using HyperSync API key pool: [cyan]{pool.total_keys} key(s)[/cyan]")
+    elif raw_token:
+        console.print(f"  Using HyperSync API token: [cyan]{raw_token[:8]}...[/cyan]")
+    else:
+        console.print("  [yellow]No HYPERSYNC_API_TOKEN set — may get 403 errors[/yellow]")
+    return pool
 
 
-async def get_latest_block(client: HypersyncClient) -> int:
+async def get_latest_block(client: HypersyncClient | RotatingHypersyncClient) -> int:
     """Get latest block number.
 
     :param client: HyperSync client instance
@@ -585,7 +597,7 @@ async def get_latest_block(client: HypersyncClient) -> int:
 
 
 async def _stream_with_retry(
-    client: HypersyncClient,
+    client: HypersyncClient | RotatingHypersyncClient,
     query: Query,
     max_retries: int = MAX_RETRIES,
 ):
@@ -594,7 +606,9 @@ async def _stream_with_retry(
     Yields response objects. On failure, retries with exponential backoff
     from the last successfully processed block.
 
-    :param client: HyperSync client instance
+    :param client: HyperSync client instance, or a :class:`RotatingHypersyncClient`
+        pool -- on a rate-limit error the pool rotates to its next configured
+        key and retries immediately without counting against ``max_retries``.
     :param query: HyperSync query
     :param max_retries: Maximum retry attempts per failure
     """
@@ -621,6 +635,13 @@ async def _stream_with_retry(
                 yield response
 
         except Exception as e:
+            if isinstance(client, RotatingHypersyncClient) and client.rotate_on_error(e):
+                console.print(
+                    f"[yellow]Rate limit hit — rotated HyperSync API key, "
+                    f"retrying from block {current_from_block:,}[/yellow]"
+                )
+                continue
+
             attempt += 1
             if attempt > max_retries:
                 console.print(f"[red]Failed after {max_retries} retries: {e}[/red]")
@@ -635,7 +656,7 @@ async def _stream_with_retry(
 
 
 async def extract_oi_events(
-    client: HypersyncClient,
+    client: HypersyncClient | RotatingHypersyncClient,
     network: str,
     from_block: int,
     to_block: int | None,
@@ -1094,7 +1115,7 @@ def append_parquet(new_df: "pl.DataFrame", filepath: Path) -> None:
     if sort_cols:
         combined = combined.sort(sort_cols)
 
-    combined.write_parquet(filepath)
+    atomic_write_parquet(combined, filepath)
 
 
 def save_raw_per_symbol(records: list[OpenInterestRecord], output_dir: Path) -> None:
@@ -1157,10 +1178,10 @@ def save_snapshots_per_symbol(snapshots: list[DailyOISnapshot], output_dir: Path
             combined = pl.concat([existing, df], how="diagonal_relaxed")
             combined = combined.unique(subset=["date"], keep="last")
             combined = combined.sort("date")
-            combined.write_parquet(filepath)
+            atomic_write_parquet(combined, filepath)
         else:
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            df.sort("date").write_parquet(filepath)
+            atomic_write_parquet(df.sort("date"), filepath)
 
         console.print(
             f"  Snapshots: [cyan]{len(sym_snapshots):,}[/cyan] days -> [green]{filepath}[/green]"

@@ -52,6 +52,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.market_registry import fetch_markets
 
 try:
@@ -482,7 +483,7 @@ Examples:
         sym_df = flows.filter(pl.col("symbol") == symbol)
         out_dir = network_dir / "usd_flows" / symbol
         out_dir.mkdir(parents=True, exist_ok=True)
-        sym_df.write_parquet(out_dir / "events.parquet")
+        atomic_write_parquet(sym_df, out_dir / "events.parquet")
         console.print(
             f"  [cyan]{symbol}[/cyan]: {len(sym_df):,} events -> "
             f"[green]{out_dir / 'events.parquet'}[/green]"

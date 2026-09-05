@@ -50,6 +50,7 @@ import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
 from gmx_historical_data.coverage_gate import (
     SkipDecision,
     has_ohlcv_through,
@@ -283,7 +284,7 @@ def collect_and_save_apy(
 
     combined = pd.concat(all_frames, ignore_index=True)
     apy_path = apy_dir / f"{date_str}.parquet"
-    combined.to_parquet(apy_path, index=False)
+    atomic_write_parquet_pandas(combined, apy_path)
     console.print(
         f"  [green]Saved {len(combined)} APY entries ({len(APY_PERIODS)} periods)[/green] → {apy_path}"
     )
@@ -334,7 +335,7 @@ def collect_and_save_tickers(
 
     df = _flatten_tickers(raw_tickers, date_str)
     ticker_path = tickers_dir / f"{date_str}.parquet"
-    df.to_parquet(ticker_path, index=False)
+    atomic_write_parquet_pandas(df, ticker_path)
     console.print(f"  [green]Saved {len(df)} tickers[/green] → {ticker_path}")
     return len(df)
 
@@ -371,7 +372,7 @@ def collect_and_save_volumes(
     ]
     df = pd.DataFrame(rows)
     path = volumes_dir / f"{date_str}.parquet"
-    df.to_parquet(path, index=False)
+    atomic_write_parquet_pandas(df, path)
 
     total = sum(volumes.values())
     nonzero = sum(1 for v in volumes.values() if v > 0)
@@ -1212,7 +1213,7 @@ Examples:
         )
     else:
         markets_df = collect_markets_snapshot(all_markets, date_str)
-        markets_df.to_parquet(markets_path, index=False)
+        atomic_write_parquet_pandas(markets_df, markets_path)
         console.print(f"  Saved → {markets_path}")
     console.print()
 
