@@ -348,7 +348,7 @@ def test_export_candles_both_rolls_back_when_second_publish_fails(
 
     monkeypatch.setattr(Path, "replace", fail_once_on_parquet_publish)
 
-    results, failed_symbols = exporter.export_candles(
+    results, failed_symbols, failures = exporter.export_candles(
         symbols=["ETH"], timeframes=["1h"], output_format="both"
     )
 

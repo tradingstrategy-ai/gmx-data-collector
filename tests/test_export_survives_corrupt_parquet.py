@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pandas as pd
 import polars as pl
+import pytest
 from typer.testing import CliRunner
 
 from gmx_historical_data.cli import app
@@ -72,7 +73,7 @@ def test_export_survives_corrupt_parquet(tmp_path: Path):
     output_dir = tmp_path / "output"
     exporter = FreqtradeExporter(data_dir, output_dir)
 
-    results, failed_symbols = exporter.export_candles(
+    results, failed_symbols, failures = exporter.export_candles(
         symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
     )
 
@@ -136,7 +137,7 @@ def test_export_survives_corrupt_destination_feather(tmp_path: Path):
     _truncate_feather_footer(dest)
 
     exporter = FreqtradeExporter(data_dir, output_dir)
-    results, failed_symbols = exporter.export_candles(
+    results, failed_symbols, failures = exporter.export_candles(
         symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
     )
 
@@ -154,7 +155,9 @@ def test_export_wrapper_propagates_failed_symbols(tmp_path: Path):
     _seed_data_dir(data_dir)
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    results, failed_symbols = exporter.export(symbols=["AAA", "BBB", "CCC"], timeframes=["1h"])
+    results, failed_symbols, failures = exporter.export(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
 
     assert failed_symbols == ["BBB"]
     assert set(results) == {"AAA", "CCC"}
@@ -237,3 +240,107 @@ def test_export_all_symbols_healthy_still_exits_zero(tmp_path: Path):
     )
 
     assert result.exit_code == 0, result.output
+
+
+def _write_funding_style_duplicate_candles(
+    data_dir: Path, symbol: str, timeframe: str = "1h"
+) -> None:
+    """Write a candle parquet directly with a duplicate timestamp row.
+
+    Bypasses ``ParquetStorage.save_candles()`` (which validates on write) so
+    the corruption is only visible when the *exporter* reads and validates
+    it -- reproducing "upstream wrote something save_candles would have
+    rejected, but it's on disk anyway" rather than a byte-level truncation.
+
+    :param data_dir: Root data directory.
+    :param symbol: Token symbol to seed with a duplicate-timestamp candle file.
+    :param timeframe: Timeframe filename stem to write (e.g. ``'1h'``,
+        ``'4h'``). Both map to themselves under ``TIMEFRAME_TO_FILENAME``, so
+        the filename is exactly ``f"{timeframe}.parquet"``.
+    """
+    candle_dir = data_dir / "candles" / "arbitrum" / symbol
+    candle_dir.mkdir(parents=True, exist_ok=True)
+    timestamps = pd.date_range("2024-01-01", periods=3, freq=timeframe, tz="UTC")
+    df = pd.DataFrame(
+        {
+            "timestamp": [timestamps[0], timestamps[0], timestamps[1]],
+            "open": [1.0, 1.0, 1.0],
+            "high": [1.0, 1.0, 1.0],
+            "low": [1.0, 1.0, 1.0],
+            "close": [1.0, 1.0, 1.0],
+        }
+    )
+    df.to_parquet(candle_dir / f"{timeframe}.parquet", index=False)
+
+
+def test_export_candles_shares_taxonomy(tmp_path: Path):
+    """A validate_ohlcv failure (not a corrupt-bytes failure) is caught by
+    the same per-symbol guard as ArrowInvalid -- the exact defect this
+    change fixes. Before this change, this ValueError would propagate and
+    abort the whole export."""
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    for symbol in ("AAA", "CCC"):
+        storage.save_candles(_make_candles(symbol), "1h", symbol)
+    _write_funding_style_duplicate_candles(data_dir, "BBB")
+
+    output_dir = tmp_path / "output"
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols, failures = exporter.export_candles(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
+
+    assert failed_symbols == ["BBB"]
+    assert "BBB" not in results
+    assert set(results) == {"AAA", "CCC"}
+    assert len(failures) == 1
+    assert failures[0].symbol == "BBB"
+    assert failures[0].timeframe == "1h"
+    assert failures[0].reason == "duplicate_timestamps"
+
+
+def test_export_candles_isolates_timeframes(tmp_path: Path):
+    """D2: a symbol failing on one timeframe still gets its other
+    timeframe's files counted in results, not discarded."""
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    storage.save_candles(_make_candles("BBB"), "1h", "BBB")  # healthy 1h
+    _write_funding_style_duplicate_candles(data_dir, "BBB", timeframe="4h")  # corrupt 4h
+
+    output_dir = tmp_path / "output"
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols, failures = exporter.export_candles(
+        symbols=["BBB"], timeframes=["1h", "4h"]
+    )
+
+    assert failed_symbols == ["BBB"]
+    assert "BBB" in results
+    assert results["BBB"]["ohlcv_files"] == 1
+    assert len(failures) == 1
+    assert failures[0].timeframe == "4h"
+    futures_dir = output_dir / "gmx" / "futures"
+    assert (futures_dir / "BBB_USDC_USDC-1h-futures.feather").exists()
+    assert not (futures_dir / "BBB_USDC_USDC-4h-futures.feather").exists()
+
+
+def test_export_candles_aborts_on_enospc(tmp_path: Path, monkeypatch):
+    """A fatal environment error (disk full) must propagate, not be
+    swallowed into failed_symbols -- continuing would mark every remaining
+    symbol 'failed' one at a time for a condition that isn't about their data."""
+    import errno
+
+    from gmx_historical_data import freqtrade_exporter as fe_module
+
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    storage.save_candles(_make_candles("AAA"), "1h", "AAA")
+
+    def _raise_enospc(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fe_module, "atomic_write_ipc", _raise_enospc)
+
+    exporter = FreqtradeExporter(data_dir, tmp_path / "output")
+    with pytest.raises(OSError) as excinfo:
+        exporter.export_candles(symbols=["AAA"], timeframes=["1h"])
+    assert excinfo.value.errno == errno.ENOSPC
