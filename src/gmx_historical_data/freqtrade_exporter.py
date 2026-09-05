@@ -396,7 +396,7 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         keep_parquet: bool = True,
-    ) -> tuple[dict[str, dict], list[str]]:
+    ) -> tuple[dict[str, dict], list[str], list[ExportFailure]]:
         """Backward-compat wrapper: run candle export then funding export.
 
         Prefer :meth:`export_candles` and :meth:`export_funding` directly so
@@ -409,7 +409,8 @@ class FreqtradeExporter:
 
         :returns: Tuple of (merged per-symbol stats, sorted union of symbols
             that failed candle export and/or funding export and were
-            skipped -- see :meth:`export_candles` and :meth:`export_funding`).
+            skipped, sorted union of both pipelines' :class:`ExportFailure`
+            lists -- see :meth:`export_candles` and :meth:`export_funding`).
         """
         candle_kwargs = dict(
             symbols=symbols,
@@ -421,8 +422,8 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=keep_parquet,
         )
-        candle_results, candle_failed_symbols = self.export_candles(**candle_kwargs)
-        funding_results, funding_failed_symbols = self.export_funding(
+        candle_results, candle_failed_symbols, candle_failures = self.export_candles(**candle_kwargs)
+        funding_results, funding_failed_symbols, funding_failures = self.export_funding(
             symbols=symbols,
             timeframes=timeframes,
             output_format=output_format,
@@ -432,6 +433,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
         )
         failed_symbols = sorted(set(candle_failed_symbols) | set(funding_failed_symbols))
+        failures = sorted(
+            [*candle_failures, *funding_failures], key=lambda f: (f.symbol, f.timeframe)
+        )
 
         merged: dict[str, dict] = {}
         for symbol in sorted(set(candle_results) | set(funding_results)):
@@ -445,7 +449,7 @@ class FreqtradeExporter:
                 "mark_files": c.get("mark_files", 0),
                 "index_files": c.get("index_files", 0),
             }
-        return merged, failed_symbols
+        return merged, failed_symbols, failures
 
     def _make_gmx_dir(self, trading_mode: str) -> Path:
         """Resolve and create the per-trading-mode output directory."""

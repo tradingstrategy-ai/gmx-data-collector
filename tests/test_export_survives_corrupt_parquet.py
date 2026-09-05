@@ -344,3 +344,19 @@ def test_export_candles_aborts_on_enospc(tmp_path: Path, monkeypatch):
     with pytest.raises(OSError) as excinfo:
         exporter.export_candles(symbols=["AAA"], timeframes=["1h"])
     assert excinfo.value.errno == errno.ENOSPC
+
+
+def test_export_wrapper_merges_failures_from_both_pipelines(tmp_path: Path):
+    """export()'s failures list is the union of candle and funding
+    failures, not just one pipeline's."""
+    data_dir = tmp_path / "data"
+    _seed_data_dir(data_dir)  # BBB corrupt candles
+
+    output_dir = tmp_path / "output"
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols, failures = exporter.export(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
+
+    assert failed_symbols == ["BBB"]
+    assert any(f.symbol == "BBB" for f in failures)

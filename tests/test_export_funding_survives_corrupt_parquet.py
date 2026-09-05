@@ -96,10 +96,13 @@ def test_export_wrapper_propagates_funding_failed_symbols(tmp_path: Path):
     _seed_funding_dir(data_dir)
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    results, failed_symbols = exporter.export(symbols=["AAA", "BBB", "CCC"], timeframes=["1h"])
+    results, failed_symbols, failures = exporter.export(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
 
     assert failed_symbols == ["BBB"]
     assert set(results) == {"AAA", "CCC"}
+    assert any(f.symbol == "BBB" for f in failures)
 
 
 def test_export_funding_command_exits_nonzero_and_names_failed_symbol(tmp_path: Path):

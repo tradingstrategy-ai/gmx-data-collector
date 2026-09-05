@@ -99,9 +99,10 @@ def test_export_returns_stats(sample_storage):
     """Test export returns statistics."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result, failed_symbols = exporter.export()
+        result, failed_symbols, failures = exporter.export()
 
         assert failed_symbols == []
+        assert failures == []
         assert "ETH" in result
         assert "BTC" in result
         # ETH: 1h + 4h = 2 ohlcv + 2 mark + 2 index = 6
