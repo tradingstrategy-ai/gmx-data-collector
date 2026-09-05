@@ -2814,7 +2814,7 @@ def export_funding_command(
         )
     )
     try:
-        results = exporter.export_funding(
+        results, failed_symbols = exporter.export_funding(
             symbols=list(symbol) if symbol else None,
             timeframes=list(timeframe) if timeframe else None,
             output_format=output_format,
@@ -2830,6 +2830,21 @@ def export_funding_command(
     console.print(
         f"\n[green]✓[/green] {total} funding feathers written to [cyan]{output_dir / 'gmx'}[/cyan]"
     )
+
+    if failed_symbols:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
+                "skipped -- every other symbol still exported.[/red bold]\n"
+                f"Failed: {', '.join(sorted(failed_symbols))}",
+                title="Export Failures",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        # Non-zero exit is required: the downstream cron alert keys off it.
+        raise typer.Exit(1)
 
 
 app = typer.Typer(help=CLI_HELP, rich_markup_mode="rich")

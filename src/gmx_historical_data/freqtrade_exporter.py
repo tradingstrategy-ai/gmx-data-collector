@@ -212,13 +212,26 @@ class FreqtradeExporter:
         quote_currency: str = "USDC",
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
-    ) -> dict[str, dict]:
+    ) -> tuple[dict[str, dict], list[str]]:
         """Export funding_rate feathers only.
 
         Reads only from ``{data_dir}/funding/`` and writes only
         ``-funding_rate`` feathers.  Never touches OHLCV files.  The funding
         parquet source is owned by the unified-funding pipeline — this
         method never deletes it.
+
+        A symbol whose funding Parquet cannot be read (e.g. truncated by an
+        interrupted write) or whose feather write otherwise fails is recorded
+        in the returned ``failed_symbols`` list and skipped; every other
+        symbol still exports.  Mirrors :meth:`export_candles`'s per-symbol
+        guard (C2), applied here after a production dry run found the same
+        failure class live in the funding store (650 of 1,949 raw-store
+        Parquet files).  The exception set differs from ``export_candles``'s
+        because the read path differs: funding reads go through Polars
+        (:meth:`_read_funding_rate` calls ``pl.read_parquet`` directly) and
+        raise ``pl.exceptions.ComputeError`` on a corrupt/truncated file,
+        whereas ``export_candles`` reads via ``storage.read_candles()``
+        (pandas + pyarrow), which raises ``ArrowInvalid``.
 
         :param symbols: Specific symbols (default: all funding symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -227,7 +240,8 @@ class FreqtradeExporter:
         :param quote_currency: Quote/settlement currency (default ``'USDC'``).
         :param overwrite: Backward-compat alias; merges with history guard.
         :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
-        :returns: Dict mapping symbol to export stats.
+        :returns: Tuple of (dict mapping symbol to export stats, list of
+            symbols that failed and were skipped).
         """
         gmx_dir = self._make_gmx_dir(trading_mode)
 
@@ -239,53 +253,63 @@ class FreqtradeExporter:
         )
 
         results: dict[str, dict] = {}
+        failed_symbols: list[str] = []
         for symbol in export_symbols:
-            funding_files = 0
-            funding_tfs = set(self.list_funding_timeframes(symbol))
-            export_tfs = (
-                [tf for tf in timeframes if tf in funding_tfs]
-                if timeframes
-                else sorted(funding_tfs)
-            )
-
-            for tf in export_tfs:
-                funding_df = self._read_funding_rate(symbol, tf)
-                if funding_df is None or funding_df.is_empty():
-                    continue
-                ft_funding = validate_ohlcv(
-                    self._transform_funding_rate(funding_df),
-                    timestamp_column="date",
-                    location=f"export_funding({symbol}/{tf})",
-                    allow_nonpositive_prices=True,
+            try:
+                funding_files = 0
+                funding_tfs = set(self.list_funding_timeframes(symbol))
+                export_tfs = (
+                    [tf for tf in timeframes if tf in funding_tfs]
+                    if timeframes
+                    else sorted(funding_tfs)
                 )
-                self._write(
-                    ft_funding,
-                    gmx_dir
-                    / self._get_freqtrade_filename(
-                        symbol,
-                        tf,
-                        "feather" if output_format == "both" else output_format,
-                        trading_mode,
-                        quote_currency,
-                        candle_type="funding_rate",
-                    ),
-                    output_format,
-                    overwrite,
-                    unsafe_overwrite,
-                    allow_nonpositive_prices=True,
+
+                for tf in export_tfs:
+                    funding_df = self._read_funding_rate(symbol, tf)
+                    if funding_df is None or funding_df.is_empty():
+                        continue
+                    ft_funding = validate_ohlcv(
+                        self._transform_funding_rate(funding_df),
+                        timestamp_column="date",
+                        location=f"export_funding({symbol}/{tf})",
+                        allow_nonpositive_prices=True,
+                    )
+                    self._write(
+                        ft_funding,
+                        gmx_dir
+                        / self._get_freqtrade_filename(
+                            symbol,
+                            tf,
+                            "feather" if output_format == "both" else output_format,
+                            trading_mode,
+                            quote_currency,
+                            candle_type="funding_rate",
+                        ),
+                        output_format,
+                        overwrite,
+                        unsafe_overwrite,
+                        allow_nonpositive_prices=True,
+                    )
+                    funding_files += 2 if output_format == "both" else 1
+
+                results[symbol] = {
+                    "files": funding_files,
+                    "candles": 0,
+                    "ohlcv_files": 0,
+                    "funding_files": funding_files,
+                    "mark_files": 0,
+                    "index_files": 0,
+                }
+            except (pl.exceptions.ComputeError, OSError) as e:
+                logger.error(
+                    "export_funding(%s): skipping symbol after read/write failure: %s",
+                    symbol,
+                    e,
                 )
-                funding_files += 2 if output_format == "both" else 1
+                failed_symbols.append(symbol)
+                continue
 
-            results[symbol] = {
-                "files": funding_files,
-                "candles": 0,
-                "ohlcv_files": 0,
-                "funding_files": funding_files,
-                "mark_files": 0,
-                "index_files": 0,
-            }
-
-        return results
+        return results, failed_symbols
 
     def export(
         self,
@@ -308,10 +332,9 @@ class FreqtradeExporter:
         Parameters identical to :meth:`export_candles` plus the funding
         rate output.
 
-        :returns: Tuple of (merged per-symbol stats, list of symbols whose
-            candle export failed and were skipped -- see
-            :meth:`export_candles`). Funding export failures are not tracked
-            here; ``export_funding`` has no per-symbol guard.
+        :returns: Tuple of (merged per-symbol stats, sorted union of symbols
+            that failed candle export and/or funding export and were
+            skipped -- see :meth:`export_candles` and :meth:`export_funding`).
         """
         candle_kwargs = dict(
             symbols=symbols,
@@ -323,8 +346,8 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=keep_parquet,
         )
-        candle_results, failed_symbols = self.export_candles(**candle_kwargs)
-        funding_results = self.export_funding(
+        candle_results, candle_failed_symbols = self.export_candles(**candle_kwargs)
+        funding_results, funding_failed_symbols = self.export_funding(
             symbols=symbols,
             timeframes=timeframes,
             output_format=output_format,
@@ -333,6 +356,7 @@ class FreqtradeExporter:
             overwrite=overwrite,
             unsafe_overwrite=unsafe_overwrite,
         )
+        failed_symbols = sorted(set(candle_failed_symbols) | set(funding_failed_symbols))
 
         merged: dict[str, dict] = {}
         for symbol in sorted(set(candle_results) | set(funding_results)):

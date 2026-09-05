@@ -379,13 +379,14 @@ def test_export_funding_accepts_negative_rates(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
+    result, failed_symbols = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
 
     out = tmp_path / "output" / "gmx" / "futures" / "AAVE_USDC_USDC-1h-funding_rate.feather"
     assert out.exists()
     written = pl.read_ipc(out)
     assert written["open"].min() < 0  # negative funding rate preserved
     assert result["AAVE"]["funding_files"] == 1
+    assert failed_symbols == []
 
 
 def test_export_funding_both_counts_both_files(tmp_path):
@@ -402,11 +403,12 @@ def test_export_funding_both_counts_both_files(tmp_path):
         }
     ).write_parquet(funding_dir / "1h.parquet")
 
-    result = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
+    result, failed_symbols = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
         symbols=["AAVE"], timeframes=["1h"], output_format="both"
     )
 
     assert result["AAVE"]["funding_files"] == 2
+    assert failed_symbols == []
     out = tmp_path / "output" / "gmx" / "futures"
     assert (out / "AAVE_USDC_USDC-1h-funding_rate.feather").exists()
     assert (out / "AAVE_USDC_USDC-1h-funding_rate.parquet").exists()
@@ -437,7 +439,9 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"], output_format="both")
+    result, failed_symbols = exporter.export_funding(
+        symbols=["AAVE"], timeframes=["1h"], output_format="both"
+    )
 
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     feather = gmx_dir / "AAVE_USDC_USDC-1h-funding_rate.feather"
@@ -445,6 +449,7 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     assert feather.exists()
     assert parquet.exists()
     assert result["AAVE"]["funding_files"] == 2
+    assert failed_symbols == []
 
 
 def test_export_candles_both_unsafe_overwrite_regenerates_corrupt_file(sample_storage, tmp_path):
