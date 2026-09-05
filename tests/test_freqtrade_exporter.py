@@ -264,7 +264,10 @@ def test_export_candles_both_writes_equivalent_files(sample_storage, tmp_path):
     assert feather.equals(parquet)
 
 
-def test_export_candles_both_aborts_when_existing_file_is_corrupt(sample_storage, tmp_path):
+def test_export_candles_both_survives_when_existing_file_is_corrupt(sample_storage, tmp_path):
+    """A validate_ohlcv failure on an existing destination file (e.g. a
+    non-finite close value) is caught by the per-symbol guard and skipped
+    -- not raised -- matching export_candles()'s DATA_DEFECT_ERRORS contract."""
     exporter = FreqtradeExporter(sample_storage, tmp_path / "output")
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
@@ -281,8 +284,15 @@ def test_export_candles_both_aborts_when_existing_file_is_corrupt(sample_storage
         }
     ).write_parquet(corrupt)
 
-    with pytest.raises(ValueError, match="invalid OHLCV|parity mismatch"):
-        exporter.export_candles(symbols=["ETH"], timeframes=["1h"], output_format="both")
+    results, failed_symbols, failures = exporter.export_candles(
+        symbols=["ETH"], timeframes=["1h"], output_format="both"
+    )
+
+    assert failed_symbols == ["ETH"]
+    assert "ETH" not in results
+    assert len(failures) == 1
+    assert failures[0].symbol == "ETH"
+    assert failures[0].timeframe == "1h"
 
 
 def test_export_candles_both_leaves_existing_files_intact_on_second_write_failure(
