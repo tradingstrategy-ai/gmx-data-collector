@@ -17,6 +17,7 @@ from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
 from gmx_historical_data.ohlcv_validation import (
+    ExportValidationError,
     validate_ohlcv,
 )
 
@@ -47,31 +48,35 @@ def _assert_history_preserved(
     ts_label: str,
     location: str,
 ) -> None:
-    """Raise ValueError if a merge would shorten stored history.
+    """Raise ExportValidationError if a merge would shorten stored history.
 
     :param existing_stats: Coverage stats from the on-disk DataFrame.
     :param incoming_stats: Coverage stats from the incoming DataFrame.
     :param merged_stats: Coverage stats from the merged result.
     :param ts_label: Human-readable label for the timestamp column (for error messages).
     :param location: Caller location string (for error messages).
-    :raises ValueError: If the merge would lose the earliest or latest timestamp.
+    :raises ExportValidationError: If the merge would lose the earliest or latest timestamp.
     """
     if existing_stats["rows"] == 0:
         return
 
     if merged_stats["earliest"] is None or merged_stats["earliest"] > existing_stats["earliest"]:
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "history_shrink",
             f"{location}: merge would shorten history for {ts_label}: "
-            f"existing earliest={existing_stats['earliest']}, merged earliest={merged_stats['earliest']}"
+            f"existing earliest={existing_stats['earliest']}, merged earliest={merged_stats['earliest']}",
         )
 
     expected_latest = max(
         ts for ts in (existing_stats["latest"], incoming_stats["latest"]) if ts is not None
     )
     if merged_stats["latest"] is None or merged_stats["latest"] < expected_latest:
-        raise ValueError(
+        raise ExportValidationError(
+            location,
+            "history_shrink",
             f"{location}: merge would lose tail coverage for {ts_label}: "
-            f"expected latest={expected_latest}, merged latest={merged_stats['latest']}"
+            f"expected latest={expected_latest}, merged latest={merged_stats['latest']}",
         )
 
 
