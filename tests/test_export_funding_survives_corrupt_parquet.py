@@ -309,3 +309,36 @@ def test_export_funding_isolates_timeframes(tmp_path: Path):
     futures_dir = output_dir / "gmx" / "futures"
     assert (futures_dir / "BBB_USDC_USDC-1h-funding_rate.feather").exists()
     assert not (futures_dir / "BBB_USDC_USDC-8h-funding_rate.feather").exists()
+
+
+def test_export_funding_command_aborts_distinctly_on_enospc(tmp_path: Path, monkeypatch):
+    """A fatal environment error surfaces as a distinct 'Export Aborted'
+    panel, not the generic per-symbol 'Export Failures' panel -- an
+    operator must be able to tell 'the disk is full' from 'one symbol's
+    data is bad' at a glance."""
+    data_dir = tmp_path / "data"
+    _seed_funding_symbol(data_dir, "AAA", _make_funding_df())
+
+    def _raise_enospc(*args, **kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(fe_module, "atomic_write_ipc", _raise_enospc)
+
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "export-funding",
+            "--data-dir",
+            str(data_dir),
+            "--output-dir",
+            str(output_dir),
+            "--timeframe",
+            "1h",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Export Aborted" in result.output
+    assert "Export Failures" not in result.output

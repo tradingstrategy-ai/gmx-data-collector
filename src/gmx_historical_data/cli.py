@@ -2374,6 +2374,17 @@ def debug_oracle_command(
     console.print(summary_table)
 
 
+def _format_export_failures(failures: list) -> str:
+    """Render an ``ExportFailure`` list as one line per failure for a CLI panel.
+
+    :param failures: List of ``ExportFailure`` (symbol, timeframe, reason,
+        message) from an exporter call.
+    :returns: Newline-joined ``"{symbol}/{timeframe}: {reason}"`` lines,
+        empty string if ``failures`` is empty.
+    """
+    return "\n".join(f"  {f.symbol}/{f.timeframe}: {f.reason}" for f in failures)
+
+
 def export_freqtrade_command(
     data_dir: Path = typer.Option(
         Path("./user_data/data/gmx"),
@@ -2528,7 +2539,7 @@ def export_freqtrade_command(
     console.print("\n[bold]Exporting to Freqtrade format...[/bold]")
 
     try:
-        results, failed_symbols = exporter.export(
+        results, failed_symbols, failures = exporter.export(
             symbols=symbols_to_export,
             timeframes=timeframes_to_export,
             output_format=output_format,
@@ -2536,6 +2547,18 @@ def export_freqtrade_command(
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=not delete_source,
         )
+    except OSError as e:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]Fatal environment error -- the export was stopped rather than "
+                f"skipping the affected symbol.[/red bold]\n{e}",
+                title="Export Aborted",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1)
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
         console.print("[red]Traceback:[/red]")
@@ -2587,7 +2610,8 @@ def export_freqtrade_command(
             Panel(
                 f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
                 "skipped -- every other symbol still exported.[/red bold]\n"
-                f"Failed: {', '.join(sorted(failed_symbols))}",
+                f"Failed: {', '.join(sorted(failed_symbols))}\n\n"
+                f"{_format_export_failures(failures)}",
                 title="Export Failures",
                 box=box.ROUNDED,
                 border_style="red",
@@ -2715,7 +2739,7 @@ def export_candles_command(
         )
     )
     try:
-        results, failed_symbols = exporter.export_candles(
+        results, failed_symbols, failures = exporter.export_candles(
             symbols=list(symbol) if symbol else None,
             timeframes=list(timeframe) if timeframe else None,
             output_format=output_format,
@@ -2723,6 +2747,18 @@ def export_candles_command(
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=not delete_source,
         )
+    except OSError as e:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]Fatal environment error -- the export was stopped rather than "
+                f"skipping the affected symbol.[/red bold]\n{e}",
+                title="Export Aborted",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
         console.print(traceback.format_exc())
@@ -2741,7 +2777,8 @@ def export_candles_command(
             Panel(
                 f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
                 "skipped -- every other symbol still exported.[/red bold]\n"
-                f"Failed: {', '.join(sorted(failed_symbols))}",
+                f"Failed: {', '.join(sorted(failed_symbols))}\n\n"
+                f"{_format_export_failures(failures)}",
                 title="Export Failures",
                 box=box.ROUNDED,
                 border_style="red",
@@ -2814,13 +2851,25 @@ def export_funding_command(
         )
     )
     try:
-        results, failed_symbols = exporter.export_funding(
+        results, failed_symbols, failures = exporter.export_funding(
             symbols=list(symbol) if symbol else None,
             timeframes=list(timeframe) if timeframe else None,
             output_format=output_format,
             overwrite=overwrite,
             unsafe_overwrite=unsafe_overwrite,
         )
+    except OSError as e:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]Fatal environment error -- the export was stopped rather than "
+                f"skipping the affected symbol.[/red bold]\n{e}",
+                title="Export Aborted",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        raise typer.Exit(1) from e
     except Exception as e:
         console.print(f"[red]Export failed: {e}[/red]")
         console.print(traceback.format_exc())
@@ -2837,7 +2886,8 @@ def export_funding_command(
             Panel(
                 f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
                 "skipped -- every other symbol still exported.[/red bold]\n"
-                f"Failed: {', '.join(sorted(failed_symbols))}",
+                f"Failed: {', '.join(sorted(failed_symbols))}\n\n"
+                f"{_format_export_failures(failures)}",
                 title="Export Failures",
                 box=box.ROUNDED,
                 border_style="red",

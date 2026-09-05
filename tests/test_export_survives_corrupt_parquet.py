@@ -360,3 +360,31 @@ def test_export_wrapper_merges_failures_from_both_pipelines(tmp_path: Path):
 
     assert failed_symbols == ["BBB"]
     assert any(f.symbol == "BBB" for f in failures)
+
+
+def test_export_freqtrade_command_shows_failure_reason(tmp_path: Path):
+    """The CLI's failure panel names the reason slug, not just the symbol --
+    this is the whole point of the taxonomy: an operator glancing at the
+    output can tell 'one bad symbol' from 'systematic bug' by reading the
+    reason, not just a bare symbol list."""
+    data_dir = tmp_path / "data"
+    _seed_data_dir(data_dir)  # BBB corrupt (ArrowInvalid on truncated bytes)
+
+    output_dir = tmp_path / "output"
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "export-freqtrade",
+            "--data-dir",
+            str(data_dir),
+            "--output-dir",
+            str(output_dir),
+            "--timeframe",
+            "1h",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "BBB" in result.output
+    assert "ArrowInvalid" in result.output
