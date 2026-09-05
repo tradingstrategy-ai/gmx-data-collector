@@ -6,9 +6,11 @@ whole export -- and the CLI must still exit non-zero so the downstream cron
 alert keeps firing.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
+import polars as pl
 from typer.testing import CliRunner
 
 from gmx_historical_data.cli import app
@@ -82,6 +84,67 @@ def test_export_survives_corrupt_parquet(tmp_path: Path):
     assert (futures_dir / "AAA_USDC_USDC-1h-futures.feather").exists()
     assert (futures_dir / "CCC_USDC_USDC-1h-futures.feather").exists()
     assert not (futures_dir / "BBB_USDC_USDC-1h-futures.feather").exists()
+
+
+def _truncate_feather_footer(path: Path) -> None:
+    """Truncate a real Feather/IPC file so it lacks a valid footer.
+
+    :param path: Path to a valid Feather file to corrupt in place.
+    """
+    data = path.read_bytes()
+    assert len(data) > 20, "fixture feather too small to truncate meaningfully"
+    path.write_bytes(data[: len(data) // 2])
+
+
+def test_export_survives_corrupt_destination_feather(tmp_path: Path):
+    """A corrupt DESTINATION feather (not source) is caught by the same guard.
+
+    Reproduces the asymmetry a follow-up review found: storage.read_candles()
+    (the SOURCE read, inside export_candles()'s per-tf loop) uses pandas +
+    pyarrow and raises ArrowInvalid on corruption, but the merge path inside
+    _write() -- reached on every re-export where the destination already
+    exists -- reads that DESTINATION via Polars (pl.read_ipc/pl.read_parquet)
+    and raises pl.exceptions.ComputeError on the identical corruption. Before
+    the guard used the shared CORRUPT_PARQUET_ERRORS tuple, a corrupt
+    destination file would escape the (ArrowInvalid, OSError) clause and
+    abort the whole export -- exactly the failure C2 exists to prevent,
+    just entered from the output side instead of the input side.
+    """
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    for symbol in ("AAA", "BBB", "CCC"):
+        storage.save_candles(_make_candles(symbol), "1h", symbol)  # all SOURCES healthy
+
+    output_dir = tmp_path / "output"
+    futures_dir = output_dir / "gmx" / "futures"
+    futures_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-seed a valid destination feather for BBB, then corrupt it in place
+    # -- this is what a re-export onto an already-corrupt destination looks
+    # like (the merge path in _write() will try to read it).
+    dest = futures_dir / "BBB_USDC_USDC-1h-futures.feather"
+    pl.DataFrame(
+        {
+            "date": pl.Series([datetime(2024, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")),
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [0.0],
+        }
+    ).write_ipc(dest, compression="zstd")
+    _truncate_feather_footer(dest)
+
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols = exporter.export_candles(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
+
+    assert failed_symbols == ["BBB"]
+    assert "BBB" not in results
+    assert set(results) == {"AAA", "CCC"}
+    assert (futures_dir / "AAA_USDC_USDC-1h-futures.feather").exists()
+    assert (futures_dir / "CCC_USDC_USDC-1h-futures.feather").exists()
 
 
 def test_export_wrapper_propagates_failed_symbols(tmp_path: Path):
