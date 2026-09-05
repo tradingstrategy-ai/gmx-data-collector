@@ -379,7 +379,7 @@ def test_export_funding_accepts_negative_rates(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result, failed_symbols = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
+    result, failed_symbols, failures = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
 
     out = tmp_path / "output" / "gmx" / "futures" / "AAVE_USDC_USDC-1h-funding_rate.feather"
     assert out.exists()
@@ -403,9 +403,9 @@ def test_export_funding_both_counts_both_files(tmp_path):
         }
     ).write_parquet(funding_dir / "1h.parquet")
 
-    result, failed_symbols = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
-        symbols=["AAVE"], timeframes=["1h"], output_format="both"
-    )
+    result, failed_symbols, failures = FreqtradeExporter(
+        data_dir, tmp_path / "output"
+    ).export_funding(symbols=["AAVE"], timeframes=["1h"], output_format="both")
 
     assert result["AAVE"]["funding_files"] == 2
     assert failed_symbols == []
@@ -439,7 +439,7 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result, failed_symbols = exporter.export_funding(
+    result, failed_symbols, failures = exporter.export_funding(
         symbols=["AAVE"], timeframes=["1h"], output_format="both"
     )
 
