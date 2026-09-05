@@ -61,7 +61,6 @@ from extract_open_interest import (
 )
 from hypersync import (
     BlockField,
-    ClientConfig,
     FieldSelection,
     HypersyncClient,
     LogField,
@@ -79,6 +78,7 @@ from rich.progress import (
 )
 from web3 import Web3
 
+from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.market_registry import fetch_markets
 from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
 
@@ -252,7 +252,7 @@ def save_checkpoint(
 
 
 async def extract_pool_events(
-    client: HypersyncClient,
+    client: HypersyncClient | RotatingHypersyncClient,
     from_block: int,
     to_block: int | None,
     network: str = "arbitrum",
@@ -750,12 +750,13 @@ async def async_main(args: argparse.Namespace) -> None:
         token_decimals = fetch_token_decimals()
 
     raw_token = os.environ.get("HYPERSYNC_API_TOKEN")
-    api_token = raw_token.replace(",", " ").split()[0] if raw_token else None
-    if api_token:
-        console.print(f"  Using HyperSync API token: [cyan]{api_token[:8]}...[/cyan]")
+    client = RotatingHypersyncClient(raw_token, endpoint)
+    if client.total_keys > 1:
+        console.print(f"  Using HyperSync API key pool: [cyan]{client.total_keys} key(s)[/cyan]")
+    elif raw_token:
+        console.print(f"  Using HyperSync API token: [cyan]{raw_token[:8]}...[/cyan]")
     else:
         console.print("  [yellow]No HYPERSYNC_API_TOKEN set — may get 403 errors[/yellow]")
-    client = HypersyncClient(ClientConfig(url=endpoint, bearer_token=api_token))
 
     _resume_base_total = 0
     if args.resume:
