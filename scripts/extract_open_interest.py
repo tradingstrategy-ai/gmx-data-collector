@@ -99,6 +99,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.market_registry import fetch_markets as _fetch_markets_cached
 
@@ -1114,7 +1115,7 @@ def append_parquet(new_df: "pl.DataFrame", filepath: Path) -> None:
     if sort_cols:
         combined = combined.sort(sort_cols)
 
-    combined.write_parquet(filepath)
+    atomic_write_parquet(combined, filepath)
 
 
 def save_raw_per_symbol(records: list[OpenInterestRecord], output_dir: Path) -> None:
@@ -1177,10 +1178,10 @@ def save_snapshots_per_symbol(snapshots: list[DailyOISnapshot], output_dir: Path
             combined = pl.concat([existing, df], how="diagonal_relaxed")
             combined = combined.unique(subset=["date"], keep="last")
             combined = combined.sort("date")
-            combined.write_parquet(filepath)
+            atomic_write_parquet(combined, filepath)
         else:
             filepath.parent.mkdir(parents=True, exist_ok=True)
-            df.sort("date").write_parquet(filepath)
+            atomic_write_parquet(df.sort("date"), filepath)
 
         console.print(
             f"  Snapshots: [cyan]{len(sym_snapshots):,}[/cyan] days -> [green]{filepath}[/green]"

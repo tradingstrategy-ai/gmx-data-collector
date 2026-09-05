@@ -48,6 +48,8 @@ except ImportError:
     print("ERROR: polars is required. Install with: pip install polars")
     sys.exit(1)
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
+
 console = Console()
 
 
@@ -292,7 +294,7 @@ Examples:
         # Save
         out_dir = validation_dir / symbol
         out_dir.mkdir(parents=True, exist_ok=True)
-        comparison.write_parquet(out_dir / "1h_comparison.parquet")
+        atomic_write_parquet(comparison, out_dir / "1h_comparison.parquet")
         results[symbol] = comparison
         console.print(
             f"  [cyan]{symbol}[/cyan]: {len(comparison):,} hours -> "

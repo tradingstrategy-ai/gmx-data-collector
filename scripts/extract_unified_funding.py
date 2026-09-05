@@ -60,6 +60,8 @@ from pathlib import Path
 import polars as pl
 from rich.console import Console
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
+
 console = Console()
 
 
@@ -607,7 +609,7 @@ def merge_symbol(
     if output_format == "feather":
         unified.write_ipc(unified_path, compression="zstd")
     else:
-        unified.write_parquet(unified_path)
+        atomic_write_parquet(unified, unified_path)
 
     return len(unified)
 

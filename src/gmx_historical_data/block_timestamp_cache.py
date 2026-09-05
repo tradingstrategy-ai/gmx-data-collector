@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 from web3 import Web3
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
 from gmx_historical_data.config import (
     BLOCK_SAMPLE_INTERVAL,
     CACHE_STALE_THRESHOLD,
@@ -226,9 +227,9 @@ class BlockTimestampCache:
         df["block"] = df["block"].astype("uint64")
         df["timestamp"] = df["timestamp"].astype("uint64")
 
-        # Save to parquet
+        # Save to parquet (atomic — see atomic_parquet.py)
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(self.cache_path, index=False)
+        atomic_write_parquet_pandas(df, self.cache_path)
         self.cache_df = df
 
         console.print(
@@ -312,8 +313,8 @@ class BlockTimestampCache:
 
         self.cache_df = pd.concat([self.cache_df, new_df], ignore_index=True)
 
-        # Save updated cache
-        self.cache_df.to_parquet(self.cache_path, index=False)
+        # Save updated cache (atomic — see atomic_parquet.py)
+        atomic_write_parquet_pandas(self.cache_df, self.cache_path)
 
         console.print(
             f"[green]✓[/green] Cache updated with {len(new_df)} new samples (total: {len(self.cache_df)})"

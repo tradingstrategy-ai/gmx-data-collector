@@ -82,6 +82,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 
 try:
@@ -551,7 +552,7 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=dedup_cols, keep="last")
         combined = combined.sort(["block_number", "log_index"])
 
-    combined.write_parquet(filepath)
+    atomic_write_parquet(combined, filepath)
 
 
 def save_raw_oracle(records: list[OraclePriceRecord], output_dir: Path) -> None:

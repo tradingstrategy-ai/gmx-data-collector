@@ -23,6 +23,7 @@ from uuid import uuid4
 import polars as pl
 from pyarrow.lib import ArrowInvalid
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.ohlcv_validation import (
     assert_export_parity,
     validate_ohlcv,
@@ -625,11 +626,17 @@ class FreqtradeExporter:
         )
 
     def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
-        """Write a single export file in the requested format."""
+        """Write a single export file in the requested format.
+
+        The Parquet branch writes atomically (see ``atomic_parquet.py``) so an
+        interrupted write (HyperSync ``429``, kill, timeout) can never leave a
+        truncated ``-futures``/``-funding_rate`` parquet -- this is the direct
+        single-format counterpart of ``_write_both``'s tmp+backup dance below.
+        """
         if fmt == "feather":
             df.write_ipc(path, compression="zstd")
         elif fmt == "parquet":
-            df.write_parquet(str(path))
+            atomic_write_parquet(df, path)
         else:
             raise ValueError(f"Unsupported export format: {fmt}")
 

@@ -78,6 +78,7 @@ from rich.progress import (
 )
 from web3 import Web3
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.market_registry import fetch_markets
 from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
@@ -510,7 +511,7 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=["block_number", "log_index"], keep="last")
         combined = combined.sort(["block_number", "log_index"])
 
-    combined.write_parquet(filepath)
+    atomic_write_parquet(combined, filepath)
 
 
 def save_raw_per_symbol(records: list[PoolAmountRecord], output_dir: Path) -> None:
@@ -623,9 +624,9 @@ def save_daily_per_symbol(
             combined = pl.concat([existing, pl_df], how="diagonal_relaxed")
             combined = combined.unique(subset=["date", "token"], keep="last")
             combined = combined.sort(["date", "token"])
-            combined.write_parquet(filepath)
+            atomic_write_parquet(combined, filepath)
         else:
-            pl_df.sort(["date", "token"]).write_parquet(filepath)
+            atomic_write_parquet(pl_df.sort(["date", "token"]), filepath)
 
         console.print(f"  Snapshots: [cyan]{len(daily):,}[/cyan] days -> [green]{filepath}[/green]")
 

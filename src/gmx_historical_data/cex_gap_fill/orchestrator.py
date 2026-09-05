@@ -8,6 +8,7 @@ from pathlib import Path
 
 import polars as pl
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.cex_gap_fill.detector import DetectorConfig, detect_gaps
 from gmx_historical_data.cex_gap_fill.freqtrade_runner import (
     CEXDownloadError,
@@ -152,7 +153,7 @@ def fill_gaps_from_cex(
             )
 
             if not dry_run:
-                corrected.write_parquet(parquet_path)
+                atomic_write_parquet(corrected, parquet_path)
 
         summary.symbols_processed += 1
 

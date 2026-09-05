@@ -51,6 +51,7 @@ from eth_abi import encode as abi_encode
 from eth_defi.provider.multi_provider import create_multi_provider_web3
 from web3 import Web3
 
+from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 try:
@@ -556,9 +557,9 @@ def save_parquet(hourly_data: dict[str, "pl.DataFrame"], output_dir: Path) -> No
             combined = pl.concat([existing, df], how="diagonal_relaxed")
             combined = combined.unique(subset=["timestamp"], keep="last")
             combined = combined.sort("timestamp")
-            combined.write_parquet(filepath)
+            atomic_write_parquet(combined, filepath)
         else:
-            df.write_parquet(filepath)
+            atomic_write_parquet(df, filepath)
 
         console.print(f"  {symbol}: {len(df):,} rows → {filepath}")
 
