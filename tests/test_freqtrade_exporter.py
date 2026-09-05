@@ -99,8 +99,9 @@ def test_export_returns_stats(sample_storage):
     """Test export returns statistics."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result = exporter.export()
+        result, failed_symbols = exporter.export()
 
+        assert failed_symbols == []
         assert "ETH" in result
         assert "BTC" in result
         # ETH: 1h + 4h = 2 ohlcv + 2 mark + 2 index = 6
@@ -318,6 +319,11 @@ def test_export_candles_both_leaves_existing_files_intact_on_second_write_failur
 def test_export_candles_both_rolls_back_when_second_publish_fails(
     sample_storage, tmp_path, monkeypatch
 ):
+    """A publish failure is caught by the per-symbol guard (C2): the symbol is
+    recorded in ``failed_symbols`` and skipped rather than raising, and the
+    on-disk targets are left exactly as they were (no partial/truncated write)
+    -- the same invariant the atomic-write fix (C1) gives ``storage.py``.
+    """
     exporter = FreqtradeExporter(sample_storage, tmp_path / "output")
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
@@ -342,9 +348,12 @@ def test_export_candles_both_rolls_back_when_second_publish_fails(
 
     monkeypatch.setattr(Path, "replace", fail_once_on_parquet_publish)
 
-    with pytest.raises(OSError, match="publish failed"):
-        exporter.export_candles(symbols=["ETH"], timeframes=["1h"], output_format="both")
+    results, failed_symbols = exporter.export_candles(
+        symbols=["ETH"], timeframes=["1h"], output_format="both"
+    )
 
+    assert failed_symbols == ["ETH"]
+    assert "ETH" not in results
     assert pl.read_ipc(feather_path).equals(feather_before)
     assert pl.read_parquet(parquet_path).equals(parquet_before)
 

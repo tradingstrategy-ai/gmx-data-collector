@@ -21,6 +21,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
+from pyarrow.lib import ArrowInvalid
 
 from gmx_historical_data.ohlcv_validation import (
     assert_export_parity,
@@ -67,11 +68,19 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         keep_parquet: bool = True,
-    ) -> dict[str, dict]:
+    ) -> tuple[dict[str, dict], list[str]]:
         """Export OHLCV (candles + mark + index) feathers only.
 
         Reads only from ``{data_dir}/candles/`` and writes only ``-futures``,
         ``-mark``, and ``-index`` feathers.  Never touches funding files.
+
+        A symbol whose source Parquet cannot be read (e.g. truncated by an
+        interrupted write -- see ``storage.py``'s atomic-write fix) or whose
+        feather write otherwise fails is recorded in the returned
+        ``failed_symbols`` list and skipped; every other symbol still exports.
+        This bounds a single corrupt file's blast radius to one symbol instead
+        of aborting the whole export (2026-08-25 incident: a truncated
+        ``GMX/1m.parquet`` aborted export for 85 of 126 symbols).
 
         :param symbols: Specific symbols (default: all candle symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -82,7 +91,8 @@ class FreqtradeExporter:
         :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
         :param keep_parquet: Default ``True``.  If ``False`` the source candle
             parquet is deleted after a successful feather export.
-        :returns: Dict mapping symbol to export stats.
+        :returns: Tuple of (dict mapping symbol to export stats, list of
+            symbols that failed and were skipped).
         """
         gmx_dir = self._make_gmx_dir(trading_mode)
 
@@ -92,93 +102,105 @@ class FreqtradeExporter:
         )
 
         results: dict[str, dict] = {}
+        failed_symbols: list[str] = []
         for symbol in export_symbols:
-            ohlcv_files = mark_files = index_files = total_candles = 0
-            candle_tfs = set(self.storage.list_timeframes(symbol))
-            export_tfs = (
-                [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
-            )
-
-            for tf in export_tfs:
-                raw = self.storage.read_candles(tf, symbol)
-                if raw.empty:
-                    continue
-                df = pl.from_pandas(raw)
-
-                ft_df = validate_ohlcv(
-                    self._transform_dataframe(df),
-                    timestamp_column="date",
-                    location=f"export_candles({symbol}/{tf})",
+            try:
+                ohlcv_files = mark_files = index_files = total_candles = 0
+                candle_tfs = set(self.storage.list_timeframes(symbol))
+                export_tfs = (
+                    [tf for tf in timeframes if tf in candle_tfs]
+                    if timeframes
+                    else sorted(candle_tfs)
                 )
-                self._write(
-                    ft_df,
-                    gmx_dir
-                    / self._get_freqtrade_filename(
-                        symbol,
-                        tf,
-                        "feather" if output_format == "both" else output_format,
-                        trading_mode,
-                        quote_currency,
-                    ),
-                    output_format,
-                    overwrite,
-                    unsafe_overwrite,
+
+                for tf in export_tfs:
+                    raw = self.storage.read_candles(tf, symbol)
+                    if raw.empty:
+                        continue
+                    df = pl.from_pandas(raw)
+
+                    ft_df = validate_ohlcv(
+                        self._transform_dataframe(df),
+                        timestamp_column="date",
+                        location=f"export_candles({symbol}/{tf})",
+                    )
+                    self._write(
+                        ft_df,
+                        gmx_dir
+                        / self._get_freqtrade_filename(
+                            symbol,
+                            tf,
+                            "feather" if output_format == "both" else output_format,
+                            trading_mode,
+                            quote_currency,
+                        ),
+                        output_format,
+                        overwrite,
+                        unsafe_overwrite,
+                    )
+                    ohlcv_files += 2 if output_format == "both" else 1
+                    total_candles += len(ft_df)
+
+                    mark_df = validate_ohlcv(
+                        self._transform_mark_price(df),
+                        timestamp_column="date",
+                        location=f"export_candles({symbol}/{tf}) mark",
+                    )
+                    self._write(
+                        mark_df,
+                        gmx_dir
+                        / self._get_freqtrade_filename(
+                            symbol,
+                            tf,
+                            "feather" if output_format == "both" else output_format,
+                            trading_mode,
+                            quote_currency,
+                            candle_type="mark",
+                        ),
+                        output_format,
+                        overwrite,
+                        unsafe_overwrite,
+                    )
+                    mark_files += 2 if output_format == "both" else 1
+
+                    self._write(
+                        mark_df,
+                        gmx_dir
+                        / self._get_freqtrade_filename(
+                            symbol,
+                            tf,
+                            "feather" if output_format == "both" else output_format,
+                            trading_mode,
+                            quote_currency,
+                            candle_type="index",
+                        ),
+                        output_format,
+                        overwrite,
+                        unsafe_overwrite,
+                    )
+                    index_files += 2 if output_format == "both" else 1
+
+                    if not keep_parquet and output_format in {"feather", "both"}:
+                        self._cleanup_candle_source(symbol, tf)
+
+                results[symbol] = {
+                    "files": ohlcv_files + mark_files + index_files,
+                    "candles": total_candles,
+                    "ohlcv_files": ohlcv_files,
+                    "funding_files": 0,
+                    "mark_files": mark_files,
+                    "index_files": index_files,
+                }
+            except (ArrowInvalid, OSError) as e:
+                logger.error(
+                    "export_candles(%s): skipping symbol after read/write failure: %s",
+                    symbol,
+                    e,
                 )
-                ohlcv_files += 2 if output_format == "both" else 1
-                total_candles += len(ft_df)
+                failed_symbols.append(symbol)
+                continue
 
-                mark_df = validate_ohlcv(
-                    self._transform_mark_price(df),
-                    timestamp_column="date",
-                    location=f"export_candles({symbol}/{tf}) mark",
-                )
-                self._write(
-                    mark_df,
-                    gmx_dir
-                    / self._get_freqtrade_filename(
-                        symbol,
-                        tf,
-                        "feather" if output_format == "both" else output_format,
-                        trading_mode,
-                        quote_currency,
-                        candle_type="mark",
-                    ),
-                    output_format,
-                    overwrite,
-                    unsafe_overwrite,
-                )
-                mark_files += 2 if output_format == "both" else 1
-
-                self._write(
-                    mark_df,
-                    gmx_dir
-                    / self._get_freqtrade_filename(
-                        symbol,
-                        tf,
-                        "feather" if output_format == "both" else output_format,
-                        trading_mode,
-                        quote_currency,
-                        candle_type="index",
-                    ),
-                    output_format,
-                    overwrite,
-                    unsafe_overwrite,
-                )
-                index_files += 2 if output_format == "both" else 1
-
-                if not keep_parquet and output_format in {"feather", "both"}:
-                    self._cleanup_candle_source(symbol, tf)
-
-            results[symbol] = {
-                "files": ohlcv_files + mark_files + index_files,
-                "candles": total_candles,
-                "ohlcv_files": ohlcv_files,
-                "funding_files": 0,
-                "mark_files": mark_files,
-                "index_files": index_files,
-            }
-
-        return results
+        return results, failed_symbols
 
     def export_funding(
         self,
@@ -274,7 +296,7 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         keep_parquet: bool = True,
-    ) -> dict[str, dict]:
+    ) -> tuple[dict[str, dict], list[str]]:
         """Backward-compat wrapper: run candle export then funding export.
 
         Prefer :meth:`export_candles` and :meth:`export_funding` directly so
@@ -283,7 +305,12 @@ class FreqtradeExporter:
         callers that relied on the combined behaviour.
 
         Parameters identical to :meth:`export_candles` plus the funding
-        rate output.  Returns merged per-symbol stats.
+        rate output.
+
+        :returns: Tuple of (merged per-symbol stats, list of symbols whose
+            candle export failed and were skipped -- see
+            :meth:`export_candles`). Funding export failures are not tracked
+            here; ``export_funding`` has no per-symbol guard.
         """
         candle_kwargs = dict(
             symbols=symbols,
@@ -295,7 +322,7 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=keep_parquet,
         )
-        candle_results = self.export_candles(**candle_kwargs)
+        candle_results, failed_symbols = self.export_candles(**candle_kwargs)
         funding_results = self.export_funding(
             symbols=symbols,
             timeframes=timeframes,
@@ -318,7 +345,7 @@ class FreqtradeExporter:
                 "mark_files": c.get("mark_files", 0),
                 "index_files": c.get("index_files", 0),
             }
-        return merged
+        return merged, failed_symbols
 
     def _make_gmx_dir(self, trading_mode: str) -> Path:
         """Resolve and create the per-trading-mode output directory."""
