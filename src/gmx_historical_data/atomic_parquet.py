@@ -26,6 +26,7 @@ pyarrow (``ArrowInvalid``) and Polars directly (``pl.exceptions.ComputeError``,
 covering both its Parquet and Feather/IPC readers).
 """
 
+import errno
 import logging
 import os
 from pathlib import Path
@@ -34,6 +35,8 @@ from typing import Any
 import pandas as pd
 import polars as pl
 from pyarrow.lib import ArrowInvalid
+
+from gmx_historical_data.ohlcv_validation import ExportValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,50 @@ logger = logging.getLogger(__name__)
 CORRUPT_PARQUET_ERRORS: tuple[type[Exception], ...] = (
     ArrowInvalid,
     pl.exceptions.ComputeError,
+    OSError,
+)
+
+#: Fatal filesystem/OS-resource conditions where the correct behaviour is to
+#: abort the whole export run rather than treat one symbol as corrupt --
+#: continuing would mark every remaining symbol "failed" one at a time for a
+#: condition that has nothing to do with any of their data. See
+#: :func:`is_fatal_environment_error`.
+FATAL_ENVIRONMENT_ERRNOS: frozenset[int] = frozenset(
+    {errno.ENOSPC, errno.EROFS, errno.EDQUOT, errno.EMFILE, errno.ENFILE}
+)
+
+
+def is_fatal_environment_error(exc: BaseException) -> bool:
+    """Return ``True`` if ``exc`` is an ``OSError`` from a fatal environment condition.
+
+    Distinguishes "the disk is full" (``ENOSPC``), a read-only remount
+    (``EROFS``), a quota hit (``EDQUOT``), or exhausted file descriptors
+    (``EMFILE``/``ENFILE``) from an ordinary "this file is corrupt"
+    ``OSError``. Callers must check this *before* treating an ``OSError`` as
+    a per-symbol data defect, and re-raise instead of skipping when it is
+    ``True`` -- see ``FreqtradeExporter.export_candles``/``export_funding``.
+
+    :param exc: The caught exception.
+    :returns: ``True`` iff ``exc`` is an ``OSError`` whose ``errno`` is in
+        :data:`FATAL_ENVIRONMENT_ERRNOS`.
+    """
+    return isinstance(exc, OSError) and exc.errno in FATAL_ENVIRONMENT_ERRNOS
+
+
+#: Exception types that mean "this symbol/timeframe's data is defective --
+#: skip it and keep going", classified by what the operator should do
+#: rather than by which library raised it. Supersedes
+#: :data:`CORRUPT_PARQUET_ERRORS` for new call sites: adds
+#: :class:`~gmx_historical_data.ohlcv_validation.ExportValidationError` so a
+#: ``validate_ohlcv``/``assert_export_parity``/history-guard failure is
+#: caught by the same per-symbol guard as a truncated Parquet file, instead
+#: of propagating and aborting the whole export. ``OSError`` here still
+#: needs an :func:`is_fatal_environment_error` check first -- an ``OSError``
+#: matching that check must be re-raised, not treated as a data defect.
+DATA_DEFECT_ERRORS: tuple[type[Exception], ...] = (
+    ArrowInvalid,
+    pl.exceptions.ComputeError,
+    ExportValidationError,
     OSError,
 )
 
