@@ -154,9 +154,7 @@ def test_export_wrapper_propagates_failed_symbols(tmp_path: Path):
     _seed_data_dir(data_dir)
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    results, failed_symbols = exporter.export(
-        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
-    )
+    results, failed_symbols = exporter.export(symbols=["AAA", "BBB", "CCC"], timeframes=["1h"])
 
     assert failed_symbols == ["BBB"]
     assert set(results) == {"AAA", "CCC"}

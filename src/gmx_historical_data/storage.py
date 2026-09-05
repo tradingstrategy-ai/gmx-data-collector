@@ -181,9 +181,7 @@ class ParquetStorage:
                 logger.error("Failed to remove orphaned tmp file %s: %s", tmp_path, e)
                 continue
             removed.append(tmp_path)
-            logger.warning(
-                "Removed orphaned tmp file from an interrupted write: %s", tmp_path
-            )
+            logger.warning("Removed orphaned tmp file from an interrupted write: %s", tmp_path)
 
         return removed
 

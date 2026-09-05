@@ -37,9 +37,7 @@ def _simulate_interrupted_ipc_write(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pl.DataFrame, "write_ipc", _crash_mid_write)
 
 
-def test_atomic_write_ipc_leaves_no_corrupt_target(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_atomic_write_ipc_leaves_no_corrupt_target(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """An interrupted re-write leaves the previous feather target intact."""
     target = tmp_path / "ETH_USDC_USDC-1h-futures.feather"
     before_df = pl.DataFrame(
@@ -60,7 +58,9 @@ def test_atomic_write_ipc_leaves_no_corrupt_target(
 
     new_df = pl.DataFrame(
         {
-            "date": pl.Series([datetime(2024, 1, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")),
+            "date": pl.Series(
+                [datetime(2024, 1, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")
+            ),
             "open": [2.0],
             "high": [2.0],
             "low": [2.0],

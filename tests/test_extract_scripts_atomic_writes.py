@@ -150,7 +150,9 @@ def test_block_timestamp_cache_survives_interrupted_write(
     from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
 
     cache_path = tmp_path / "block_timestamps.parquet"
-    atomic_write_parquet_pandas(pd.DataFrame({"block": [1, 2], "timestamp": [100, 200]}), cache_path)
+    atomic_write_parquet_pandas(
+        pd.DataFrame({"block": [1, 2], "timestamp": [100, 200]}), cache_path
+    )
     assert cache_path.exists()
     before = pd.read_parquet(cache_path)
 
