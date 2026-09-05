@@ -49,7 +49,7 @@ is not in the tuple:
 |---|---|---|
 | `ohlcv_validation.validate_ohlcv` | 10 | missing columns, empty frame, non-monotonic/duplicate timestamps, bad OHLC relations |
 | `ohlcv_validation.assert_export_parity` | 2 | Feather/Parquet frames disagree |
-| `freqtrade_exporter._merge_export_frames` | 1 | history-preservation guard (the 2026-05-11 incident guard) |
+| `freqtrade_exporter._merge_export_frames` | 1 | schema regression guard (refuses to silently fill nulls when incoming has columns the existing destination lacks) |
 | `_write_single_frame` / `_write` | 2 | unsupported format |
 
 `export_funding` calls `validate_ohlcv(...)` directly at the top of each timeframe

@@ -53,6 +53,9 @@ class ExportValidationError(ValueError):
         self.location = location
         self.reason = reason
 
+    def __reduce__(self):
+        return (self.__class__, (self.location, self.reason, str(self)))
+
 
 @dataclass(frozen=True)
 class OhlcvValidationResult:

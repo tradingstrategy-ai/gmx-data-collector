@@ -634,11 +634,13 @@ class FreqtradeExporter:
             extra_in_existing = set(existing.columns) - set(incoming.columns)
             extra_in_incoming = set(incoming.columns) - set(existing.columns)
             if extra_in_incoming:
-                raise ValueError(
+                raise ExportValidationError(
+                    str(path),
+                    "schema_regression",
                     f"Schema regression while merging {path.name}: incoming "
                     f"dataframe has columns the existing file lacks: "
                     f"{sorted(extra_in_incoming)}.  Refusing to fill nulls — "
-                    "regenerate the file with --unsafe-overwrite if this is intentional."
+                    "regenerate the file with --unsafe-overwrite if this is intentional.",
                 )
             logger.info(
                 "Schema realignment on %s: dropping legacy columns %s "

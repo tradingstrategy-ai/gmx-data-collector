@@ -388,3 +388,50 @@ def test_export_freqtrade_command_shows_failure_reason(tmp_path: Path):
     assert result.exit_code != 0
     assert "BBB" in result.output
     assert "ArrowInvalid" in result.output
+
+
+def test_export_candles_shares_taxonomy_for_schema_regression(tmp_path: Path):
+    """A schema-regression raise from ``_merge_export_frames`` (incoming has
+    columns the existing destination lacks) is caught by the same per-symbol
+    guard as every other data defect -- the final-review finding: this raise
+    site was still a bare ``ValueError``, outside ``DATA_DEFECT_ERRORS``, so
+    it aborted the whole export instead of being confined to the one
+    offending symbol/timeframe."""
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    for symbol in ("AAA", "BBB", "CCC"):
+        storage.save_candles(_make_candles(symbol), "1h", symbol)  # all sources healthy
+
+    output_dir = tmp_path / "output"
+    futures_dir = output_dir / "gmx" / "futures"
+    futures_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-seed a valid destination feather for BBB that is missing "volume"
+    # -- a column the transform always produces on the incoming side. This
+    # makes _merge_export_frames hit its "extra_in_incoming" branch on
+    # re-export.
+    dest = futures_dir / "BBB_USDC_USDC-1h-futures.feather"
+    pl.DataFrame(
+        {
+            "date": pl.Series([datetime(2024, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ns", "UTC")),
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+        }
+    ).write_ipc(dest, compression="zstd")
+
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols, failures = exporter.export_candles(
+        symbols=["AAA", "BBB", "CCC"], timeframes=["1h"]
+    )
+
+    assert failed_symbols == ["BBB"]
+    assert "BBB" not in results
+    assert set(results) == {"AAA", "CCC"}
+    assert len(failures) == 1
+    assert failures[0].symbol == "BBB"
+    assert failures[0].timeframe == "1h"
+    assert failures[0].reason == "schema_regression"
+    assert (futures_dir / "AAA_USDC_USDC-1h-futures.feather").exists()
+    assert (futures_dir / "CCC_USDC_USDC-1h-futures.feather").exists()

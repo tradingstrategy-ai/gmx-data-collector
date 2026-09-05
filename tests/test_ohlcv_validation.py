@@ -209,3 +209,23 @@ def test_assert_export_parity_raises_export_validation_error_with_reason():
     with pytest.raises(ExportValidationError) as excinfo:
         assert_export_parity(left, right, location="X/1h")
     assert excinfo.value.reason == "parity_mismatch"
+
+
+def test_export_validation_error_pickle_round_trip():
+    """ExportValidationError's 3-arg __init__ is incompatible with
+    ValueError's default args-based __reduce__ (pickle.dumps would call
+    cls(str(exc)), missing the required reason/message args), so pickling
+    or copying an instance raised TypeError. __reduce__ fixes this --
+    latent today (ThreadPoolExecutor, not ProcessPoolExecutor, is used
+    throughout this repo) but a cheap inoculation against a future
+    ProcessPoolExecutor or cache that pickles exceptions."""
+    import pickle
+
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    original = ExportValidationError("X/1h", "test_reason", "test message")
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert restored.location == "X/1h"
+    assert restored.reason == "test_reason"
+    assert str(restored) == "test message"

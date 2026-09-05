@@ -23,7 +23,8 @@ clears any such stragglers at collection startup.
 Also exports :data:`CORRUPT_PARQUET_ERRORS`, the shared exception tuple for
 "this file is corrupt" across both read engines this repo uses: pandas +
 pyarrow (``ArrowInvalid``) and Polars directly (``pl.exceptions.ComputeError``,
-covering both its Parquet and Feather/IPC readers).
+covering both its Parquet and Feather/IPC readers). :data:`DATA_DEFECT_ERRORS`
+(also in this module) supersedes it for new export-guard call sites.
 """
 
 import errno
@@ -45,12 +46,11 @@ logger = logging.getLogger(__name__)
 #: (``storage.read_candles()``, via ``ArrowInvalid``) and Polars directly
 #: (``pl.read_parquet``/``pl.read_ipc``, via ``pl.exceptions.ComputeError``).
 #: ``OSError`` covers filesystem-level failures (permissions, disk full)
-#: surfacing at the same call sites. Use this wherever an export path needs
-#: to catch "this file is corrupt" without a bare except -- e.g.
+#: surfacing at the same call sites. Deprecated: kept only as a back-compat
+#: alias for importers that predate :data:`DATA_DEFECT_ERRORS` --
 #: ``FreqtradeExporter.export_candles()``/``export_funding()``'s per-symbol
-#: guard, which must catch corruption on both the *source* read (pandas/
-#: pyarrow) and the *destination* merge read (Polars) to avoid re-entering
-#: the same failure class from the output side.
+#: guard no longer uses this tuple. See :data:`DATA_DEFECT_ERRORS` for
+#: current usage.
 CORRUPT_PARQUET_ERRORS: tuple[type[Exception], ...] = (
     ArrowInvalid,
     pl.exceptions.ComputeError,
