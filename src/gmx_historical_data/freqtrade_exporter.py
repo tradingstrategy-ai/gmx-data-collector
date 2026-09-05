@@ -24,6 +24,7 @@ from uuid import uuid4
 import polars as pl
 
 from gmx_historical_data.atomic_parquet import (
+    CORRUPT_PARQUET_ERRORS,
     DATA_DEFECT_ERRORS,
     atomic_write_ipc,
     atomic_write_parquet,
