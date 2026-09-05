@@ -116,6 +116,12 @@ class GMXPeriodicCollector:
 
         # Initialize components
         self.storage = ParquetStorage(config.output_dir)
+        orphaned_tmp = self.storage.sweep_orphaned_tmp_files()
+        if orphaned_tmp:
+            logger.warning(
+                "Removed %d orphaned .tmp file(s) left by a previously interrupted write",
+                len(orphaned_tmp),
+            )
         self.gmx_fetcher = GMXDataFetcher(chain="arbitrum")
         self.gmx_discovery = GMXTokenDiscovery(chain="arbitrum")
         self.gap_detector = GapDetector(self.storage)

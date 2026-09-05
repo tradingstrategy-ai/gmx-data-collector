@@ -147,6 +147,12 @@ class DataCollector:
         else:
             self.hypersync = None
         self.storage = ParquetStorage(config.output_dir)
+        orphaned_tmp = self.storage.sweep_orphaned_tmp_files()
+        if orphaned_tmp:
+            console.print(
+                f"[yellow]Removed {len(orphaned_tmp)} orphaned .tmp file(s) left by a "
+                "previously interrupted write[/yellow]"
+            )
         self.checkpoint_mgr = CheckpointManager(config.checkpoints_dir)
         self.resampler = OHLCVResampler(decimals=8)
 
@@ -2522,7 +2528,7 @@ def export_freqtrade_command(
     console.print("\n[bold]Exporting to Freqtrade format...[/bold]")
 
     try:
-        results = exporter.export(
+        results, failed_symbols = exporter.export(
             symbols=symbols_to_export,
             timeframes=timeframes_to_export,
             output_format=output_format,
@@ -2574,6 +2580,21 @@ def export_freqtrade_command(
     console.print(summary_table)
     console.print()
     console.print(f"[green]✓[/green] Exported to: [cyan]{output_dir / 'gmx'}[/cyan]")
+
+    if failed_symbols:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
+                "skipped -- every other symbol still exported.[/red bold]\n"
+                f"Failed: {', '.join(sorted(failed_symbols))}",
+                title="Export Failures",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        # Non-zero exit is required: the downstream cron alert keys off it.
+        raise typer.Exit(1)
 
 
 # Create Typer app with comprehensive help
@@ -2694,7 +2715,7 @@ def export_candles_command(
         )
     )
     try:
-        results = exporter.export_candles(
+        results, failed_symbols = exporter.export_candles(
             symbols=list(symbol) if symbol else None,
             timeframes=list(timeframe) if timeframe else None,
             output_format=output_format,
@@ -2713,6 +2734,21 @@ def export_candles_command(
         f"\n[green]✓[/green] {total_files} feather files written ({total_candles:,} candles) "
         f"to [cyan]{output_dir / 'gmx'}[/cyan]"
     )
+
+    if failed_symbols:
+        console.print()
+        console.print(
+            Panel(
+                f"[red bold]{len(failed_symbols)} symbol(s) failed export and were "
+                "skipped -- every other symbol still exported.[/red bold]\n"
+                f"Failed: {', '.join(sorted(failed_symbols))}",
+                title="Export Failures",
+                box=box.ROUNDED,
+                border_style="red",
+            )
+        )
+        # Non-zero exit is required: the downstream cron alert keys off it.
+        raise typer.Exit(1)
 
 
 def export_funding_command(

@@ -5,6 +5,7 @@ and fast querying.
 """
 
 import logging
+import os
 import shutil
 from pathlib import Path
 
@@ -72,6 +73,57 @@ def _assert_history_preserved(
             f"{location}: merge would lose tail coverage for {ts_label}: "
             f"expected latest={expected_latest}, merged latest={merged_stats['latest']}"
         )
+
+
+def _atomic_write_parquet(
+    df: "pl.DataFrame",
+    output_path: Path,
+    *,
+    compression: str = "zstd",
+    compression_level: int = 3,
+) -> None:
+    """Write a Polars DataFrame to Parquet atomically.
+
+    Writes to ``<output_path.name>.tmp`` in the same directory, fsyncs the
+    file, then ``os.replace()``s it onto ``output_path``. ``os.replace`` is
+    atomic within a filesystem, so a process killed, timed out, or
+    rate-limited (HyperSync ``429``) mid-write leaves only a stray ``.tmp``
+    file and an intact previous target -- never a truncated Parquet file
+    with a missing footer.
+
+    This is the fix for the 2026-08-25 incident: an interrupted write left
+    ``candles/arbitrum/GMX/1m.parquet`` and ``candles/arbitrum/OP/1h.parquet``
+    truncated with no footer magic bytes, which later aborted the entire
+    Freqtrade export (see :meth:`FreqtradeExporter.export_candles`'s
+    per-symbol guard for the other half of the fix).
+
+    :param df: Polars DataFrame to write.
+    :param output_path: Final destination path for the Parquet file.
+    :param compression: Parquet compression codec.
+    :param compression_level: Compression level for the chosen codec.
+    :raises OSError: If the temporary file cannot be written, fsynced, or
+        renamed onto the target.
+    """
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    df.write_parquet(str(tmp_path), compression=compression, compression_level=compression_level)
+
+    # fsync the temp file's contents before the rename so a crash between
+    # write and rename cannot leave the target pointing at unflushed data.
+    fd = os.open(str(tmp_path), os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    os.replace(str(tmp_path), str(output_path))
+
+    # fsync the containing directory so the rename itself is durable across
+    # a crash, not just the file content.
+    dir_fd = os.open(str(output_path.parent), os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 # Raw events schema
@@ -152,6 +204,39 @@ class ParquetStorage:
         self.raw_dir = self.base_dir / "raw" / "arbitrum"
         self.candles_dir = self.base_dir / "candles" / "arbitrum"
 
+    def sweep_orphaned_tmp_files(self) -> list[Path]:
+        """Remove orphaned ``*.parquet.tmp`` files left by an interrupted write.
+
+        Every write path in this class goes through :func:`_atomic_write_parquet`,
+        which writes to ``<name>.parquet.tmp`` before ``os.replace()``-ing onto
+        the final target. A process kill, timeout, or HyperSync ``429`` mid-write
+        can therefore only ever strand the ``.tmp`` file itself -- the previous
+        target is never touched. Call this once at collection startup (before
+        any new writes begin) to clear those stragglers; it is deliberately
+        **not** invoked automatically by ``__init__`` because other call sites
+        (e.g. the Freqtrade exporter) construct :class:`ParquetStorage` for
+        reads only and must not race a concurrently-running collection's
+        legitimate in-flight ``.tmp`` file.
+
+        :return: List of removed ``.tmp`` file paths.
+        """
+        removed: list[Path] = []
+        if not self.base_dir.exists():
+            return removed
+
+        for tmp_path in sorted(self.base_dir.rglob("*.parquet.tmp")):
+            try:
+                tmp_path.unlink()
+            except OSError as e:
+                logger.error("Failed to remove orphaned tmp file %s: %s", tmp_path, e)
+                continue
+            removed.append(tmp_path)
+            logger.warning(
+                "Removed orphaned tmp file from an interrupted write: %s", tmp_path
+            )
+
+        return removed
+
     @property
     def events_dir(self) -> Path:
         """Directory for raw position events.
@@ -221,11 +306,9 @@ class ParquetStorage:
         # Convert to Arrow table with schema
         table = pa.Table.from_pandas(df, schema=RAW_EVENTS_SCHEMA)
 
-        # Write to Parquet with compression
+        # Write to Parquet with compression (atomic — see _atomic_write_parquet)
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        _atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path
 
@@ -345,9 +428,7 @@ class ParquetStorage:
             incoming = merged
 
         table = pa.Table.from_pandas(incoming.to_pandas(), schema=OHLCV_SCHEMA)
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        _atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path
 
@@ -491,10 +572,8 @@ class ParquetStorage:
         # Convert to Arrow table with schema
         table = pa.Table.from_pandas(df, schema=POSITION_EVENTS_SCHEMA)
 
-        # Write to Parquet with compression
+        # Write to Parquet with compression (atomic — see _atomic_write_parquet)
         output_path = partition_dir / "data.parquet"
-        pl.from_arrow(table).write_parquet(
-            str(output_path), compression="zstd", compression_level=3
-        )
+        _atomic_write_parquet(pl.from_arrow(table), output_path)
 
         return output_path
