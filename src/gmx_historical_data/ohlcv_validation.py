@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Literal
 
 import polars as pl
 
@@ -182,6 +183,8 @@ def validate_ohlcv(
     timestamp_column: str,
     location: str,
     allow_nonpositive_prices: bool = False,
+    expected_interval: timedelta | None = None,
+    cadence_policy: Literal["ignore", "raise"] = "ignore",
 ) -> pl.DataFrame:
     """Validate OHLCV invariants and return the original frame.
 
@@ -210,6 +213,19 @@ def validate_ohlcv(
         check is skipped.  Used for funding-rate frames, where the rate is
         stored in ``open`` and legitimately goes negative while the other OHLC
         columns are zero sentinels.
+    :param expected_interval: When set, the timeframe's fixed bar interval;
+        the frame is additionally scanned for interior cadence breaks (see
+        :func:`find_cadence_breaks`).  ``None`` -- the default -- skips the
+        scan entirely, so every pre-existing call site is unaffected.
+    :param cadence_policy: What to do with breaks found under
+        ``expected_interval``.  ``'ignore'`` (default) scans nothing and
+        reports nothing -- callers that want the findings call
+        :func:`find_cadence_breaks` directly.  ``'raise'`` raises
+        :class:`ExportValidationError` with reason ``'cadence_break'``.
+        The export path deliberately does **not** use ``'raise'``: 82% of
+        already-published files carry an inherited break, most of them
+        permanently unrecoverable past GMX's ~5-week retention window, so
+        raising would be a total release outage rather than a fix (issue #29).
     """
 
     required_columns = [timestamp_column, *PRICE_COLUMNS]
@@ -306,6 +322,23 @@ def validate_ohlcv(
                 "invalid_volume",
                 f"{location}: invalid OHLCV volume values count={invalid_volume.height} "
                 f"first_timestamp={first_timestamp}",
+            )
+
+    if expected_interval is not None and cadence_policy == "raise":
+        cadence_breaks = find_cadence_breaks(
+            working,
+            timestamp_column=timestamp_column,
+            expected_interval=expected_interval,
+        )
+        if cadence_breaks:
+            first = cadence_breaks[0]
+            missing_total = sum(b.missing_bars for b in cadence_breaks)
+            raise ExportValidationError(
+                location,
+                "cadence_break",
+                f"{location}: cadence break count={len(cadence_breaks)} "
+                f"missing_bars={missing_total} expected_interval={expected_interval} "
+                f"first_gap={first.actual} between {first.before} and {first.after}",
             )
 
     return frame

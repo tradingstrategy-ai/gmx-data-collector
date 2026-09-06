@@ -329,3 +329,77 @@ def test_find_cadence_breaks_is_order_independent():
     )
     assert len(breaks) == 1
     assert breaks[0].missing_bars == 1
+
+
+def test_validate_ohlcv_ignores_cadence_by_default():
+    """The default must be a complete no-op -- seven existing call sites and
+    10 existing tests depend on it."""
+    frame = _dated_frame([12, 16, 24])
+    assert validate_ohlcv(frame, timestamp_column="date", location="X/4h") is frame
+
+
+def test_validate_ohlcv_ignores_cadence_when_policy_is_ignore():
+    frame = _dated_frame([12, 16, 24])
+    assert (
+        validate_ohlcv(
+            frame,
+            timestamp_column="date",
+            location="X/4h",
+            expected_interval=timedelta(hours=4),
+            cadence_policy="ignore",
+        )
+        is frame
+    )
+
+
+def test_validate_ohlcv_raises_cadence_break_when_policy_is_raise():
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    frame = _dated_frame([12, 16, 24])
+    with pytest.raises(ExportValidationError) as excinfo:
+        validate_ohlcv(
+            frame,
+            timestamp_column="date",
+            location="X/4h",
+            expected_interval=timedelta(hours=4),
+            cadence_policy="raise",
+        )
+    assert excinfo.value.reason == "cadence_break"
+    assert excinfo.value.location == "X/4h"
+    assert isinstance(excinfo.value, ValueError)
+    assert "2025-06-02 16:00:00+00:00" in str(excinfo.value)
+
+
+def test_validate_ohlcv_cadence_raise_passes_contiguous_series():
+    frame = _dated_frame([0, 4, 8, 12])
+    assert (
+        validate_ohlcv(
+            frame,
+            timestamp_column="date",
+            location="X/4h",
+            expected_interval=timedelta(hours=4),
+            cadence_policy="raise",
+        )
+        is frame
+    )
+
+
+def test_validate_ohlcv_cadence_error_is_a_data_defect_error():
+    """The whole point of reusing the #28 taxonomy: the exporter's existing
+    guard must already catch this without any new plumbing."""
+    from gmx_historical_data.atomic_parquet import DATA_DEFECT_ERRORS
+    from gmx_historical_data.ohlcv_validation import ExportValidationError
+
+    frame = _dated_frame([12, 16, 24])
+    try:
+        validate_ohlcv(
+            frame,
+            timestamp_column="date",
+            location="X/4h",
+            expected_interval=timedelta(hours=4),
+            cadence_policy="raise",
+        )
+    except DATA_DEFECT_ERRORS as exc:
+        assert isinstance(exc, ExportValidationError)
+    else:
+        pytest.fail("cadence break was not caught by DATA_DEFECT_ERRORS")
