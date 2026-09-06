@@ -178,9 +178,7 @@ class FreqtradeExporter:
             ohlcv_files = mark_files = index_files = total_candles = 0
             candle_tfs = set(self.storage.list_timeframes(symbol))
             export_tfs = (
-                [tf for tf in timeframes if tf in candle_tfs]
-                if timeframes
-                else sorted(candle_tfs)
+                [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
             )
             symbol_failed = False
 
@@ -430,7 +428,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=keep_parquet,
         )
-        candle_results, candle_failed_symbols, candle_failures = self.export_candles(**candle_kwargs)
+        candle_results, candle_failed_symbols, candle_failures = self.export_candles(
+            **candle_kwargs
+        )
         funding_results, funding_failed_symbols, funding_failures = self.export_funding(
             symbols=symbols,
             timeframes=timeframes,

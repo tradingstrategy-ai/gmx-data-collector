@@ -398,9 +398,7 @@ def test_export_funding_auto_discovers_only_genuine_timeframe(tmp_path: Path):
 
     output_dir = tmp_path / "output"
     exporter = FreqtradeExporter(data_dir, output_dir)
-    results, failed_symbols, failures = exporter.export_funding(
-        symbols=["AAVE"], timeframes=None
-    )
+    results, failed_symbols, failures = exporter.export_funding(symbols=["AAVE"], timeframes=None)
 
     assert failed_symbols == []
     assert failures == []
