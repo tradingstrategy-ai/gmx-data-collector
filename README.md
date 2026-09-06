@@ -358,6 +358,61 @@ user_data/gmx/futures/
 └── ...
 ```
 
+### Cadence manifest
+
+Every `export-freqtrade` run publishes `_cadence_manifest.json` beside the exported
+feathers, at `user_data/data/gmx/futures/_cadence_manifest.json`. It ships inside
+`gmx-full.tar.gz`.
+
+GMX's oracle and this collector both have real outage windows, so a `-futures.feather`
+can be missing an interior bar. The series is still strictly monotonic, so a consumer
+checking only row counts or ordering cannot see the hole. The manifest records every one
+of them, per file:
+
+```json
+{
+  "generated_at": "2026-09-06T12:00:00+00:00",
+  "files": {
+    "BTC_USDC_USDC-4h-futures.feather": {
+      "timeframe": "4h",
+      "expected_interval_seconds": 14400,
+      "rows": 6862,
+      "first": "2023-07-20T08:00:00+00:00",
+      "last": "2026-09-06T00:00:00+00:00",
+      "breaks_total": 1,
+      "missing_bars_total": 1,
+      "truncated": false,
+      "breaks": [
+        {
+          "before": "2025-06-02T16:00:00+00:00",
+          "after": "2025-06-03T00:00:00+00:00",
+          "missing_bars": 1
+        }
+      ]
+    }
+  }
+}
+```
+
+Contract notes:
+
+- **Every exported `-futures` file gets an entry**, including contiguous ones
+  (`breaks_total: 0`). Absence from the manifest means "not checked", not "clean".
+- `breaks_total` and `missing_bars_total` are always exact. When `truncated` is `true`
+  the `breaks` list is capped at 200 entries (1m series can carry thousands).
+- Only candle (`-futures`) files are covered. `-funding_rate` files are deliberately not
+  cadence-checked: the funding transform drops null rates by design, so holes there are
+  expected.
+- Timestamps are ISO-8601 UTC. `before` is the last bar present before the hole, `after`
+  the next one present.
+- A gap listed here is a known upstream outage, not corruption. GMX retains raw data for
+  only ~5 weeks, so most listed gaps cannot be backfilled from source.
+- An optional `"regressed_from": "<previous release tag>"` field means *this release
+  introduced that break* in a span the named release recorded as contiguous. The data
+  still shipped — withholding a whole day of candles because one symbol regressed is
+  worse than publishing it labelled — so a consumer should quarantine just that file. The
+  release workflow files a tracking issue and ends red whenever it stamps one.
+
 ## Backtesting
 
 GMX requires [gmx-ccxt-freqtrade](https://github.com/tradingstrategy-ai/gmx-ccxt-freqtrade) monkeypatch. Use the included `freqtrade-gmx` wrapper.

@@ -47,7 +47,9 @@ def test_cadence_gate_runs_after_the_manifest_it_reads() -> None:
     captured the previous release's copy before collection overwrote it."""
     text = WORKFLOW.read_text()
 
-    assert text.index("Snapshot restored cadence manifest") < text.index("Generate cadence manifest")
+    assert text.index("Snapshot restored cadence manifest") < text.index(
+        "Generate cadence manifest"
+    )
     assert text.index("Generate cadence manifest") < text.index("Validate candle cadence")
 
 
