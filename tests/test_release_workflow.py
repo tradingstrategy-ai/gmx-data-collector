@@ -28,3 +28,59 @@ def test_release_workflow_validates_history_and_partial_fetches() -> None:
     assert "/tmp/gmx-restore-manifest.json" in text
     assert "Validate candle history integrity" in text
     assert "collector reported failed OHLCV fetches" in text
+
+
+def test_release_workflow_snapshots_and_validates_cadence() -> None:
+    text = WORKFLOW.read_text()
+
+    assert "Snapshot restored cadence manifest" in text
+    assert "/tmp/gmx-cadence-baseline.json" in text
+    assert "Generate cadence manifest" in text
+    assert "Validate candle cadence" in text
+    assert "_cadence_manifest.json" in text
+    assert "new cadence break" in text
+
+
+def test_cadence_gate_runs_after_the_manifest_it_reads() -> None:
+    """The gate must read the manifest this run just wrote, so it has to sit
+    after the step that generates it -- and after the baseline snapshot that
+    captured the previous release's copy before collection overwrote it."""
+    text = WORKFLOW.read_text()
+
+    assert text.index("Snapshot restored cadence manifest") < text.index("Generate cadence manifest")
+    assert text.index("Generate cadence manifest") < text.index("Validate candle cadence")
+
+
+def test_cadence_gate_retries_before_declaring_a_regression() -> None:
+    """A transient read failure must not be reported as a data regression;
+    the gate retries up to 3 attempts, matching this repo's existing
+    hand-rolled bash retry convention (collect-gmx-data.yml)."""
+    text = WORKFLOW.read_text()
+
+    assert "for attempt in 1 2 3; do" in text
+    assert "Cadence check attempt $attempt" in text
+
+
+def test_cadence_regression_ships_and_annotates_rather_than_blocking() -> None:
+    """A new break must not starve consumers of the whole release: the data
+    still publishes, the manifest records which file regressed, and the job
+    only goes red at the very end."""
+    text = WORKFLOW.read_text()
+
+    assert "regressed_from" in text
+    assert "CADENCE_REGRESSION_DETECTED=true" in text
+    assert "Fail job if a new cadence regression was not resolved by retry" in text
+    assert text.index("Validate candle cadence") < text.index("Package tarballs")
+    assert text.index("Create GitHub Release") < text.index(
+        "Fail job if a new cadence regression was not resolved by retry"
+    )
+
+
+def test_cadence_regression_files_a_deduped_issue() -> None:
+    text = WORKFLOW.read_text()
+
+    assert "issues: write" in text
+    assert "in:title cadence regression" in text
+    assert "gh issue comment" in text
+    assert "gh issue create" in text
+    assert "--assignee Aviksaikat" in text
