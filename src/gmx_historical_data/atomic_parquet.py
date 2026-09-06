@@ -30,6 +30,7 @@ covering both its Parquet and Feather/IPC readers). :data:`DATA_DEFECT_ERRORS`
 import errno
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -66,22 +67,42 @@ FATAL_ENVIRONMENT_ERRNOS: frozenset[int] = frozenset(
     {errno.ENOSPC, errno.EROFS, errno.EDQUOT, errno.EMFILE, errno.ENFILE}
 )
 
+#: Matches the "(os error N)" suffix pyarrow/Polars' Rust bindings append to a
+#: message when wrapping an underlying OS-level I/O failure. Confirmed
+#: empirically (real loop-mounted full filesystem): ``df.write_ipc()`` raises
+#: a bare ``OSError`` with ``errno=None`` on ENOSPC, and ``df.write_parquet()``
+#: raises ``pl.exceptions.ComputeError`` (not even an ``OSError``) for the
+#: identical condition -- in both cases the real errno survives only as text
+#: in the message, never as the standard ``.errno`` attribute.
+_OS_ERROR_IN_MESSAGE_PATTERN = re.compile(r"\(os error (\d+)\)")
+
 
 def is_fatal_environment_error(exc: BaseException) -> bool:
-    """Return ``True`` if ``exc`` is an ``OSError`` from a fatal environment condition.
+    """Return ``True`` if ``exc`` represents a fatal environment condition.
 
-    Distinguishes "the disk is full" (``ENOSPC``), a read-only remount
-    (``EROFS``), a quota hit (``EDQUOT``), or exhausted file descriptors
-    (``EMFILE``/``ENFILE``) from an ordinary "this file is corrupt"
-    ``OSError``. Callers must check this *before* treating an ``OSError`` as
-    a per-symbol data defect, and re-raise instead of skipping when it is
-    ``True`` -- see ``FreqtradeExporter.export_candles``/``export_funding``.
+    Checks a real ``errno`` first -- set correctly by the native ``os.*``
+    calls inside :func:`_commit_tmp_file` (``os.fsync``, ``os.replace``) when
+    they hit e.g. ``ENOSPC``. Falls back to parsing the ``"(os error N)"``
+    suffix pyarrow/Polars' Rust bindings emit in their own exception
+    messages for the SAME underlying failure, since those do not populate
+    ``.errno`` -- confirmed empirically: a full-disk write via
+    ``DataFrame.write_ipc()`` raises a bare ``OSError`` with ``errno=None``,
+    and ``DataFrame.write_parquet()`` raises ``pl.exceptions.ComputeError``
+    (not an ``OSError`` at all) -- both carry only
+    ``"... (os error 28)"`` as text. The message-parsing fallback is
+    therefore checked regardless of ``exc``'s type, not gated behind
+    ``isinstance(exc, OSError)``.
 
     :param exc: The caught exception.
-    :returns: ``True`` iff ``exc`` is an ``OSError`` whose ``errno`` is in
-        :data:`FATAL_ENVIRONMENT_ERRNOS`.
+    :returns: ``True`` iff a fatal errno (see :data:`FATAL_ENVIRONMENT_ERRNOS`)
+        is identified either via ``exc.errno`` or via the message text.
     """
-    return isinstance(exc, OSError) and exc.errno in FATAL_ENVIRONMENT_ERRNOS
+    if isinstance(exc, OSError) and exc.errno in FATAL_ENVIRONMENT_ERRNOS:
+        return True
+    match = _OS_ERROR_IN_MESSAGE_PATTERN.search(str(exc))
+    if match:
+        return int(match.group(1)) in FATAL_ENVIRONMENT_ERRNOS
+    return False
 
 
 #: Exception types that mean "this symbol/timeframe's data is defective --
