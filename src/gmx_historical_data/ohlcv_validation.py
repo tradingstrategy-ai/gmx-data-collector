@@ -7,7 +7,10 @@ publication, and the standalone integrity audit script.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Literal
 
 import polars as pl
 
@@ -57,6 +60,114 @@ class ExportValidationError(ValueError):
         return (self.__class__, (self.location, self.reason, str(self)))
 
 
+#: Multiplier from a timeframe token's unit suffix to minutes.  ``m`` and
+#: ``min`` are both accepted because this repo carries two key conventions:
+#: parquet file stems (and therefore ``storage.list_timeframes()`` and the
+#: exporter's ``tf`` variable) use ``1m``/``5m``/``15m``, while the pandas
+#: resampling path uses ``1min``/``5min``/``15min``.  Parsing rather than
+#: table lookup also resolves funding-style tokens such as ``8h``, which
+#: ``_FUNDING_TIMEFRAME_PATTERN`` admits but no fixed six-key table contains.
+_TIMEFRAME_UNIT_MINUTES: dict[str, int] = {"min": 1, "m": 1, "h": 60, "d": 1440}
+
+_TIMEFRAME_PATTERN = re.compile(r"^(\d+)(min|m|h|d)$")
+
+
+@dataclass(frozen=True, slots=True)
+class CadenceBreak:
+    """One interior discontinuity in an otherwise fixed-interval series.
+
+    A break is a step between two consecutive present bars that is larger
+    than the timeframe's expected interval -- i.e. one or more interior bars
+    are absent.  The series is still strictly monotonic, which is why
+    :func:`validate_ohlcv`'s ``non_monotonic`` guard never sees it.
+
+    :param before: Timestamp of the last bar present before the hole.
+    :param after: Timestamp of the next bar present after the hole.
+    :param actual: The observed step, ``after - before``.
+    :param missing_bars: Number of absent bars, ``actual // expected - 1``.
+    """
+
+    before: datetime
+    after: datetime
+    actual: timedelta
+    missing_bars: int
+
+
+def parse_timeframe_interval(timeframe: str) -> timedelta:
+    """Resolve a timeframe token to its fixed bar interval.
+
+    Accepts both key conventions used in this repo -- filename format
+    (``'1m'``, ``'15m'``, ``'4h'``, ``'1d'``) and pandas format (``'1min'``,
+    ``'15min'``) -- plus any other ``<count><unit>`` token, so funding-style
+    ``'8h'`` resolves without a table entry.
+
+    Note that :func:`gmx_historical_data.cex_gap_fill.detector.minutes_for_timeframe`
+    accepts *only* the pandas format and raises on ``'5m'``; this function is
+    the one to use anywhere the exporter's ``tf`` variable is in hand.
+
+    :param timeframe: Timeframe token, e.g. ``'4h'``.
+    :returns: The bar interval as a :class:`~datetime.timedelta`.
+    :raises ValueError: If ``timeframe`` is not a recognised token or its
+        count is zero.
+    """
+    match = _TIMEFRAME_PATTERN.match(timeframe)
+    if match is None:
+        raise ValueError(f"unrecognised timeframe token: {timeframe!r}")
+    count = int(match.group(1))
+    if count <= 0:
+        raise ValueError(f"timeframe count must be positive: {timeframe!r}")
+    return timedelta(minutes=count * _TIMEFRAME_UNIT_MINUTES[match.group(2)])
+
+
+def find_cadence_breaks(
+    frame: pl.DataFrame,
+    *,
+    timestamp_column: str,
+    expected_interval: timedelta,
+) -> list[CadenceBreak]:
+    """Find every interior step that is not exactly ``expected_interval``.
+
+    This is the check :func:`validate_ohlcv` has always lacked: its
+    ``non_monotonic`` guard rejects ``diff <= 0`` but accepts any positive
+    step, so a series missing an interior bar is monotonic-but-irregular and
+    passes silently (issue #29).
+
+    Pure by design -- it reports and never raises, because severity is a
+    policy decision for the caller.  82% of currently-shipped files carry at
+    least one break, most of them permanently unrecoverable, so the export
+    path records rather than rejects.
+
+    Only steps *larger* than expected are reported.  A smaller step means a
+    duplicate or off-grid timestamp, which
+    :func:`validate_ohlcv`'s ``duplicate_timestamps`` guard already covers.
+
+    :param frame: OHLCV frame; sorted or not.
+    :param timestamp_column: Name of the timestamp column.
+    :param expected_interval: The timeframe's fixed bar interval, from
+        :func:`parse_timeframe_interval`.
+    :returns: Breaks in ascending timestamp order; empty if the series is
+        contiguous or has fewer than two rows.
+    """
+    if frame.height < 2:
+        return []
+
+    timestamps = frame.get_column(timestamp_column).sort().to_list()
+    breaks: list[CadenceBreak] = []
+    for before, after in zip(timestamps, timestamps[1:], strict=False):
+        actual = after - before
+        if actual <= expected_interval:
+            continue
+        breaks.append(
+            CadenceBreak(
+                before=before,
+                after=after,
+                actual=actual,
+                missing_bars=int(actual // expected_interval) - 1,
+            )
+        )
+    return breaks
+
+
 @dataclass(frozen=True)
 class OhlcvValidationResult:
     """Structured summary for a successful OHLCV validation."""
@@ -72,6 +183,8 @@ def validate_ohlcv(
     timestamp_column: str,
     location: str,
     allow_nonpositive_prices: bool = False,
+    expected_interval: timedelta | None = None,
+    cadence_policy: Literal["ignore", "raise"] = "ignore",
 ) -> pl.DataFrame:
     """Validate OHLCV invariants and return the original frame.
 
@@ -100,6 +213,19 @@ def validate_ohlcv(
         check is skipped.  Used for funding-rate frames, where the rate is
         stored in ``open`` and legitimately goes negative while the other OHLC
         columns are zero sentinels.
+    :param expected_interval: When set, the timeframe's fixed bar interval;
+        the frame is additionally scanned for interior cadence breaks (see
+        :func:`find_cadence_breaks`).  ``None`` -- the default -- skips the
+        scan entirely, so every pre-existing call site is unaffected.
+    :param cadence_policy: What to do with breaks found under
+        ``expected_interval``.  ``'ignore'`` (default) scans nothing and
+        reports nothing -- callers that want the findings call
+        :func:`find_cadence_breaks` directly.  ``'raise'`` raises
+        :class:`ExportValidationError` with reason ``'cadence_break'``.
+        The export path deliberately does **not** use ``'raise'``: 82% of
+        already-published files carry an inherited break, most of them
+        permanently unrecoverable past GMX's ~5-week retention window, so
+        raising would be a total release outage rather than a fix (issue #29).
     """
 
     required_columns = [timestamp_column, *PRICE_COLUMNS]
@@ -196,6 +322,23 @@ def validate_ohlcv(
                 "invalid_volume",
                 f"{location}: invalid OHLCV volume values count={invalid_volume.height} "
                 f"first_timestamp={first_timestamp}",
+            )
+
+    if expected_interval is not None and cadence_policy == "raise":
+        cadence_breaks = find_cadence_breaks(
+            working,
+            timestamp_column=timestamp_column,
+            expected_interval=expected_interval,
+        )
+        if cadence_breaks:
+            first = cadence_breaks[0]
+            missing_total = sum(b.missing_bars for b in cadence_breaks)
+            raise ExportValidationError(
+                location,
+                "cadence_break",
+                f"{location}: cadence break count={len(cadence_breaks)} "
+                f"missing_bars={missing_total} expected_interval={expected_interval} "
+                f"first_gap={first.actual} between {first.before} and {first.after}",
             )
 
     return frame

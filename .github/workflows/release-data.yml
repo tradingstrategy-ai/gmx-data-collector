@@ -25,6 +25,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    # ``contents: write`` is what publishing the release itself needs.
+    # ``issues: write`` is the one extra grant: a surviving cadence
+    # regression files (or comments on) a tracking issue rather than
+    # silently shipping a new hole.
+    permissions:
+      contents: write
+      issues: write
+
     steps:
       - name: Checkout code from master
         uses: actions/checkout@v4
@@ -59,6 +67,10 @@ jobs:
               --limit 100 \
               --json tagName \
               --jq '[.[].tagName | select(test("^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))] | sort | reverse | .[0] // ""')
+
+          # Later steps need to name the release this run is measured against
+          # (the cadence gate records it as `regressed_from`).
+          echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> "$GITHUB_ENV"
 
           if [ -z "${PREVIOUS_TAG}" ]; then
             if [ "${ALLOW_FRESH_SEED}" = "true" ]; then
@@ -138,6 +150,14 @@ jobs:
               print(f"WARNING: registry unreachable ({exc}); reusing previous roster.")
               roster = sorted(previous)
 
+          # The roster below is rewritten *before* collection, and a market
+          # that just relisted drops off it at that moment -- which is
+          # exactly the run whose relisting seam the cadence gate must not
+          # flag. Keep the pre-rewrite roster so that one run is exempt.
+          Path("/tmp/gmx-delisted-baseline.json").write_text(
+              json.dumps({"symbols": sorted(previous)}, indent=2), encoding="utf-8"
+          )
+
           gmx_dir.mkdir(parents=True, exist_ok=True)
           roster_path.write_text(
               json.dumps(
@@ -184,6 +204,20 @@ jobs:
           )
           print(f"Captured restore manifest for {len(baseline)} futures files.")
           PY
+
+      # Must run BEFORE collection: this run regenerates the manifest in place,
+      # so the previous release's copy has to be taken off disk first or there
+      # is nothing left to diff against.
+      - name: Snapshot restored cadence manifest
+        run: |
+          BASELINE=./user_data/data/gmx/futures/_cadence_manifest.json
+          if [ -f "$BASELINE" ]; then
+            cp "$BASELINE" /tmp/gmx-cadence-baseline.json
+            echo "Captured cadence baseline from the previous release."
+          else
+            echo '{"files": {}}' > /tmp/gmx-cadence-baseline.json
+            echo "No cadence manifest in the previous release; first run after rollout."
+          fi
 
       - name: Collect daily snapshot
         env:
@@ -297,6 +331,137 @@ jobs:
           cmd = [sys.executable, "scripts/validate_price_continuity.py", "--allow-gaps", *files]
           raise SystemExit(subprocess.call(cmd))
           PY
+
+      # The release pipeline writes its futures feathers via
+      # scripts/collect_daily_snapshot.py, not via `export-freqtrade`, so the
+      # manifest that FreqtradeExporter.export_candles publishes for local
+      # exports is regenerated here from the files actually about to ship.
+      # It lands inside gmx-full.tar.gz because the packaging step below tars
+      # user_data/data/gmx/ wholesale (issue #29).
+      #
+      # The logic lives in src/gmx_historical_data/cadence_gate.py rather than
+      # in a heredoc here: an inline script cannot be unit-tested, and the
+      # first cut of this gate shipped a suppression rule that silently
+      # excluded every fresh outage -- the exact defect it exists to catch.
+      # See tests/test_cadence_gate.py.
+      - name: Generate cadence manifest
+        run: |
+          PYTHONPATH=src python -m gmx_historical_data.cadence_gate build \
+              --futures-dir ./user_data/data/gmx/futures
+
+      # Detection runs BEFORE packaging/publishing on purpose. A surviving
+      # regression does NOT block the release -- starving every consumer of a
+      # day of data because one symbol regressed is worse than shipping the
+      # regression with a label on it. Instead the offending manifest entry is
+      # annotated with `regressed_from`, an issue is filed, and a flag defers
+      # the job's failure to the very last step, after publish has succeeded.
+      - name: Validate candle cadence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Retry re-runs the read-and-diff only, never collection or export:
+          # a genuine regression is deterministic and would fail all three
+          # attempts identically, so the retry exists purely to absorb a
+          # transient read/JSON failure without misreporting it as a data
+          # regression. Re-running the export here would mutate published
+          # history mid-release for no benefit. Exit 2 = real regression,
+          # exit 1 = the check could not run.
+          STATUS=0
+          for attempt in 1 2 3; do
+            set +e
+            PYTHONPATH=src python -m gmx_historical_data.cadence_gate check \
+                --baseline /tmp/gmx-cadence-baseline.json \
+                --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
+                --regressions /tmp/gmx-cadence-regressions.json \
+                --delisted-roster ./user_data/data/gmx/delisted_markets.json \
+                --delisted-roster /tmp/gmx-delisted-baseline.json
+            STATUS=$?
+            set -e
+            if [ "$STATUS" -eq 0 ]; then
+              echo "Cadence check attempt $attempt succeeded."
+              break
+            fi
+            echo "Cadence check attempt $attempt failed (exit ${STATUS})."
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+
+          if [ "$STATUS" -eq 0 ]; then
+            exit 0
+          fi
+
+          if [ "$STATUS" -ne 2 ]; then
+            echo "ERROR: cadence check could not run after 3 attempts." >&2
+            exit 1
+          fi
+
+          # Set the flag FIRST. Everything below is best-effort reporting,
+          # and this step runs before packaging: if any of it failed under
+          # `set -e` the release itself would be blocked, which is the
+          # fail-closed behaviour this whole design exists to avoid. The
+          # job still ends red because the last step reads this flag.
+          echo "CADENCE_REGRESSION_DETECTED=true" >> "$GITHUB_ENV"
+          echo "::warning::New cadence break(s) detected; the release will publish and the job will end red."
+
+          PYTHONPATH=src python -m gmx_historical_data.cadence_gate annotate \
+              --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
+              --regressions /tmp/gmx-cadence-regressions.json \
+              --previous-tag "${PREVIOUS_TAG:-unknown}" \
+            || echo "WARNING: could not annotate the cadence manifest; the flag is still set." >&2
+
+          REPO=${{ github.repository }}
+          RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+          DATE=$(date -u +%Y-%m-%d)
+          FILES=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join(sorted({i['file'] for i in json.load(open(sys.argv[1]))})))" /tmp/gmx-cadence-regressions.json || echo "")
+          DETAILS=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join('- '+i['detail'] for i in json.load(open(sys.argv[1]))[:50]))" /tmp/gmx-cadence-regressions.json || echo "(details unavailable)")
+
+          # Fetch the open ticket list ONCE, with bodies, and match on the
+          # exact hidden marker below. `gh issue list --search` tokenises, and
+          # every candle filename shares `usdc`/`futures`/`feather` and a
+          # timeframe token with every other one, so relevance ranking can
+          # hand back a different symbol's ticket and we would comment on it.
+          gh issue list --repo "$REPO" --state open --limit 200 --json number,body \
+              > /tmp/gmx-open-issues.json 2>/dev/null || echo '[]' > /tmp/gmx-open-issues.json
+
+          # A fleet-wide upstream outage regresses ~107 symbols at once; cap
+          # issue churn so one bad night cannot open a hundred tickets.
+          FILED=0
+          while IFS= read -r FILE; do
+            if [ -z "$FILE" ]; then
+              continue
+            fi
+            if [ "$FILED" -ge 10 ]; then
+              echo "Issue cap reached; remaining regressions are in the job log and the manifest."
+              break
+            fi
+            BODY="A new cadence break appeared in \`${FILE}\` that the previous release (\`${PREVIOUS_TAG:-unknown}\`) recorded as contiguous.
+
+          Run: ${RUN_URL}
+
+          ${DETAILS}
+
+          The release still shipped: this file's data is unchanged from before the regression, and its \`_cadence_manifest.json\` entry is annotated with \`\"regressed_from\": \"${PREVIOUS_TAG:-unknown}\"\` so a consumer can quarantine just this file.
+
+          <!-- cadence-regression:${FILE} -->"
+            EXISTING=$(PYTHONPATH=src python -m gmx_historical_data.cadence_gate find-issue \
+                --issues /tmp/gmx-open-issues.json --file "$FILE" || echo "")
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" \
+                || echo "WARNING: could not comment on issue #${EXISTING}" >&2
+              echo "Commented on existing issue #${EXISTING} for ${FILE}."
+            else
+              gh issue create --repo "$REPO" \
+                  --title "cadence regression: ${FILE} — ${DATE}" \
+                  --assignee Aviksaikat \
+                  --label bug \
+                  --body "$BODY" \
+                || echo "WARNING: could not file an issue for ${FILE}" >&2
+            fi
+            FILED=$((FILED + 1))
+          done <<< "$FILES"
+
+          echo "Cadence regression recorded; the release will publish and the job will end red."
 
       - name: Collect 24h volume snapshot
         run: |
@@ -430,3 +595,18 @@ jobs:
                   fi
               done
           echo "Prune complete."
+
+      # Deliberately the LAST step in the job. By the time it runs, the
+      # annotated manifest has already shipped inside gmx-full.tar.gz and the
+      # release exists, so a red run reads as "published, but cadence
+      # regressed" rather than "the release failed".
+      - name: Fail job if a new cadence regression was not resolved by retry
+        if: always()
+        run: |
+          if [ "${CADENCE_REGRESSION_DETECTED:-false}" = "true" ]; then
+            echo "ERROR: this release introduced a new cadence break; see the tracking issue." >&2
+            echo "The data was published anyway and the affected manifest entries carry" >&2
+            echo "a 'regressed_from' annotation so consumers can quarantine those files." >&2
+            exit 1
+          fi
+          echo "No unresolved cadence regression."

@@ -16,9 +16,13 @@ Funding rate parquet files are read from
 ``{data_dir}/funding/arbitrum/rates/{SYMBOL}/{tf}.parquet``.
 """
 
+import json
 import logging
+import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,8 +35,11 @@ from gmx_historical_data.atomic_parquet import (
     is_fatal_environment_error,
 )
 from gmx_historical_data.ohlcv_validation import (
+    CadenceBreak,
     ExportValidationError,
     assert_export_parity,
+    find_cadence_breaks,
+    parse_timeframe_interval,
     validate_ohlcv,
 )
 from gmx_historical_data.storage import (
@@ -49,6 +56,44 @@ logger = logging.getLogger(__name__)
 # "1h_short_borrow", "1h_borrow_rate"), none of which are funding-rate data
 # and all of which fail this pattern because of their trailing suffix.
 _FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
+
+#: Filename of the cadence manifest published beside the exported feathers.
+#: It lands inside ``gmx-full.tar.gz`` because the release workflow tars
+#: ``user_data/data/gmx/`` wholesale, so downstream consumers can tell "this
+#: file is complete" from "this file has a known hole" by reading one JSON
+#: file instead of re-deriving the check per pair -- the duplication that
+#: caused the #657 incident.  The leading underscore and ``.json`` suffix
+#: keep it clear of every ``*.feather`` / ``*.parquet`` glob in this repo.
+CADENCE_MANIFEST_NAME = "_cadence_manifest.json"
+
+#: Cap on ``breaks`` entries recorded per file.  ``breaks_total`` and
+#: ``missing_bars_total`` are always exact; the list is truncated and
+#: ``truncated`` set to ``True`` beyond this many.  Without it the 1m
+#: feathers (8,157 breaks across 111 files) would dominate the manifest.
+MAX_BREAKS_PER_FILE = 200
+
+
+@dataclass(frozen=True, slots=True)
+class ExportWriteResult:
+    """What a publish actually put on disk.
+
+    The extents come from the **merged** frame -- the bytes the call wrote
+    -- not from the incoming slice.  A ``--symbol BTC`` run hands ``_write``
+    only the rows it just read, while the file on disk keeps years of
+    history behind them, so building a manifest entry from the incoming
+    frame would understate ``rows``/``first`` and misreport ``last``.
+
+    :param breaks: Cadence breaks found in the published frame; empty when
+        no ``expected_interval`` was supplied or the series is contiguous.
+    :param rows: Row count of the published frame.
+    :param first: Earliest timestamp in the published frame.
+    :param last: Latest timestamp in the published frame.
+    """
+
+    breaks: list[CadenceBreak]
+    rows: int
+    first: datetime | None
+    last: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +192,16 @@ class FreqtradeExporter:
         ``failed_symbols`` for the one that failed -- both can be true for
         the same symbol at once.
 
+        Every exported ``-futures`` file's published frame is scanned for
+        interior cadence breaks and recorded in ``_cadence_manifest.json``
+        beside the feathers (see :data:`CADENCE_MANIFEST_NAME`).  A break is
+        logged and recorded, never raised: 82% of already-published files
+        carry an inherited one and most are permanently unrecoverable past
+        GMX's ~5-week retention window, so rejecting them would wedge the
+        release instead of fixing anything.  Preventing a *new* silent gap is
+        the release workflow's regression gate, which diffs this manifest
+        against the previous release's (issue #29).
+
         :param symbols: Specific symbols (default: all candle symbols).
         :param timeframes: Specific timeframes (default: all available).
         :param output_format: ``'feather'`` or ``'parquet'``.
@@ -174,6 +229,7 @@ class FreqtradeExporter:
         results: dict[str, dict] = {}
         failed_symbols: list[str] = []
         failures: list[ExportFailure] = []
+        cadence_entries: dict[str, dict] = {}
         for symbol in export_symbols:
             ohlcv_files = mark_files = index_files = total_candles = 0
             candle_tfs = set(self.storage.list_timeframes(symbol))
@@ -194,19 +250,54 @@ class FreqtradeExporter:
                         timestamp_column="date",
                         location=f"export_candles({symbol}/{tf})",
                     )
-                    self._write(
-                        ft_df,
-                        gmx_dir
-                        / self._get_freqtrade_filename(
+                    futures_name = self._get_freqtrade_filename(
+                        symbol,
+                        tf,
+                        "feather" if output_format == "both" else output_format,
+                        trading_mode,
+                        quote_currency,
+                    )
+                    try:
+                        expected_interval = parse_timeframe_interval(tf)
+                    except ValueError as exc:
+                        # A stray or legacy timeframe stem must not abort the
+                        # export of the other 106 symbols. ``ValueError`` is
+                        # NOT a member of DATA_DEFECT_ERRORS (the reverse --
+                        # ExportValidationError subclasses ValueError -- is
+                        # what holds), so the guard below would not catch it.
+                        logger.error(
+                            "export_candles(%s/%s): unparseable timeframe, skipping: %s",
                             symbol,
                             tf,
-                            "feather" if output_format == "both" else output_format,
-                            trading_mode,
-                            quote_currency,
-                        ),
+                            exc,
+                        )
+                        failures.append(
+                            ExportFailure(
+                                symbol=symbol,
+                                timeframe=tf,
+                                reason="unknown_timeframe",
+                                message=str(exc),
+                            )
+                        )
+                        symbol_failed = True
+                        continue
+
+                    published = self._write(
+                        ft_df,
+                        gmx_dir / futures_name,
                         output_format,
                         overwrite,
                         unsafe_overwrite,
+                        expected_interval=expected_interval,
+                    )
+                    manifest_key = Path(futures_name).with_suffix(".feather").name
+                    cadence_entries[manifest_key] = self._cadence_manifest_entry(
+                        tf,
+                        expected_interval,
+                        published.rows,
+                        published.first,
+                        published.last,
+                        published.breaks,
                     )
                     ohlcv_files += 2 if output_format == "both" else 1
                     total_candles += len(ft_df)
@@ -276,6 +367,9 @@ class FreqtradeExporter:
                 }
             if symbol_failed:
                 failed_symbols.append(symbol)
+
+        if cadence_entries:
+            self.write_cadence_manifest(gmx_dir, cadence_entries)
 
         return results, failed_symbols, failures
 
@@ -458,6 +552,92 @@ class FreqtradeExporter:
                 "index_files": c.get("index_files", 0),
             }
         return merged, failed_symbols, failures
+
+    @staticmethod
+    def _cadence_manifest_entry(
+        timeframe: str,
+        expected_interval: timedelta,
+        frame_rows: int,
+        first: datetime | None,
+        last: datetime | None,
+        breaks: list[CadenceBreak],
+    ) -> dict:
+        """Build one manifest entry for a published candle file.
+
+        :param timeframe: Timeframe token as exported, e.g. ``'4h'``.
+        :param expected_interval: That timeframe's fixed bar interval.
+        :param frame_rows: Row count of the published frame.
+        :param first: Earliest timestamp in the published frame.
+        :param last: Latest timestamp in the published frame.
+        :param breaks: Cadence breaks found in the published frame.
+        :returns: JSON-serialisable manifest entry.
+        """
+        recorded = breaks[:MAX_BREAKS_PER_FILE]
+        return {
+            "timeframe": timeframe,
+            "expected_interval_seconds": int(expected_interval.total_seconds()),
+            "rows": frame_rows,
+            "first": first.isoformat() if first is not None else None,
+            "last": last.isoformat() if last is not None else None,
+            "breaks_total": len(breaks),
+            "missing_bars_total": sum(b.missing_bars for b in breaks),
+            "truncated": len(breaks) > MAX_BREAKS_PER_FILE,
+            "breaks": [
+                {
+                    "before": b.before.isoformat(),
+                    "after": b.after.isoformat(),
+                    "missing_bars": b.missing_bars,
+                }
+                for b in recorded
+            ],
+        }
+
+    def write_cadence_manifest(
+        self,
+        gmx_dir: Path,
+        entries: dict[str, dict],
+        drop: Iterable[str] = (),
+    ) -> Path:
+        """Merge ``entries`` into the cadence manifest and publish it atomically.
+
+        Merging rather than replacing is required: a partial run such as
+        ``export-freqtrade --symbol BTC`` touches one file, and must not
+        erase the other 106 symbols' recorded state.
+
+        ``drop`` is the counterweight to that merge.  A file this run tried
+        and failed to read must not keep its previous entry, because the
+        published ``generated_at`` would then vouch for a verdict nobody
+        recomputed.  Removing it restores the manifest's contract: absence
+        means "not checked", presence means "checked on this run".
+
+        :param gmx_dir: Directory the feathers were written to.
+        :param entries: Manifest entries keyed by feather filename.
+        :param drop: Filenames whose stale entries must be removed.
+        :returns: Path to the published manifest.
+        """
+        path = gmx_dir / CADENCE_MANIFEST_NAME
+        files: dict[str, dict] = {}
+        if path.exists():
+            try:
+                files = json.loads(path.read_text(encoding="utf-8")).get("files", {})
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.warning(
+                    "%s: unreadable cadence manifest, rebuilding from this run only: %s",
+                    path.name,
+                    exc,
+                )
+        for name in drop:
+            files.pop(name, None)
+        files.update(entries)
+
+        payload = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "files": dict(sorted(files.items())),
+        }
+        tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=False), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
 
     def _make_gmx_dir(self, trading_mode: str) -> Path:
         """Resolve and create the per-trading-mode output directory."""
@@ -748,6 +928,67 @@ class FreqtradeExporter:
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
 
+    def _publish_result(
+        self,
+        frame: pl.DataFrame,
+        path: Path,
+        expected_interval: timedelta | None,
+    ) -> ExportWriteResult:
+        """Describe the frame a publish is about to write.
+
+        :param frame: The post-merge frame that is about to be written.
+        :param path: Destination path, used for the log line only.
+        :param expected_interval: The timeframe's bar interval, or ``None``
+            to skip the cadence scan entirely.
+        :returns: Breaks plus the published frame's row count and extents.
+        """
+        dates = frame.get_column("date") if "date" in frame.columns else None
+        return ExportWriteResult(
+            breaks=self._scan_cadence(frame, path, expected_interval),
+            rows=frame.height,
+            first=dates.min() if dates is not None and frame.height else None,
+            last=dates.max() if dates is not None and frame.height else None,
+        )
+
+    def _scan_cadence(
+        self,
+        frame: pl.DataFrame,
+        path: Path,
+        expected_interval: timedelta | None,
+    ) -> list[CadenceBreak]:
+        """Scan a frame about to be published for interior cadence breaks.
+
+        Records and logs; never raises.  A break means one or more interior
+        bars are absent -- a real upstream oracle or collector outage, not a
+        transform bug -- and 82% of already-published files carry at least
+        one, most permanently unrecoverable past GMX's ~5-week retention
+        window.  Rejecting them would wedge the release rather than fix
+        anything, so the export path records them into the cadence manifest
+        instead (issue #29).
+
+        :param frame: The post-merge frame that is about to be written.
+        :param path: Destination path, used for the log line only.
+        :param expected_interval: The timeframe's bar interval, or ``None``
+            to skip the scan entirely.
+        :returns: Breaks found, in ascending timestamp order.
+        """
+        if expected_interval is None:
+            return []
+        breaks = find_cadence_breaks(
+            frame, timestamp_column="date", expected_interval=expected_interval
+        )
+        if breaks:
+            logger.warning(
+                "%s: %d cadence break(s), %d missing bar(s); first gap %s between %s and %s",
+                path.name,
+                len(breaks),
+                sum(b.missing_bars for b in breaks),
+                breaks[0].actual,
+                breaks[0].before,
+                breaks[0].after,
+            )
+        return breaks
+
     def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
         """Write a single export file in the requested format.
 
@@ -774,11 +1015,18 @@ class FreqtradeExporter:
         parquet_path: Path,
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
-    ) -> None:
+        expected_interval: timedelta | None = None,
+    ) -> ExportWriteResult:
         """Publish matching Feather and Parquet files from one canonical frame.
 
         ``unsafe_overwrite`` bypasses reading and merging both destinations so a
         corrupt pre-existing file can be regenerated from ``df`` alone.
+
+        :param expected_interval: When set, the merged frame -- the bytes this
+            call actually publishes -- is scanned for interior cadence breaks.
+            Findings are returned and logged, never raised (issue #29).
+        :returns: An :class:`ExportWriteResult` describing the merged frame
+            this call published.
         """
         if not unsafe_overwrite:
             existing_frames: list[pl.DataFrame] = []
@@ -813,6 +1061,8 @@ class FreqtradeExporter:
                     file_size=feather_path.stat().st_size if feather_path.exists() else 0,
                     allow_nonpositive_prices=allow_nonpositive_prices,
                 )
+
+        result = self._publish_result(df, feather_path, expected_interval)
 
         feather_tmp = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.tmp")
         parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -856,6 +1106,8 @@ class FreqtradeExporter:
                 if backup_path.exists():
                     backup_path.unlink()
 
+        return result
+
     def _write(
         self,
         df: pl.DataFrame,
@@ -864,7 +1116,8 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         allow_nonpositive_prices: bool = False,
-    ) -> None:
+        expected_interval: timedelta | None = None,
+    ) -> ExportWriteResult:
         """Merge-write dataframe into an existing file or create it.
 
         Behaviour matrix:
@@ -895,20 +1148,26 @@ class FreqtradeExporter:
             the history guard.
         :param unsafe_overwrite: If ``True``, bypass the history guard and
             replace the file entirely.  For schema migrations only.
+        :param expected_interval: When set, the merged frame -- the bytes this
+            call actually publishes -- is scanned for interior cadence breaks.
+            Findings are returned and logged, never raised: see the module's
+            ``export_candles`` docstring and issue #29.  ``None`` skips the scan.
+        :returns: An :class:`ExportWriteResult` describing the merged frame
+            this call published -- its cadence breaks, row count and extents.
         :raises ValueError: If a merge would shrink existing history and
             ``unsafe_overwrite`` is not set.
         """
         if fmt == "both":
             feather_path = path if path.suffix == ".feather" else path.with_suffix(".feather")
             parquet_path = feather_path.with_suffix(".parquet")
-            self._write_both(
+            return self._write_both(
                 df,
                 feather_path,
                 parquet_path,
                 unsafe_overwrite,
                 allow_nonpositive_prices,
+                expected_interval,
             )
-            return
 
         if fmt not in {"feather", "parquet"}:
             raise ValueError(f"Unsupported export format: {fmt}")
@@ -920,7 +1179,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
+        result = self._publish_result(merged, path, expected_interval)
         self._write_single_frame(merged, path, fmt)
+        return result
 
     # ------------------------------------------------------------------
     # Filename generation
