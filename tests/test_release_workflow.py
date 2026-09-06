@@ -82,7 +82,28 @@ def test_cadence_regression_files_a_deduped_issue() -> None:
     text = WORKFLOW.read_text()
 
     assert "issues: write" in text
-    assert "in:title cadence regression" in text
     assert "gh issue comment" in text
     assert "gh issue create" in text
     assert "--assignee Aviksaikat" in text
+
+
+def test_cadence_issue_dedupe_matches_a_marker_not_a_fuzzy_search() -> None:
+    """`gh issue list --search` tokenises, so a shared token (`4h`,
+    `futures`, `feather`, `usdc`) could rank another symbol's ticket first
+    and we would comment on the wrong one. The gate lists open issues once
+    and matches the exact hidden marker instead."""
+    text = WORKFLOW.read_text()
+
+    assert "in:title cadence regression" not in text
+    assert "--json number,body" in text
+    assert "cadence_gate find-issue" in text
+
+
+def test_cadence_gate_logic_is_importable_not_inlined() -> None:
+    """The embedded-heredoc version of this gate shipped a bug that no
+    YAML-substring test could see. The logic must stay in a module that
+    tests/test_cadence_gate.py can exercise directly."""
+    text = WORKFLOW.read_text()
+
+    for command in ("build", "check", "annotate"):
+        assert f"gmx_historical_data.cadence_gate {command}" in text

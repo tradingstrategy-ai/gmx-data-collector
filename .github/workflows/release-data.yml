@@ -330,59 +330,16 @@ jobs:
       # exports is regenerated here from the files actually about to ship.
       # It lands inside gmx-full.tar.gz because the packaging step below tars
       # user_data/data/gmx/ wholesale (issue #29).
+      #
+      # The logic lives in src/gmx_historical_data/cadence_gate.py rather than
+      # in a heredoc here: an inline script cannot be unit-tested, and the
+      # first cut of this gate shipped a suppression rule that silently
+      # excluded every fresh outage -- the exact defect it exists to catch.
+      # See tests/test_cadence_gate.py.
       - name: Generate cadence manifest
         run: |
-          PYTHONPATH=src python - <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          import polars as pl
-
-          from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
-          from gmx_historical_data.ohlcv_validation import (
-              find_cadence_breaks,
-              parse_timeframe_interval,
-          )
-
-          futures_dir = Path("./user_data/data/gmx/futures")
-          pattern = re.compile(r"-(1m|5m|15m|1h|4h|1d)-futures\.feather$")
-
-          entries: dict[str, dict] = {}
-          for path in sorted(futures_dir.glob("*-futures.feather")):
-              match = pattern.search(path.name)
-              if match is None:
-                  continue
-              timeframe = match.group(1)
-              expected_interval = parse_timeframe_interval(timeframe)
-              frame = pl.read_ipc(path, memory_map=False)
-              if frame.is_empty():
-                  continue
-              breaks = find_cadence_breaks(
-                  frame, timestamp_column="date", expected_interval=expected_interval
-              )
-              entries[path.name] = FreqtradeExporter._cadence_manifest_entry(
-                  timeframe,
-                  expected_interval,
-                  frame.height,
-                  frame.get_column("date").min(),
-                  frame.get_column("date").max(),
-                  breaks,
-              )
-
-          if not entries:
-              print("ERROR: no futures feathers found to build a cadence manifest.", file=sys.stderr)
-              sys.exit(1)
-
-          exporter = FreqtradeExporter(Path("./user_data/data/gmx"), Path("./user_data/data/gmx"))
-          manifest_path = exporter.write_cadence_manifest(futures_dir, entries)
-          total = sum(e["breaks_total"] for e in entries.values())
-          gapped = sum(1 for e in entries.values() if e["breaks_total"])
-          print(
-              f"Wrote {manifest_path.name}: {len(entries)} files, "
-              f"{gapped} with a break, {total} break(s) total."
-          )
-          PY
+          PYTHONPATH=src python -m gmx_historical_data.cadence_gate build \
+              --futures-dir ./user_data/data/gmx/futures
 
       # Detection runs BEFORE packaging/publishing on purpose. A surviving
       # regression does NOT block the release -- starving every consumer of a
@@ -394,121 +351,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cat > /tmp/gmx-cadence-check.py <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          baseline = json.loads(Path("/tmp/gmx-cadence-baseline.json").read_text(encoding="utf-8"))
-          current_path = Path("./user_data/data/gmx/futures/_cadence_manifest.json")
-          if not current_path.exists():
-              print("ERROR: export produced no cadence manifest.", file=sys.stderr)
-              sys.exit(1)
-
-          current = json.loads(current_path.read_text(encoding="utf-8"))
-          base_files = baseline.get("files", {})
-          regressions = []
-
-          for name, entry in sorted(current.get("files", {}).items()):
-              before = base_files.get(name)
-              if before is None:
-                  # New file, or first run after rollout: nothing to compare.
-                  continue
-              if before.get("truncated") or entry.get("truncated"):
-                  # Break lists are incomplete on either side; the totals are
-                  # still exact, so fall back to comparing those.
-                  if entry["breaks_total"] > before["breaks_total"]:
-                      regressions.append(
-                          {
-                              "file": name,
-                              "detail": (
-                                  f"{name}: new cadence break (total "
-                                  f"{before['breaks_total']} -> {entry['breaks_total']}, "
-                                  "truncated lists)"
-                              ),
-                          }
-                      )
-                  continue
-
-              known = {(b["before"], b["after"]) for b in before["breaks"]}
-              baseline_last = before.get("last")
-              for gap in entry["breaks"]:
-                  if (gap["before"], gap["after"]) in known:
-                      continue
-                  if baseline_last is not None and gap["before"] >= baseline_last:
-                      # The hole is in territory the previous release did not
-                      # cover, so it cannot be a regression against it.
-                      continue
-                  regressions.append(
-                      {
-                          "file": name,
-                          "detail": (
-                              f"{name}: new cadence break - {gap['missing_bars']} bar(s) "
-                              f"missing between {gap['before']} and {gap['after']}"
-                          ),
-                      }
-                  )
-
-          Path("/tmp/gmx-cadence-regressions.json").write_text(
-              json.dumps(regressions, indent=2), encoding="utf-8"
-          )
-
-          if regressions:
-              print("ERROR: cadence regressions detected in this release:", file=sys.stderr)
-              for item in regressions[:20]:
-                  print(f"  - {item['detail']}", file=sys.stderr)
-              if len(regressions) > 20:
-                  print(f"  ... and {len(regressions) - 20} more", file=sys.stderr)
-              # Exit 2 = a real data regression, deterministic across retries.
-              # Exit 1 (above) = the check itself could not run.
-              sys.exit(2)
-
-          total_breaks = sum(e["breaks_total"] for e in current.get("files", {}).values())
-          print(
-              f"Cadence OK: {len(current.get('files', {}))} files checked, "
-              f"{total_breaks} inherited break(s), 0 new."
-          )
-          PY
-
-          cat > /tmp/gmx-cadence-annotate.py <<'PY'
-          import json
-          import os
-          import sys
-          from pathlib import Path
-
-          regressions = json.loads(
-              Path("/tmp/gmx-cadence-regressions.json").read_text(encoding="utf-8")
-          )
-          manifest_path = Path("./user_data/data/gmx/futures/_cadence_manifest.json")
-          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-          previous_tag = os.environ.get("PREVIOUS_TAG") or "unknown"
-
-          # Stamp the regression onto the entry itself so a consumer reading
-          # only the shipped tarball can quarantine this one file rather than
-          # distrusting (or crashing on) the whole release.
-          for name in sorted({item["file"] for item in regressions}):
-              entry = manifest.get("files", {}).get(name)
-              if entry is not None:
-                  entry["regressed_from"] = previous_tag
-
-          manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-          print(
-              f"Annotated {len({i['file'] for i in regressions})} manifest entry(ies) "
-              f"with regressed_from={previous_tag}.",
-              file=sys.stderr,
-          )
-          PY
-
           # Retry re-runs the read-and-diff only, never collection or export:
           # a genuine regression is deterministic and would fail all three
           # attempts identically, so the retry exists purely to absorb a
           # transient read/JSON failure without misreporting it as a data
           # regression. Re-running the export here would mutate published
-          # history mid-release for no benefit.
+          # history mid-release for no benefit. Exit 2 = real regression,
+          # exit 1 = the check could not run.
           STATUS=0
           for attempt in 1 2 3; do
             set +e
-            PYTHONPATH=src python /tmp/gmx-cadence-check.py
+            PYTHONPATH=src python -m gmx_historical_data.cadence_gate check \
+                --baseline /tmp/gmx-cadence-baseline.json \
+                --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
+                --regressions /tmp/gmx-cadence-regressions.json
             STATUS=$?
             set -e
             if [ "$STATUS" -eq 0 ]; then
@@ -530,13 +386,24 @@ jobs:
             exit 1
           fi
 
-          PYTHONPATH=src python /tmp/gmx-cadence-annotate.py
+          PYTHONPATH=src python -m gmx_historical_data.cadence_gate annotate \
+              --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
+              --regressions /tmp/gmx-cadence-regressions.json \
+              --previous-tag "${PREVIOUS_TAG:-unknown}"
 
           REPO=${{ github.repository }}
           RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
           DATE=$(date -u +%Y-%m-%d)
-          FILES=$(python -c "import json;print('\n'.join(sorted({i['file'] for i in json.load(open('/tmp/gmx-cadence-regressions.json'))})))")
-          DETAILS=$(python -c "import json;print('\n'.join('- '+i['detail'] for i in json.load(open('/tmp/gmx-cadence-regressions.json'))[:50]))")
+          FILES=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join(sorted({i['file'] for i in json.load(open(sys.argv[1]))})))" /tmp/gmx-cadence-regressions.json)
+          DETAILS=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join('- '+i['detail'] for i in json.load(open(sys.argv[1]))[:50]))" /tmp/gmx-cadence-regressions.json)
+
+          # Fetch the open ticket list ONCE, with bodies, and match on the
+          # exact hidden marker below. `gh issue list --search` tokenises, and
+          # every candle filename shares `usdc`/`futures`/`feather` and a
+          # timeframe token with every other one, so relevance ranking can
+          # hand back a different symbol's ticket and we would comment on it.
+          gh issue list --repo "$REPO" --state open --limit 200 --json number,body \
+              > /tmp/gmx-open-issues.json 2>/dev/null || echo '[]' > /tmp/gmx-open-issues.json
 
           # A fleet-wide upstream outage regresses ~107 symbols at once; cap
           # issue churn so one bad night cannot open a hundred tickets.
@@ -549,18 +416,17 @@ jobs:
               echo "Issue cap reached; remaining regressions are in the job log and the manifest."
               break
             fi
-            BODY="A new cadence break appeared in \`${FILE}\` that the previous release (\`${PREVIOUS_TAG}\`) recorded as contiguous.
+            BODY="A new cadence break appeared in \`${FILE}\` that the previous release (\`${PREVIOUS_TAG:-unknown}\`) recorded as contiguous.
 
           Run: ${RUN_URL}
 
           ${DETAILS}
 
-          The release still shipped: this file's data is unchanged from before the regression, and its \`_cadence_manifest.json\` entry is annotated with \`\"regressed_from\": \"${PREVIOUS_TAG}\"\` so a consumer can quarantine just this file.
+          The release still shipped: this file's data is unchanged from before the regression, and its \`_cadence_manifest.json\` entry is annotated with \`\"regressed_from\": \"${PREVIOUS_TAG:-unknown}\"\` so a consumer can quarantine just this file.
 
           <!-- cadence-regression:${FILE} -->"
-            EXISTING=$(gh issue list --repo "$REPO" --state open --limit 100 \
-                --search "in:title cadence regression: ${FILE}" \
-                --json number --jq '.[0].number // ""' 2>/dev/null || echo "")
+            EXISTING=$(PYTHONPATH=src python -m gmx_historical_data.cadence_gate find-issue \
+                --issues /tmp/gmx-open-issues.json --file "$FILE")
             if [ -n "$EXISTING" ]; then
               gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" \
                 || echo "WARNING: could not comment on issue #${EXISTING}" >&2

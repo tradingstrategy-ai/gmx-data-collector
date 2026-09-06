@@ -73,6 +73,29 @@ MAX_BREAKS_PER_FILE = 200
 
 
 @dataclass(frozen=True, slots=True)
+class ExportWriteResult:
+    """What a publish actually put on disk.
+
+    The extents come from the **merged** frame -- the bytes the call wrote
+    -- not from the incoming slice.  A ``--symbol BTC`` run hands ``_write``
+    only the rows it just read, while the file on disk keeps years of
+    history behind them, so building a manifest entry from the incoming
+    frame would understate ``rows``/``first`` and misreport ``last``.
+
+    :param breaks: Cadence breaks found in the published frame; empty when
+        no ``expected_interval`` was supplied or the series is contiguous.
+    :param rows: Row count of the published frame.
+    :param first: Earliest timestamp in the published frame.
+    :param last: Latest timestamp in the published frame.
+    """
+
+    breaks: list[CadenceBreak]
+    rows: int
+    first: datetime | None
+    last: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
 class ExportFailure:
     """One skipped ``(symbol, timeframe)`` during export.
 
@@ -233,8 +256,32 @@ class FreqtradeExporter:
                         trading_mode,
                         quote_currency,
                     )
-                    expected_interval = parse_timeframe_interval(tf)
-                    breaks = self._write(
+                    try:
+                        expected_interval = parse_timeframe_interval(tf)
+                    except ValueError as exc:
+                        # A stray or legacy timeframe stem must not abort the
+                        # export of the other 106 symbols. ``ValueError`` is
+                        # NOT a member of DATA_DEFECT_ERRORS (the reverse --
+                        # ExportValidationError subclasses ValueError -- is
+                        # what holds), so the guard below would not catch it.
+                        logger.error(
+                            "export_candles(%s/%s): unparseable timeframe, skipping: %s",
+                            symbol,
+                            tf,
+                            exc,
+                        )
+                        failures.append(
+                            ExportFailure(
+                                symbol=symbol,
+                                timeframe=tf,
+                                reason="unknown_timeframe",
+                                message=str(exc),
+                            )
+                        )
+                        symbol_failed = True
+                        continue
+
+                    published = self._write(
                         ft_df,
                         gmx_dir / futures_name,
                         output_format,
@@ -246,10 +293,10 @@ class FreqtradeExporter:
                     cadence_entries[manifest_key] = self._cadence_manifest_entry(
                         tf,
                         expected_interval,
-                        ft_df.height,
-                        ft_df.get_column("date").min(),
-                        ft_df.get_column("date").max(),
-                        breaks,
+                        published.rows,
+                        published.first,
+                        published.last,
+                        published.breaks,
                     )
                     ohlcv_files += 2 if output_format == "both" else 1
                     total_candles += len(ft_df)
@@ -866,6 +913,28 @@ class FreqtradeExporter:
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
 
+    def _publish_result(
+        self,
+        frame: pl.DataFrame,
+        path: Path,
+        expected_interval: timedelta | None,
+    ) -> ExportWriteResult:
+        """Describe the frame a publish is about to write.
+
+        :param frame: The post-merge frame that is about to be written.
+        :param path: Destination path, used for the log line only.
+        :param expected_interval: The timeframe's bar interval, or ``None``
+            to skip the cadence scan entirely.
+        :returns: Breaks plus the published frame's row count and extents.
+        """
+        dates = frame.get_column("date") if "date" in frame.columns else None
+        return ExportWriteResult(
+            breaks=self._scan_cadence(frame, path, expected_interval),
+            rows=frame.height,
+            first=dates.min() if dates is not None and frame.height else None,
+            last=dates.max() if dates is not None and frame.height else None,
+        )
+
     def _scan_cadence(
         self,
         frame: pl.DataFrame,
@@ -932,7 +1001,7 @@ class FreqtradeExporter:
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
         expected_interval: timedelta | None = None,
-    ) -> list[CadenceBreak]:
+    ) -> ExportWriteResult:
         """Publish matching Feather and Parquet files from one canonical frame.
 
         ``unsafe_overwrite`` bypasses reading and merging both destinations so a
@@ -941,8 +1010,8 @@ class FreqtradeExporter:
         :param expected_interval: When set, the merged frame -- the bytes this
             call actually publishes -- is scanned for interior cadence breaks.
             Findings are returned and logged, never raised (issue #29).
-        :returns: Cadence breaks found in the published frame; empty list when
-            ``expected_interval`` is ``None`` or the series is contiguous.
+        :returns: An :class:`ExportWriteResult` describing the merged frame
+            this call published.
         """
         if not unsafe_overwrite:
             existing_frames: list[pl.DataFrame] = []
@@ -978,7 +1047,7 @@ class FreqtradeExporter:
                     allow_nonpositive_prices=allow_nonpositive_prices,
                 )
 
-        breaks = self._scan_cadence(df, feather_path, expected_interval)
+        result = self._publish_result(df, feather_path, expected_interval)
 
         feather_tmp = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.tmp")
         parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -1022,7 +1091,7 @@ class FreqtradeExporter:
                 if backup_path.exists():
                     backup_path.unlink()
 
-        return breaks
+        return result
 
     def _write(
         self,
@@ -1033,7 +1102,7 @@ class FreqtradeExporter:
         unsafe_overwrite: bool = False,
         allow_nonpositive_prices: bool = False,
         expected_interval: timedelta | None = None,
-    ) -> list[CadenceBreak]:
+    ) -> ExportWriteResult:
         """Merge-write dataframe into an existing file or create it.
 
         Behaviour matrix:
@@ -1068,8 +1137,8 @@ class FreqtradeExporter:
             call actually publishes -- is scanned for interior cadence breaks.
             Findings are returned and logged, never raised: see the module's
             ``export_candles`` docstring and issue #29.  ``None`` skips the scan.
-        :returns: Cadence breaks found in the published frame; empty list when
-            ``expected_interval`` is ``None`` or the series is contiguous.
+        :returns: An :class:`ExportWriteResult` describing the merged frame
+            this call published -- its cadence breaks, row count and extents.
         :raises ValueError: If a merge would shrink existing history and
             ``unsafe_overwrite`` is not set.
         """
@@ -1095,9 +1164,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
-        breaks = self._scan_cadence(merged, path, expected_interval)
+        result = self._publish_result(merged, path, expected_interval)
         self._write_single_frame(merged, path, fmt)
-        return breaks
+        return result
 
     # ------------------------------------------------------------------
     # Filename generation

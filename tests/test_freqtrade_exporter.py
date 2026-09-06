@@ -520,7 +520,7 @@ def test_write_returns_no_breaks_without_expected_interval(tmp_path: Path):
     frame = _freqtrade_frame()
     path = tmp_path / "out" / "X-1h-futures.feather"
     path.parent.mkdir(parents=True, exist_ok=True)
-    assert exporter._write(frame, path, "feather") == []
+    assert exporter._write(frame, path, "feather").breaks == []
 
 
 def test_write_reports_cadence_breaks_on_written_frame(tmp_path: Path):
@@ -539,7 +539,7 @@ def test_write_reports_cadence_breaks_on_written_frame(tmp_path: Path):
         path,
         "feather",
         expected_interval=timedelta(hours=1),
-    )
+    ).breaks
 
     assert len(breaks) == 1
     assert isinstance(breaks[0], CadenceBreak)
@@ -570,10 +570,10 @@ def test_write_reports_break_created_at_the_merge_seam(tmp_path: Path):
             }
         )
 
-    assert exporter._write(_frame([0, 1, 2]), path, "feather") == []
+    assert exporter._write(_frame([0, 1, 2]), path, "feather").breaks == []
     breaks = exporter._write(
         _frame([5, 6, 7]), path, "feather", expected_interval=timedelta(hours=1)
-    )
+    ).breaks
 
     assert len(breaks) == 1
     assert breaks[0].missing_bars == 2  # 03:00 and 04:00 absent
@@ -597,9 +597,66 @@ def test_write_both_reports_cadence_breaks(tmp_path: Path):
         }
     )
 
-    breaks = exporter._write(frame, path, "both", expected_interval=timedelta(hours=1))
+    breaks = exporter._write(frame, path, "both", expected_interval=timedelta(hours=1)).breaks
 
     assert len(breaks) == 1
     assert breaks[0].missing_bars == 1
     assert path.exists()
     assert path.with_suffix(".parquet").exists()
+
+
+def test_write_reports_the_merged_frames_extents_not_the_incoming_slice(tmp_path: Path):
+    """A `--symbol BTC` run hands _write only the rows it just read, while
+    the destination keeps years of history behind them. Building a manifest
+    entry from the incoming slice would understate rows/first."""
+    exporter = FreqtradeExporter(tmp_path / "data", tmp_path / "out")
+    path = tmp_path / "out" / "EXT_USDC_USDC-1h-futures.feather"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+
+    def _frame(hours: list[int]) -> pl.DataFrame:
+        dates = [base + timedelta(hours=h) for h in hours]
+        n = len(dates)
+        return pl.DataFrame(
+            {
+                "date": pl.Series("date", dates, dtype=pl.Datetime("ns", "UTC")),
+                "open": pl.Series("open", [1.0] * n, dtype=pl.Float64),
+                "high": pl.Series("high", [1.0] * n, dtype=pl.Float64),
+                "low": pl.Series("low", [1.0] * n, dtype=pl.Float64),
+                "close": pl.Series("close", [1.0] * n, dtype=pl.Float64),
+                "volume": pl.Series("volume", [0.0] * n, dtype=pl.Float64),
+            }
+        )
+
+    exporter._write(_frame([0, 1, 2, 3]), path, "feather")
+    published = exporter._write(
+        _frame([4, 5]), path, "feather", expected_interval=timedelta(hours=1)
+    )
+
+    assert published.rows == 6
+    assert published.first == base
+    assert published.last == base + timedelta(hours=5)
+    assert published.breaks == []
+
+
+def test_export_candles_skips_an_unparseable_timeframe_without_aborting(tmp_path: Path):
+    """`parse_timeframe_interval` raises a bare ValueError, which is NOT in
+    DATA_DEFECT_ERRORS (ExportValidationError subclasses ValueError, not the
+    reverse), so an unguarded call would take the whole export down over one
+    stray timeframe stem."""
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    storage.save_candles(_gapped_candles("AAA", [0, 1, 2]), "1h", "AAA")
+
+    exporter = FreqtradeExporter(data_dir, tmp_path / "out")
+    real_read = exporter.storage.read_candles
+    exporter.storage.list_timeframes = lambda symbol: ["1h", "1w"]
+    exporter.storage.read_candles = lambda tf, symbol: real_read("1h", symbol)
+
+    results, failed_symbols, failures = exporter.export_candles(symbols=["AAA"])
+
+    assert "AAA" in results  # the healthy timeframe still exported
+    assert failed_symbols == ["AAA"]
+    assert [f.reason for f in failures] == ["unknown_timeframe"]
+    assert failures[0].timeframe == "1w"

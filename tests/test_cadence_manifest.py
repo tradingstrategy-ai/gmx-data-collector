@@ -144,3 +144,24 @@ def test_manifest_is_not_mistaken_for_a_data_file(tmp_path: Path):
     assert failed_symbols == []
     assert failures == []
     assert "AAA" in results
+
+
+def test_manifest_entry_describes_the_merged_file_not_the_incoming_slice(tmp_path: Path):
+    """A partial re-export must record the whole published file's extents."""
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    storage.save_candles(_candles("AAA", [0, 1, 2]), "1h", "AAA")
+
+    output_dir = tmp_path / "output"
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    exporter.export_candles(symbols=["AAA"], timeframes=["1h"])
+
+    # A later run sees only the newest slice in source storage.
+    storage.save_candles(_candles("AAA", [3, 4]), "1h", "AAA")
+    exporter.export_candles(symbols=["AAA"], timeframes=["1h"])
+
+    entry = _manifest(output_dir)["files"]["AAA_USDC_USDC-1h-futures.feather"]
+    assert entry["rows"] == 5
+    assert entry["first"] == "2024-01-01T00:00:00+00:00"
+    assert entry["last"] == "2024-01-01T04:00:00+00:00"
+    assert entry["breaks_total"] == 0

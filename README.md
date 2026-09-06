@@ -408,10 +408,11 @@ Contract notes:
 - A gap listed here is a known upstream outage, not corruption. GMX retains raw data for
   only ~5 weeks, so most listed gaps cannot be backfilled from source.
 - An optional `"regressed_from": "<previous release tag>"` field means *this release
-  introduced that break* in a span the named release recorded as contiguous. The data
-  still shipped — withholding a whole day of candles because one symbol regressed is
-  worse than publishing it labelled — so a consumer should quarantine just that file. The
-  release workflow files a tracking issue and ends red whenever it stamps one.
+  introduced a break this file did not carry in the named release* — most often an
+  overnight collector or oracle outage in the newest 24h of data. The data still shipped
+  — withholding a whole day of candles because one symbol regressed is worse than
+  publishing it labelled — so a consumer should quarantine just that file. The release
+  workflow files a deduplicated tracking issue and ends red whenever it stamps one.
 
 ## Backtesting
 
