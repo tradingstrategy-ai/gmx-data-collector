@@ -23,17 +23,22 @@ clears any such stragglers at collection startup.
 Also exports :data:`CORRUPT_PARQUET_ERRORS`, the shared exception tuple for
 "this file is corrupt" across both read engines this repo uses: pandas +
 pyarrow (``ArrowInvalid``) and Polars directly (``pl.exceptions.ComputeError``,
-covering both its Parquet and Feather/IPC readers).
+covering both its Parquet and Feather/IPC readers). :data:`DATA_DEFECT_ERRORS`
+(also in this module) supersedes it for new export-guard call sites.
 """
 
+import errno
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 import polars as pl
 from pyarrow.lib import ArrowInvalid
+
+from gmx_historical_data.ohlcv_validation import ExportValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -42,15 +47,78 @@ logger = logging.getLogger(__name__)
 #: (``storage.read_candles()``, via ``ArrowInvalid``) and Polars directly
 #: (``pl.read_parquet``/``pl.read_ipc``, via ``pl.exceptions.ComputeError``).
 #: ``OSError`` covers filesystem-level failures (permissions, disk full)
-#: surfacing at the same call sites. Use this wherever an export path needs
-#: to catch "this file is corrupt" without a bare except -- e.g.
+#: surfacing at the same call sites. Deprecated: kept only as a back-compat
+#: alias for importers that predate :data:`DATA_DEFECT_ERRORS` --
 #: ``FreqtradeExporter.export_candles()``/``export_funding()``'s per-symbol
-#: guard, which must catch corruption on both the *source* read (pandas/
-#: pyarrow) and the *destination* merge read (Polars) to avoid re-entering
-#: the same failure class from the output side.
+#: guard no longer uses this tuple. See :data:`DATA_DEFECT_ERRORS` for
+#: current usage.
 CORRUPT_PARQUET_ERRORS: tuple[type[Exception], ...] = (
     ArrowInvalid,
     pl.exceptions.ComputeError,
+    OSError,
+)
+
+#: Fatal filesystem/OS-resource conditions where the correct behaviour is to
+#: abort the whole export run rather than treat one symbol as corrupt --
+#: continuing would mark every remaining symbol "failed" one at a time for a
+#: condition that has nothing to do with any of their data. See
+#: :func:`is_fatal_environment_error`.
+FATAL_ENVIRONMENT_ERRNOS: frozenset[int] = frozenset(
+    {errno.ENOSPC, errno.EROFS, errno.EDQUOT, errno.EMFILE, errno.ENFILE}
+)
+
+#: Matches the "(os error N)" suffix pyarrow/Polars' Rust bindings append to a
+#: message when wrapping an underlying OS-level I/O failure. Confirmed
+#: empirically (real loop-mounted full filesystem): ``df.write_ipc()`` raises
+#: a bare ``OSError`` with ``errno=None`` on ENOSPC, and ``df.write_parquet()``
+#: raises ``pl.exceptions.ComputeError`` (not even an ``OSError``) for the
+#: identical condition -- in both cases the real errno survives only as text
+#: in the message, never as the standard ``.errno`` attribute.
+_OS_ERROR_IN_MESSAGE_PATTERN = re.compile(r"\(os error (\d+)\)")
+
+
+def is_fatal_environment_error(exc: BaseException) -> bool:
+    """Return ``True`` if ``exc`` represents a fatal environment condition.
+
+    Checks a real ``errno`` first -- set correctly by the native ``os.*``
+    calls inside :func:`_commit_tmp_file` (``os.fsync``, ``os.replace``) when
+    they hit e.g. ``ENOSPC``. Falls back to parsing the ``"(os error N)"``
+    suffix pyarrow/Polars' Rust bindings emit in their own exception
+    messages for the SAME underlying failure, since those do not populate
+    ``.errno`` -- confirmed empirically: a full-disk write via
+    ``DataFrame.write_ipc()`` raises a bare ``OSError`` with ``errno=None``,
+    and ``DataFrame.write_parquet()`` raises ``pl.exceptions.ComputeError``
+    (not an ``OSError`` at all) -- both carry only
+    ``"... (os error 28)"`` as text. The message-parsing fallback is
+    therefore checked regardless of ``exc``'s type, not gated behind
+    ``isinstance(exc, OSError)``.
+
+    :param exc: The caught exception.
+    :returns: ``True`` iff a fatal errno (see :data:`FATAL_ENVIRONMENT_ERRNOS`)
+        is identified either via ``exc.errno`` or via the message text.
+    """
+    if isinstance(exc, OSError) and exc.errno in FATAL_ENVIRONMENT_ERRNOS:
+        return True
+    match = _OS_ERROR_IN_MESSAGE_PATTERN.search(str(exc))
+    if match:
+        return int(match.group(1)) in FATAL_ENVIRONMENT_ERRNOS
+    return False
+
+
+#: Exception types that mean "this symbol/timeframe's data is defective --
+#: skip it and keep going", classified by what the operator should do
+#: rather than by which library raised it. Supersedes
+#: :data:`CORRUPT_PARQUET_ERRORS` for new call sites: adds
+#: :class:`~gmx_historical_data.ohlcv_validation.ExportValidationError` so a
+#: ``validate_ohlcv``/``assert_export_parity``/history-guard failure is
+#: caught by the same per-symbol guard as a truncated Parquet file, instead
+#: of propagating and aborting the whole export. ``OSError`` here still
+#: needs an :func:`is_fatal_environment_error` check first -- an ``OSError``
+#: matching that check must be re-raised, not treated as a data defect.
+DATA_DEFECT_ERRORS: tuple[type[Exception], ...] = (
+    ArrowInvalid,
+    pl.exceptions.ComputeError,
+    ExportValidationError,
     OSError,
 )
 

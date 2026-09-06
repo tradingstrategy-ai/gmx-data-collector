@@ -142,7 +142,7 @@ def test_freqtrade_exporter_single_feather_write_is_atomic(
     exporter = FreqtradeExporter(data_dir, output_dir)
 
     # First export succeeds and creates a real destination feather.
-    results, failed_symbols = exporter.export_candles(symbols=["ETH"], timeframes=["1h"])
+    results, failed_symbols, failures = exporter.export_candles(symbols=["ETH"], timeframes=["1h"])
     assert failed_symbols == []
     target = output_dir / "gmx" / "futures" / "ETH_USDC_USDC-1h-futures.feather"
     assert target.exists()
@@ -150,7 +150,7 @@ def test_freqtrade_exporter_single_feather_write_is_atomic(
 
     # Re-export with a crash injected mid-write.
     _simulate_interrupted_ipc_write(monkeypatch)
-    results, failed_symbols = exporter.export_candles(symbols=["ETH"], timeframes=["1h"])
+    results, failed_symbols, failures = exporter.export_candles(symbols=["ETH"], timeframes=["1h"])
     monkeypatch.undo()
 
     # The symbol's write failed and was skipped -- not a silent abort of the

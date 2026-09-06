@@ -17,17 +17,21 @@ Funding rate parquet files are read from
 """
 
 import logging
+import re
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 import polars as pl
 
 from gmx_historical_data.atomic_parquet import (
-    CORRUPT_PARQUET_ERRORS,
+    DATA_DEFECT_ERRORS,
     atomic_write_ipc,
     atomic_write_parquet,
+    is_fatal_environment_error,
 )
 from gmx_historical_data.ohlcv_validation import (
+    ExportValidationError,
     assert_export_parity,
     validate_ohlcv,
 )
@@ -38,6 +42,53 @@ from gmx_historical_data.storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches genuine timeframe-shaped filename stems only (e.g. "1h", "4h",
+# "15m", "1d") -- the unified-funding pipeline also writes companion data
+# products into the same directory (e.g. "1h_datastore", "1h_factor",
+# "1h_short_borrow", "1h_borrow_rate"), none of which are funding-rate data
+# and all of which fail this pattern because of their trailing suffix.
+_FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
+
+
+@dataclass(frozen=True, slots=True)
+class ExportFailure:
+    """One skipped ``(symbol, timeframe)`` during export.
+
+    Carries enough structure for the CLI's failure panel and any downstream
+    alerting to show *what kind* of failure occurred, not just that one did
+    -- the whole point of this taxonomy (see the 2026-09-05 design doc).
+
+    :param symbol: Token symbol that failed.
+    :param timeframe: Timeframe that failed.
+    :param reason: Short greppable slug -- an
+        :class:`~gmx_historical_data.ohlcv_validation.ExportValidationError`'s
+        own ``.reason``, or the caught exception's class name (e.g.
+        ``"ArrowInvalid"``, ``"ComputeError"``, ``"OSError"``) when it isn't
+        one.
+    :param message: Full exception message, for logs/failure panels.
+    """
+
+    symbol: str
+    timeframe: str
+    reason: str
+    message: str
+
+
+def _classify_export_failure(symbol: str, timeframe: str, exc: Exception) -> ExportFailure:
+    """Build an :class:`ExportFailure` from a caught data-defect exception.
+
+    :param symbol: The symbol being exported when ``exc`` was raised.
+    :param timeframe: The timeframe being exported when ``exc`` was raised.
+    :param exc: The caught exception (a member of
+        :data:`~gmx_historical_data.atomic_parquet.DATA_DEFECT_ERRORS`).
+    :returns: An :class:`ExportFailure` with ``reason`` taken from
+        ``exc.reason`` when ``exc`` is an
+        :class:`~gmx_historical_data.ohlcv_validation.ExportValidationError`,
+        else the exception's class name.
+    """
+    reason = exc.reason if isinstance(exc, ExportValidationError) else type(exc).__name__
+    return ExportFailure(symbol=symbol, timeframe=timeframe, reason=reason, message=str(exc))
 
 
 class FreqtradeExporter:
@@ -72,29 +123,29 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         keep_parquet: bool = True,
-    ) -> tuple[dict[str, dict], list[str]]:
+    ) -> tuple[dict[str, dict], list[str], list[ExportFailure]]:
         """Export OHLCV (candles + mark + index) feathers only.
 
         Reads only from ``{data_dir}/candles/`` and writes only ``-futures``,
         ``-mark``, and ``-index`` feathers.  Never touches funding files.
 
-        A symbol whose source Parquet cannot be read (e.g. truncated by an
-        interrupted write -- see ``storage.py``'s atomic-write fix) or whose
-        feather write otherwise fails is recorded in the returned
-        ``failed_symbols`` list and skipped; every other symbol still exports.
-        This bounds a single corrupt file's blast radius to one symbol instead
-        of aborting the whole export (2026-08-25 incident: a truncated
-        ``GMX/1m.parquet`` aborted export for 85 of 126 symbols).
+        The per-symbol, per-timeframe guard catches
+        :data:`~gmx_historical_data.atomic_parquet.DATA_DEFECT_ERRORS` --
+        both a corrupt source/destination Parquet or Feather file
+        (``ArrowInvalid``, ``pl.exceptions.ComputeError``) and a validation
+        failure from this module's own transform
+        (:class:`~gmx_historical_data.ohlcv_validation.ExportValidationError`,
+        covering ``validate_ohlcv``, ``assert_export_parity``, and the
+        history-preservation guard). A fatal environment ``OSError`` (see
+        :func:`~gmx_historical_data.atomic_parquet.is_fatal_environment_error`
+        -- e.g. disk full) is re-raised immediately rather than treated as a
+        per-symbol defect, since it says nothing about any one symbol's data.
 
-        The guard catches :data:`~gmx_historical_data.atomic_parquet.CORRUPT_PARQUET_ERRORS`
-        deliberately covering *both* read engines in play here: the source
-        read (``storage.read_candles()``, pandas + pyarrow) raises
-        ``ArrowInvalid`` on a truncated file, while the destination
-        merge/history-guard read inside :meth:`_write` (existing feather via
-        ``pl.read_ipc``, existing parquet via ``pl.read_parquet``) raises
-        ``pl.exceptions.ComputeError`` on the same corruption. A corrupt
-        *destination* file is exactly the failure this guard exists to
-        contain, just entered from the output side instead of the input side.
+        The guard wraps each *timeframe* individually, not the whole symbol:
+        a symbol with 3 healthy timeframes and 1 failing one still gets the
+        3 healthy timeframes counted in ``results`` and appears in
+        ``failed_symbols`` for the one that failed -- both can be true for
+        the same symbol at once.
 
         :param symbols: Specific symbols (default: all candle symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -105,8 +156,13 @@ class FreqtradeExporter:
         :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
         :param keep_parquet: Default ``True``.  If ``False`` the source candle
             parquet is deleted after a successful feather export.
-        :returns: Tuple of (dict mapping symbol to export stats, list of
-            symbols that failed and were skipped).
+        :returns: Tuple of (dict mapping symbol to export stats, sorted list
+            of symbols with at least one failed timeframe, list of
+            :class:`ExportFailure` detailing each failed timeframe).
+        :raises OSError: If a fatal environment condition (disk full,
+            read-only filesystem, quota, or file-descriptor exhaustion) is
+            hit -- see
+            :func:`~gmx_historical_data.atomic_parquet.is_fatal_environment_error`.
         """
         gmx_dir = self._make_gmx_dir(trading_mode)
 
@@ -117,17 +173,17 @@ class FreqtradeExporter:
 
         results: dict[str, dict] = {}
         failed_symbols: list[str] = []
+        failures: list[ExportFailure] = []
         for symbol in export_symbols:
-            try:
-                ohlcv_files = mark_files = index_files = total_candles = 0
-                candle_tfs = set(self.storage.list_timeframes(symbol))
-                export_tfs = (
-                    [tf for tf in timeframes if tf in candle_tfs]
-                    if timeframes
-                    else sorted(candle_tfs)
-                )
+            ohlcv_files = mark_files = index_files = total_candles = 0
+            candle_tfs = set(self.storage.list_timeframes(symbol))
+            export_tfs = (
+                [tf for tf in timeframes if tf in candle_tfs] if timeframes else sorted(candle_tfs)
+            )
+            symbol_failed = False
 
-                for tf in export_tfs:
+            for tf in export_tfs:
+                try:
                     raw = self.storage.read_candles(tf, symbol)
                     if raw.empty:
                         continue
@@ -196,7 +252,20 @@ class FreqtradeExporter:
 
                     if not keep_parquet and output_format in {"feather", "both"}:
                         self._cleanup_candle_source(symbol, tf)
+                except DATA_DEFECT_ERRORS as e:
+                    if is_fatal_environment_error(e):
+                        raise
+                    logger.error(
+                        "export_candles(%s/%s): skipping timeframe after read/write failure: %s",
+                        symbol,
+                        tf,
+                        e,
+                    )
+                    failures.append(_classify_export_failure(symbol, tf, e))
+                    symbol_failed = True
+                    continue
 
+            if ohlcv_files or mark_files or index_files:
                 results[symbol] = {
                     "files": ohlcv_files + mark_files + index_files,
                     "candles": total_candles,
@@ -205,16 +274,10 @@ class FreqtradeExporter:
                     "mark_files": mark_files,
                     "index_files": index_files,
                 }
-            except CORRUPT_PARQUET_ERRORS as e:
-                logger.error(
-                    "export_candles(%s): skipping symbol after read/write failure: %s",
-                    symbol,
-                    e,
-                )
+            if symbol_failed:
                 failed_symbols.append(symbol)
-                continue
 
-        return results, failed_symbols
+        return results, failed_symbols, failures
 
     def export_funding(
         self,
@@ -225,7 +288,7 @@ class FreqtradeExporter:
         quote_currency: str = "USDC",
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
-    ) -> tuple[dict[str, dict], list[str]]:
+    ) -> tuple[dict[str, dict], list[str], list[ExportFailure]]:
         """Export funding_rate feathers only.
 
         Reads only from ``{data_dir}/funding/`` and writes only
@@ -233,23 +296,11 @@ class FreqtradeExporter:
         parquet source is owned by the unified-funding pipeline — this
         method never deletes it.
 
-        A symbol whose funding Parquet cannot be read (e.g. truncated by an
-        interrupted write) or whose feather write otherwise fails is recorded
-        in the returned ``failed_symbols`` list and skipped; every other
-        symbol still exports.  Mirrors :meth:`export_candles`'s per-symbol
-        guard (C2), applied here after a production dry run found the same
-        failure class live in the funding store (650 of 1,949 raw-store
-        Parquet files).
-
-        Uses the same :data:`~gmx_historical_data.atomic_parquet.CORRUPT_PARQUET_ERRORS`
-        tuple as :meth:`export_candles`.  Funding's own source read
-        (:meth:`_read_funding_rate` calls ``pl.read_parquet`` directly)
-        always raises ``pl.exceptions.ComputeError`` on a corrupt/truncated
-        file, never ``ArrowInvalid`` (there is no pandas/pyarrow read
-        anywhere in this path) -- but the destination merge read inside
-        :meth:`_write` is exactly the same code :meth:`export_candles` uses,
-        so the shared tuple keeps both guards symmetric rather than each
-        hand-rolling a subset that happens to work today.
+        Shares :meth:`export_candles`'s per-symbol, per-timeframe guard over
+        :data:`~gmx_historical_data.atomic_parquet.DATA_DEFECT_ERRORS` --
+        see that method's docstring for the full contract, including the
+        fatal-environment-error re-raise and the "a symbol can be in both
+        ``results`` and ``failed_symbols``" semantics.
 
         :param symbols: Specific symbols (default: all funding symbols).
         :param timeframes: Specific timeframes (default: all available).
@@ -258,8 +309,11 @@ class FreqtradeExporter:
         :param quote_currency: Quote/settlement currency (default ``'USDC'``).
         :param overwrite: Backward-compat alias; merges with history guard.
         :param unsafe_overwrite: Bypass the history guard.  Schema migrations only.
-        :returns: Tuple of (dict mapping symbol to export stats, list of
-            symbols that failed and were skipped).
+        :returns: Tuple of (dict mapping symbol to export stats, sorted list
+            of symbols with at least one failed timeframe, list of
+            :class:`ExportFailure` detailing each failed timeframe).
+        :raises OSError: On a fatal environment condition -- see
+            :meth:`export_candles`.
         """
         gmx_dir = self._make_gmx_dir(trading_mode)
 
@@ -272,17 +326,19 @@ class FreqtradeExporter:
 
         results: dict[str, dict] = {}
         failed_symbols: list[str] = []
+        failures: list[ExportFailure] = []
         for symbol in export_symbols:
-            try:
-                funding_files = 0
-                funding_tfs = set(self.list_funding_timeframes(symbol))
-                export_tfs = (
-                    [tf for tf in timeframes if tf in funding_tfs]
-                    if timeframes
-                    else sorted(funding_tfs)
-                )
+            funding_files = 0
+            funding_tfs = set(self.list_funding_timeframes(symbol))
+            export_tfs = (
+                [tf for tf in timeframes if tf in funding_tfs]
+                if timeframes
+                else sorted(funding_tfs)
+            )
+            symbol_failed = False
 
-                for tf in export_tfs:
+            for tf in export_tfs:
+                try:
                     funding_df = self._read_funding_rate(symbol, tf)
                     if funding_df is None or funding_df.is_empty():
                         continue
@@ -309,7 +365,20 @@ class FreqtradeExporter:
                         allow_nonpositive_prices=True,
                     )
                     funding_files += 2 if output_format == "both" else 1
+                except DATA_DEFECT_ERRORS as e:
+                    if is_fatal_environment_error(e):
+                        raise
+                    logger.error(
+                        "export_funding(%s/%s): skipping timeframe after read/write failure: %s",
+                        symbol,
+                        tf,
+                        e,
+                    )
+                    failures.append(_classify_export_failure(symbol, tf, e))
+                    symbol_failed = True
+                    continue
 
+            if funding_files:
                 results[symbol] = {
                     "files": funding_files,
                     "candles": 0,
@@ -318,16 +387,10 @@ class FreqtradeExporter:
                     "mark_files": 0,
                     "index_files": 0,
                 }
-            except CORRUPT_PARQUET_ERRORS as e:
-                logger.error(
-                    "export_funding(%s): skipping symbol after read/write failure: %s",
-                    symbol,
-                    e,
-                )
+            if symbol_failed:
                 failed_symbols.append(symbol)
-                continue
 
-        return results, failed_symbols
+        return results, failed_symbols, failures
 
     def export(
         self,
@@ -339,7 +402,7 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         keep_parquet: bool = True,
-    ) -> tuple[dict[str, dict], list[str]]:
+    ) -> tuple[dict[str, dict], list[str], list[ExportFailure]]:
         """Backward-compat wrapper: run candle export then funding export.
 
         Prefer :meth:`export_candles` and :meth:`export_funding` directly so
@@ -352,7 +415,8 @@ class FreqtradeExporter:
 
         :returns: Tuple of (merged per-symbol stats, sorted union of symbols
             that failed candle export and/or funding export and were
-            skipped -- see :meth:`export_candles` and :meth:`export_funding`).
+            skipped, sorted union of both pipelines' :class:`ExportFailure`
+            lists -- see :meth:`export_candles` and :meth:`export_funding`).
         """
         candle_kwargs = dict(
             symbols=symbols,
@@ -364,8 +428,10 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             keep_parquet=keep_parquet,
         )
-        candle_results, candle_failed_symbols = self.export_candles(**candle_kwargs)
-        funding_results, funding_failed_symbols = self.export_funding(
+        candle_results, candle_failed_symbols, candle_failures = self.export_candles(
+            **candle_kwargs
+        )
+        funding_results, funding_failed_symbols, funding_failures = self.export_funding(
             symbols=symbols,
             timeframes=timeframes,
             output_format=output_format,
@@ -375,6 +441,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
         )
         failed_symbols = sorted(set(candle_failed_symbols) | set(funding_failed_symbols))
+        failures = sorted(
+            [*candle_failures, *funding_failures], key=lambda f: (f.symbol, f.timeframe)
+        )
 
         merged: dict[str, dict] = {}
         for symbol in sorted(set(candle_results) | set(funding_results)):
@@ -388,7 +457,7 @@ class FreqtradeExporter:
                 "mark_files": c.get("mark_files", 0),
                 "index_files": c.get("index_files", 0),
             }
-        return merged, failed_symbols
+        return merged, failed_symbols, failures
 
     def _make_gmx_dir(self, trading_mode: str) -> Path:
         """Resolve and create the per-trading-mode output directory."""
@@ -423,13 +492,23 @@ class FreqtradeExporter:
     def list_funding_timeframes(self, symbol: str) -> list[str]:
         """List available funding rate timeframes for a symbol.
 
+        Only matches genuine timeframe files (e.g. ``1h``, ``4h``) -- the same
+        directory also holds companion data products from the unified-funding
+        pipeline (``{tf}_datastore``, ``{tf}_factor``, ``{tf}_short_borrow``,
+        ``{tf}_borrow_rate``, ...), which must never be treated as an
+        exportable funding-rate timeframe.
+
         :param symbol: Token symbol (e.g., ``'ETH'``).
         :returns: Sorted list of timeframe strings.
         """
         symbol_dir = self.funding_dir / symbol
         if not symbol_dir.exists():
             return []
-        return sorted(f.stem for f in symbol_dir.glob("*.parquet") if not f.name.startswith("."))
+        return sorted(
+            f.stem
+            for f in symbol_dir.glob("*.parquet")
+            if not f.name.startswith(".") and _FUNDING_TIMEFRAME_PATTERN.match(f.stem)
+        )
 
     # ------------------------------------------------------------------
     # Data readers
@@ -573,11 +652,13 @@ class FreqtradeExporter:
             extra_in_existing = set(existing.columns) - set(incoming.columns)
             extra_in_incoming = set(incoming.columns) - set(existing.columns)
             if extra_in_incoming:
-                raise ValueError(
+                raise ExportValidationError(
+                    str(path),
+                    "schema_regression",
                     f"Schema regression while merging {path.name}: incoming "
                     f"dataframe has columns the existing file lacks: "
                     f"{sorted(extra_in_incoming)}.  Refusing to fill nulls — "
-                    "regenerate the file with --unsafe-overwrite if this is intentional."
+                    "regenerate the file with --unsafe-overwrite if this is intentional.",
                 )
             logger.info(
                 "Schema realignment on %s: dropping legacy columns %s "

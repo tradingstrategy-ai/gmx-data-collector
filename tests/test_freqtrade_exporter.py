@@ -99,9 +99,10 @@ def test_export_returns_stats(sample_storage):
     """Test export returns statistics."""
     with tempfile.TemporaryDirectory() as output_dir:
         exporter = FreqtradeExporter(sample_storage, Path(output_dir))
-        result, failed_symbols = exporter.export()
+        result, failed_symbols, failures = exporter.export()
 
         assert failed_symbols == []
+        assert failures == []
         assert "ETH" in result
         assert "BTC" in result
         # ETH: 1h + 4h = 2 ohlcv + 2 mark + 2 index = 6
@@ -263,7 +264,10 @@ def test_export_candles_both_writes_equivalent_files(sample_storage, tmp_path):
     assert feather.equals(parquet)
 
 
-def test_export_candles_both_aborts_when_existing_file_is_corrupt(sample_storage, tmp_path):
+def test_export_candles_both_survives_when_existing_file_is_corrupt(sample_storage, tmp_path):
+    """A validate_ohlcv failure on an existing destination file (e.g. a
+    non-finite close value) is caught by the per-symbol guard and skipped
+    -- not raised -- matching export_candles()'s DATA_DEFECT_ERRORS contract."""
     exporter = FreqtradeExporter(sample_storage, tmp_path / "output")
     gmx_dir = tmp_path / "output" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
@@ -280,8 +284,15 @@ def test_export_candles_both_aborts_when_existing_file_is_corrupt(sample_storage
         }
     ).write_parquet(corrupt)
 
-    with pytest.raises(ValueError, match="invalid OHLCV|parity mismatch"):
-        exporter.export_candles(symbols=["ETH"], timeframes=["1h"], output_format="both")
+    results, failed_symbols, failures = exporter.export_candles(
+        symbols=["ETH"], timeframes=["1h"], output_format="both"
+    )
+
+    assert failed_symbols == ["ETH"]
+    assert "ETH" not in results
+    assert len(failures) == 1
+    assert failures[0].symbol == "ETH"
+    assert failures[0].timeframe == "1h"
 
 
 def test_export_candles_both_leaves_existing_files_intact_on_second_write_failure(
@@ -348,7 +359,7 @@ def test_export_candles_both_rolls_back_when_second_publish_fails(
 
     monkeypatch.setattr(Path, "replace", fail_once_on_parquet_publish)
 
-    results, failed_symbols = exporter.export_candles(
+    results, failed_symbols, failures = exporter.export_candles(
         symbols=["ETH"], timeframes=["1h"], output_format="both"
     )
 
@@ -379,7 +390,7 @@ def test_export_funding_accepts_negative_rates(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result, failed_symbols = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
+    result, failed_symbols, failures = exporter.export_funding(symbols=["AAVE"], timeframes=["1h"])
 
     out = tmp_path / "output" / "gmx" / "futures" / "AAVE_USDC_USDC-1h-funding_rate.feather"
     assert out.exists()
@@ -403,9 +414,9 @@ def test_export_funding_both_counts_both_files(tmp_path):
         }
     ).write_parquet(funding_dir / "1h.parquet")
 
-    result, failed_symbols = FreqtradeExporter(data_dir, tmp_path / "output").export_funding(
-        symbols=["AAVE"], timeframes=["1h"], output_format="both"
-    )
+    result, failed_symbols, failures = FreqtradeExporter(
+        data_dir, tmp_path / "output"
+    ).export_funding(symbols=["AAVE"], timeframes=["1h"], output_format="both")
 
     assert result["AAVE"]["funding_files"] == 2
     assert failed_symbols == []
@@ -439,7 +450,7 @@ def test_export_funding_both_counts_two_files_per_timeframe(tmp_path):
     ).write_parquet(funding_dir / "1h.parquet")
 
     exporter = FreqtradeExporter(data_dir, tmp_path / "output")
-    result, failed_symbols = exporter.export_funding(
+    result, failed_symbols, failures = exporter.export_funding(
         symbols=["AAVE"], timeframes=["1h"], output_format="both"
     )
 
