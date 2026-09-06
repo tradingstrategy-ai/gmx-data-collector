@@ -342,3 +342,67 @@ def test_export_funding_command_aborts_distinctly_on_enospc(tmp_path: Path, monk
     assert result.exit_code != 0
     assert "Export Aborted" in result.output
     assert "Export Failures" not in result.output
+
+
+def _make_borrow_rate_df(hours: int = 3) -> pl.DataFrame:
+    """Build a companion "short borrow" DataFrame with an unrelated schema.
+
+    Mirrors what the unified-funding pipeline actually writes alongside a
+    genuine ``{tf}.parquet`` file in production -- e.g. ``1h_short_borrow.parquet``
+    -- which has no ``funding_rate``/``funding_rate_hourly`` column at all.
+
+    :param hours: Number of hourly rows to generate.
+    :returns: Polars DataFrame with ``timestamp``, ``borrow_rate_per_hour``,
+        ``borrow_rate_apr`` columns (no funding-rate columns).
+    """
+    timestamps = pl.datetime_range(
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 1, 1, hours, tzinfo=UTC),
+        interval="1h",
+        time_zone="UTC",
+        eager=True,
+        closed="left",
+    )
+    return pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "borrow_rate_per_hour": [1e-8] * hours,
+            "borrow_rate_apr": [0.05] * hours,
+        }
+    )
+
+
+def test_list_funding_timeframes_excludes_companion_files(tmp_path: Path):
+    """A genuine ``1h.parquet`` plus a companion ``1h_short_borrow.parquet``
+    in the same symbol directory -- as the unified-funding pipeline writes
+    in production -- must only surface the genuine timeframe."""
+    data_dir = tmp_path / "data"
+    _seed_funding_symbol(data_dir, "AAVE", _make_funding_df())
+
+    symbol_dir = data_dir / "funding" / "arbitrum" / "rates" / "AAVE"
+    _make_borrow_rate_df().write_parquet(symbol_dir / "1h_short_borrow.parquet")
+
+    exporter = FreqtradeExporter(data_dir, tmp_path / "output")
+    assert exporter.list_funding_timeframes("AAVE") == ["1h"]
+
+
+def test_export_funding_auto_discovers_only_genuine_timeframe(tmp_path: Path):
+    """End-to-end: export_funding() with timeframes=None (auto-discovery)
+    must not attempt the companion "short borrow" file as a funding
+    timeframe -- it should never even be discovered, let alone fail."""
+    data_dir = tmp_path / "data"
+    _seed_funding_symbol(data_dir, "AAVE", _make_funding_df())
+
+    symbol_dir = data_dir / "funding" / "arbitrum" / "rates" / "AAVE"
+    _make_borrow_rate_df().write_parquet(symbol_dir / "1h_short_borrow.parquet")
+
+    output_dir = tmp_path / "output"
+    exporter = FreqtradeExporter(data_dir, output_dir)
+    results, failed_symbols, failures = exporter.export_funding(
+        symbols=["AAVE"], timeframes=None
+    )
+
+    assert failed_symbols == []
+    assert failures == []
+    futures_dir = output_dir / "gmx" / "futures"
+    assert (futures_dir / "AAVE_USDC_USDC-1h-funding_rate.feather").exists()

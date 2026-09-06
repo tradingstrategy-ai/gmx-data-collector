@@ -17,6 +17,7 @@ Funding rate parquet files are read from
 """
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
@@ -41,6 +42,13 @@ from gmx_historical_data.storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches genuine timeframe-shaped filename stems only (e.g. "1h", "4h",
+# "15m", "1d") -- the unified-funding pipeline also writes companion data
+# products into the same directory (e.g. "1h_datastore", "1h_factor",
+# "1h_short_borrow", "1h_borrow_rate"), none of which are funding-rate data
+# and all of which fail this pattern because of their trailing suffix.
+_FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,13 +492,23 @@ class FreqtradeExporter:
     def list_funding_timeframes(self, symbol: str) -> list[str]:
         """List available funding rate timeframes for a symbol.
 
+        Only matches genuine timeframe files (e.g. ``1h``, ``4h``) -- the same
+        directory also holds companion data products from the unified-funding
+        pipeline (``{tf}_datastore``, ``{tf}_factor``, ``{tf}_short_borrow``,
+        ``{tf}_borrow_rate``, ...), which must never be treated as an
+        exportable funding-rate timeframe.
+
         :param symbol: Token symbol (e.g., ``'ETH'``).
         :returns: Sorted list of timeframe strings.
         """
         symbol_dir = self.funding_dir / symbol
         if not symbol_dir.exists():
             return []
-        return sorted(f.stem for f in symbol_dir.glob("*.parquet") if not f.name.startswith("."))
+        return sorted(
+            f.stem
+            for f in symbol_dir.glob("*.parquet")
+            if not f.name.startswith(".") and _FUNDING_TIMEFRAME_PATTERN.match(f.stem)
+        )
 
     # ------------------------------------------------------------------
     # Data readers
