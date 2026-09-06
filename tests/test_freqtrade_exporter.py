@@ -1,7 +1,7 @@
 """Tests for Freqtrade exporter."""
 
 import tempfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -9,6 +9,7 @@ import polars as pl
 import pytest
 
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+from gmx_historical_data.ohlcv_validation import CadenceBreak
 from gmx_historical_data.storage import ParquetStorage
 
 
@@ -489,3 +490,116 @@ def test_export_candles_both_unsafe_overwrite_regenerates_corrupt_file(sample_st
     parquet = pl.read_parquet(corrupt)
     assert feather.equals(parquet)
     assert parquet.filter(~pl.col("close").is_finite()).height == 0
+
+
+def _gapped_candles(symbol: str, hour_offsets: list[int]) -> pd.DataFrame:
+    """Build a candle frame at explicit hour offsets so a hole can be seeded.
+
+    :param symbol: Token symbol.
+    :param hour_offsets: Hour offsets from 2024-01-01 00:00 UTC.
+    :returns: pandas DataFrame with the columns ``save_candles`` requires.
+    """
+    base = pd.Timestamp("2024-01-01", tz="UTC")
+    timestamps = [base + pd.Timedelta(hours=h) for h in hour_offsets]
+    n = len(timestamps)
+    return pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [1.0] * n,
+            "high": [1.0] * n,
+            "low": [1.0] * n,
+            "close": [1.0] * n,
+            "symbol": [symbol] * n,
+        }
+    )
+
+
+def test_write_returns_no_breaks_without_expected_interval(tmp_path: Path):
+    """Default stays a no-op -- every pre-existing _write caller is unaffected."""
+    exporter = FreqtradeExporter(tmp_path / "data", tmp_path / "out")
+    frame = _freqtrade_frame()
+    path = tmp_path / "out" / "X-1h-futures.feather"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    assert exporter._write(frame, path, "feather") == []
+
+
+def test_write_reports_cadence_breaks_on_written_frame(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    storage = ParquetStorage(data_dir)
+    # 00:00, 01:00, 03:00 -- the 02:00 bar is absent.
+    storage.save_candles(_gapped_candles("BBB", [0, 1, 3]), "1h", "BBB")
+
+    exporter = FreqtradeExporter(data_dir, tmp_path / "out")
+    df = pl.from_pandas(storage.read_candles("1h", "BBB"))
+    path = tmp_path / "out" / "BBB_USDC_USDC-1h-futures.feather"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    breaks = exporter._write(
+        exporter._transform_dataframe(df),
+        path,
+        "feather",
+        expected_interval=timedelta(hours=1),
+    )
+
+    assert len(breaks) == 1
+    assert isinstance(breaks[0], CadenceBreak)
+    assert breaks[0].missing_bars == 1
+    assert path.exists()  # the file is still written -- record, never reject
+
+
+def test_write_reports_break_created_at_the_merge_seam(tmp_path: Path):
+    """The check must run on the merged frame: neither the existing file nor
+    the incoming slice has a hole on its own, but the join between them does."""
+    exporter = FreqtradeExporter(tmp_path / "data", tmp_path / "out")
+    path = tmp_path / "out" / "SEAM_USDC_USDC-1h-futures.feather"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+
+    def _frame(hours: list[int]) -> pl.DataFrame:
+        dates = [base + timedelta(hours=h) for h in hours]
+        n = len(dates)
+        return pl.DataFrame(
+            {
+                "date": pl.Series("date", dates, dtype=pl.Datetime("ns", "UTC")),
+                "open": pl.Series("open", [1.0] * n, dtype=pl.Float64),
+                "high": pl.Series("high", [1.0] * n, dtype=pl.Float64),
+                "low": pl.Series("low", [1.0] * n, dtype=pl.Float64),
+                "close": pl.Series("close", [1.0] * n, dtype=pl.Float64),
+                "volume": pl.Series("volume", [0.0] * n, dtype=pl.Float64),
+            }
+        )
+
+    assert exporter._write(_frame([0, 1, 2]), path, "feather") == []
+    breaks = exporter._write(
+        _frame([5, 6, 7]), path, "feather", expected_interval=timedelta(hours=1)
+    )
+
+    assert len(breaks) == 1
+    assert breaks[0].missing_bars == 2  # 03:00 and 04:00 absent
+
+
+def test_write_both_reports_cadence_breaks(tmp_path: Path):
+    exporter = FreqtradeExporter(tmp_path / "data", tmp_path / "out")
+    path = tmp_path / "out" / "BOTH_USDC_USDC-1h-futures.feather"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    dates = [base + timedelta(hours=h) for h in (0, 1, 3)]
+    frame = pl.DataFrame(
+        {
+            "date": pl.Series("date", dates, dtype=pl.Datetime("ns", "UTC")),
+            "open": pl.Series("open", [1.0] * 3, dtype=pl.Float64),
+            "high": pl.Series("high", [1.0] * 3, dtype=pl.Float64),
+            "low": pl.Series("low", [1.0] * 3, dtype=pl.Float64),
+            "close": pl.Series("close", [1.0] * 3, dtype=pl.Float64),
+            "volume": pl.Series("volume", [0.0] * 3, dtype=pl.Float64),
+        }
+    )
+
+    breaks = exporter._write(frame, path, "both", expected_interval=timedelta(hours=1))
+
+    assert len(breaks) == 1
+    assert breaks[0].missing_bars == 1
+    assert path.exists()
+    assert path.with_suffix(".parquet").exists()

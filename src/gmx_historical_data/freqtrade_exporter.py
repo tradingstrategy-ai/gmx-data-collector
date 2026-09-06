@@ -19,6 +19,7 @@ Funding rate parquet files are read from
 import logging
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,8 +32,10 @@ from gmx_historical_data.atomic_parquet import (
     is_fatal_environment_error,
 )
 from gmx_historical_data.ohlcv_validation import (
+    CadenceBreak,
     ExportValidationError,
     assert_export_parity,
+    find_cadence_breaks,
     validate_ohlcv,
 )
 from gmx_historical_data.storage import (
@@ -748,6 +751,45 @@ class FreqtradeExporter:
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
 
+    def _scan_cadence(
+        self,
+        frame: pl.DataFrame,
+        path: Path,
+        expected_interval: timedelta | None,
+    ) -> list[CadenceBreak]:
+        """Scan a frame about to be published for interior cadence breaks.
+
+        Records and logs; never raises.  A break means one or more interior
+        bars are absent -- a real upstream oracle or collector outage, not a
+        transform bug -- and 82% of already-published files carry at least
+        one, most permanently unrecoverable past GMX's ~5-week retention
+        window.  Rejecting them would wedge the release rather than fix
+        anything, so the export path records them into the cadence manifest
+        instead (issue #29).
+
+        :param frame: The post-merge frame that is about to be written.
+        :param path: Destination path, used for the log line only.
+        :param expected_interval: The timeframe's bar interval, or ``None``
+            to skip the scan entirely.
+        :returns: Breaks found, in ascending timestamp order.
+        """
+        if expected_interval is None:
+            return []
+        breaks = find_cadence_breaks(
+            frame, timestamp_column="date", expected_interval=expected_interval
+        )
+        if breaks:
+            logger.warning(
+                "%s: %d cadence break(s), %d missing bar(s); first gap %s between %s and %s",
+                path.name,
+                len(breaks),
+                sum(b.missing_bars for b in breaks),
+                breaks[0].actual,
+                breaks[0].before,
+                breaks[0].after,
+            )
+        return breaks
+
     def _write_single_frame(self, df: pl.DataFrame, path: Path, fmt: str) -> None:
         """Write a single export file in the requested format.
 
@@ -774,11 +816,18 @@ class FreqtradeExporter:
         parquet_path: Path,
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
-    ) -> None:
+        expected_interval: timedelta | None = None,
+    ) -> list[CadenceBreak]:
         """Publish matching Feather and Parquet files from one canonical frame.
 
         ``unsafe_overwrite`` bypasses reading and merging both destinations so a
         corrupt pre-existing file can be regenerated from ``df`` alone.
+
+        :param expected_interval: When set, the merged frame -- the bytes this
+            call actually publishes -- is scanned for interior cadence breaks.
+            Findings are returned and logged, never raised (issue #29).
+        :returns: Cadence breaks found in the published frame; empty list when
+            ``expected_interval`` is ``None`` or the series is contiguous.
         """
         if not unsafe_overwrite:
             existing_frames: list[pl.DataFrame] = []
@@ -813,6 +862,8 @@ class FreqtradeExporter:
                     file_size=feather_path.stat().st_size if feather_path.exists() else 0,
                     allow_nonpositive_prices=allow_nonpositive_prices,
                 )
+
+        breaks = self._scan_cadence(df, feather_path, expected_interval)
 
         feather_tmp = feather_path.with_name(f".{feather_path.name}.{uuid4().hex}.tmp")
         parquet_tmp = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -856,6 +907,8 @@ class FreqtradeExporter:
                 if backup_path.exists():
                     backup_path.unlink()
 
+        return breaks
+
     def _write(
         self,
         df: pl.DataFrame,
@@ -864,7 +917,8 @@ class FreqtradeExporter:
         overwrite: bool = False,
         unsafe_overwrite: bool = False,
         allow_nonpositive_prices: bool = False,
-    ) -> None:
+        expected_interval: timedelta | None = None,
+    ) -> list[CadenceBreak]:
         """Merge-write dataframe into an existing file or create it.
 
         Behaviour matrix:
@@ -895,20 +949,26 @@ class FreqtradeExporter:
             the history guard.
         :param unsafe_overwrite: If ``True``, bypass the history guard and
             replace the file entirely.  For schema migrations only.
+        :param expected_interval: When set, the merged frame -- the bytes this
+            call actually publishes -- is scanned for interior cadence breaks.
+            Findings are returned and logged, never raised: see the module's
+            ``export_candles`` docstring and issue #29.  ``None`` skips the scan.
+        :returns: Cadence breaks found in the published frame; empty list when
+            ``expected_interval`` is ``None`` or the series is contiguous.
         :raises ValueError: If a merge would shrink existing history and
             ``unsafe_overwrite`` is not set.
         """
         if fmt == "both":
             feather_path = path if path.suffix == ".feather" else path.with_suffix(".feather")
             parquet_path = feather_path.with_suffix(".parquet")
-            self._write_both(
+            return self._write_both(
                 df,
                 feather_path,
                 parquet_path,
                 unsafe_overwrite,
                 allow_nonpositive_prices,
+                expected_interval,
             )
-            return
 
         if fmt not in {"feather", "parquet"}:
             raise ValueError(f"Unsupported export format: {fmt}")
@@ -920,7 +980,9 @@ class FreqtradeExporter:
             unsafe_overwrite=unsafe_overwrite,
             allow_nonpositive_prices=allow_nonpositive_prices,
         )
+        breaks = self._scan_cadence(merged, path, expected_interval)
         self._write_single_frame(merged, path, fmt)
+        return breaks
 
     # ------------------------------------------------------------------
     # Filename generation
