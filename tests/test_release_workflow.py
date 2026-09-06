@@ -107,3 +107,48 @@ def test_cadence_gate_logic_is_importable_not_inlined() -> None:
 
     for command in ("build", "check", "annotate"):
         assert f"gmx_historical_data.cadence_gate {command}" in text
+
+
+def _cadence_step() -> str:
+    """:returns: The `Validate candle cadence` step's shell script."""
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    steps = workflow["jobs"]["release"]["steps"]
+    return next(s for s in steps if s.get("name") == "Validate candle cadence")["run"]
+
+
+def test_regression_flag_is_set_before_any_best_effort_reporting() -> None:
+    """The reporting tail runs under `set -e` and *before* packaging, so an
+    unguarded failure in it would block the release -- the fail-closed
+    behaviour this design exists to avoid. The flag must land first, and
+    every call after it must be `||`-guarded."""
+    script = _cadence_step()
+    flag = script.index('CADENCE_REGRESSION_DETECTED=true" >> "$GITHUB_ENV"')
+
+    for call in (
+        "cadence_gate annotate",
+        "FILES=$(",
+        "DETAILS=$(",
+        "cadence_gate find-issue",
+        "gh issue comment",
+        "gh issue create",
+    ):
+        assert flag < script.index(call), f"{call} runs before the flag is set"
+
+    tail = script[flag:]
+    assert tail.count("||") >= 6
+
+
+def test_cadence_gate_exempts_delisted_and_just_relisted_markets() -> None:
+    """A relisting seam is a legitimate break (MEGA 1h, 213 bars). The gate
+    reads the same roster the futures-integrity step does, plus the roster
+    as it stood before this run rewrote it -- a market that relists drops
+    off the live roster before collection, which is exactly the run whose
+    seam needs exempting."""
+    text = WORKFLOW.read_text()
+
+    assert "--delisted-roster ./user_data/data/gmx/delisted_markets.json" in text
+    assert "--delisted-roster /tmp/gmx-delisted-baseline.json" in text
+    assert "/tmp/gmx-delisted-baseline.json" in text
+    assert text.index("Record delisted markets") < text.index("Validate candle cadence")

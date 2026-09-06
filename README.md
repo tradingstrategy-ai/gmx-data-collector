@@ -398,6 +398,11 @@ Contract notes:
 
 - **Every exported `-futures` file gets an entry**, including contiguous ones
   (`breaks_total: 0`). Absence from the manifest means "not checked", not "clean".
+- A file whose feather could not be read on a given run is **removed** from the manifest
+  for that run rather than keeping its previous entry. The manifest merges across partial
+  runs, so a carried-forward entry would sit under a fresh `generated_at` and vouch for a
+  verdict nobody recomputed. Dropping it keeps `generated_at` honest: every entry present
+  was checked by the run that stamped it.
 - `breaks_total` and `missing_bars_total` are always exact. When `truncated` is `true`
   the `breaks` list is capped at 200 entries (1m series can carry thousands).
 - Only candle (`-futures`) files are covered. `-funding_rate` files are deliberately not
@@ -413,6 +418,10 @@ Contract notes:
   — withholding a whole day of candles because one symbol regressed is worse than
   publishing it labelled — so a consumer should quarantine just that file. The release
   workflow files a deduplicated tracking issue and ends red whenever it stamps one.
+- Delisted markets are exempt from that check. Their history freezes at delisting and
+  resumes at relisting, leaving one large legitimate seam; the roster in
+  `user_data/data/gmx/delisted_markets.json` names them, and the release gate skips the
+  same files the futures-integrity gate already skips.
 
 ## Backtesting
 

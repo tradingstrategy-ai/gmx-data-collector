@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -591,15 +592,27 @@ class FreqtradeExporter:
             ],
         }
 
-    def write_cadence_manifest(self, gmx_dir: Path, entries: dict[str, dict]) -> Path:
+    def write_cadence_manifest(
+        self,
+        gmx_dir: Path,
+        entries: dict[str, dict],
+        drop: Iterable[str] = (),
+    ) -> Path:
         """Merge ``entries`` into the cadence manifest and publish it atomically.
 
         Merging rather than replacing is required: a partial run such as
         ``export-freqtrade --symbol BTC`` touches one file, and must not
         erase the other 106 symbols' recorded state.
 
+        ``drop`` is the counterweight to that merge.  A file this run tried
+        and failed to read must not keep its previous entry, because the
+        published ``generated_at`` would then vouch for a verdict nobody
+        recomputed.  Removing it restores the manifest's contract: absence
+        means "not checked", presence means "checked on this run".
+
         :param gmx_dir: Directory the feathers were written to.
         :param entries: Manifest entries keyed by feather filename.
+        :param drop: Filenames whose stale entries must be removed.
         :returns: Path to the published manifest.
         """
         path = gmx_dir / CADENCE_MANIFEST_NAME
@@ -613,6 +626,8 @@ class FreqtradeExporter:
                     path.name,
                     exc,
                 )
+        for name in drop:
+            files.pop(name, None)
         files.update(entries)
 
         payload = {

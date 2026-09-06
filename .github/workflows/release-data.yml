@@ -150,6 +150,14 @@ jobs:
               print(f"WARNING: registry unreachable ({exc}); reusing previous roster.")
               roster = sorted(previous)
 
+          # The roster below is rewritten *before* collection, and a market
+          # that just relisted drops off it at that moment -- which is
+          # exactly the run whose relisting seam the cadence gate must not
+          # flag. Keep the pre-rewrite roster so that one run is exempt.
+          Path("/tmp/gmx-delisted-baseline.json").write_text(
+              json.dumps({"symbols": sorted(previous)}, indent=2), encoding="utf-8"
+          )
+
           gmx_dir.mkdir(parents=True, exist_ok=True)
           roster_path.write_text(
               json.dumps(
@@ -364,7 +372,9 @@ jobs:
             PYTHONPATH=src python -m gmx_historical_data.cadence_gate check \
                 --baseline /tmp/gmx-cadence-baseline.json \
                 --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
-                --regressions /tmp/gmx-cadence-regressions.json
+                --regressions /tmp/gmx-cadence-regressions.json \
+                --delisted-roster ./user_data/data/gmx/delisted_markets.json \
+                --delisted-roster /tmp/gmx-delisted-baseline.json
             STATUS=$?
             set -e
             if [ "$STATUS" -eq 0 ]; then
@@ -386,16 +396,25 @@ jobs:
             exit 1
           fi
 
+          # Set the flag FIRST. Everything below is best-effort reporting,
+          # and this step runs before packaging: if any of it failed under
+          # `set -e` the release itself would be blocked, which is the
+          # fail-closed behaviour this whole design exists to avoid. The
+          # job still ends red because the last step reads this flag.
+          echo "CADENCE_REGRESSION_DETECTED=true" >> "$GITHUB_ENV"
+          echo "::warning::New cadence break(s) detected; the release will publish and the job will end red."
+
           PYTHONPATH=src python -m gmx_historical_data.cadence_gate annotate \
               --manifest ./user_data/data/gmx/futures/_cadence_manifest.json \
               --regressions /tmp/gmx-cadence-regressions.json \
-              --previous-tag "${PREVIOUS_TAG:-unknown}"
+              --previous-tag "${PREVIOUS_TAG:-unknown}" \
+            || echo "WARNING: could not annotate the cadence manifest; the flag is still set." >&2
 
           REPO=${{ github.repository }}
           RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
           DATE=$(date -u +%Y-%m-%d)
-          FILES=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join(sorted({i['file'] for i in json.load(open(sys.argv[1]))})))" /tmp/gmx-cadence-regressions.json)
-          DETAILS=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join('- '+i['detail'] for i in json.load(open(sys.argv[1]))[:50]))" /tmp/gmx-cadence-regressions.json)
+          FILES=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join(sorted({i['file'] for i in json.load(open(sys.argv[1]))})))" /tmp/gmx-cadence-regressions.json || echo "")
+          DETAILS=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join('- '+i['detail'] for i in json.load(open(sys.argv[1]))[:50]))" /tmp/gmx-cadence-regressions.json || echo "(details unavailable)")
 
           # Fetch the open ticket list ONCE, with bodies, and match on the
           # exact hidden marker below. `gh issue list --search` tokenises, and
@@ -426,7 +445,7 @@ jobs:
 
           <!-- cadence-regression:${FILE} -->"
             EXISTING=$(PYTHONPATH=src python -m gmx_historical_data.cadence_gate find-issue \
-                --issues /tmp/gmx-open-issues.json --file "$FILE")
+                --issues /tmp/gmx-open-issues.json --file "$FILE" || echo "")
             if [ -n "$EXISTING" ]; then
               gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" \
                 || echo "WARNING: could not comment on issue #${EXISTING}" >&2
@@ -442,10 +461,7 @@ jobs:
             FILED=$((FILED + 1))
           done <<< "$FILES"
 
-          # Defer the failure: publish must still run so consumers get the
-          # day's data. The last step in this job turns this flag into exit 1.
-          echo "CADENCE_REGRESSION_DETECTED=true" >> "$GITHUB_ENV"
-          echo "::warning::New cadence break(s) detected; the release will publish and the job will end red."
+          echo "Cadence regression recorded; the release will publish and the job will end red."
 
       - name: Collect 24h volume snapshot
         run: |

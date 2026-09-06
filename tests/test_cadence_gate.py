@@ -20,6 +20,7 @@ from gmx_historical_data.cadence_gate import (
     build_cadence_manifest,
     find_cadence_regressions,
     find_issue_number_for_marker,
+    load_exempt_symbols,
     main,
     regression_marker,
 )
@@ -312,7 +313,7 @@ def test_build_cadence_manifest_reads_every_futures_feather(tmp_path: Path):
     _write_feather(tmp_path / "ETH_USDC_USDC-4h-futures.feather", [0, 4, 8])
     _write_feather(tmp_path / "ETH_USDC_USDC-4h-mark.feather", [0, 8])  # not a candle file
 
-    entries = build_cadence_manifest(tmp_path)
+    entries = build_cadence_manifest(tmp_path).entries
 
     assert set(entries) == {
         "BTC_USDC_USDC-4h-futures.feather",
@@ -328,6 +329,170 @@ def test_build_cadence_manifest_skips_an_unreadable_feather(tmp_path: Path):
     _write_feather(tmp_path / "BTC_USDC_USDC-4h-futures.feather", [0, 4, 12])
     (tmp_path / "BAD_USDC_USDC-4h-futures.feather").write_bytes(b"not a feather")
 
-    entries = build_cadence_manifest(tmp_path)
+    entries = build_cadence_manifest(tmp_path).entries
 
     assert set(entries) == {"BTC_USDC_USDC-4h-futures.feather"}
+
+
+# --------------------------------------------------------------------------
+# Delisted / relisted markets
+# --------------------------------------------------------------------------
+
+MEGA = "MEGA_USDC_USDC-1h-futures.feather"
+
+
+def test_relisting_seam_on_a_delisted_market_is_not_a_regression():
+    """A delisted market's history freezes; when it relists, collection
+    resumes and leaves one huge legitimate seam (MEGA 1h, 213 bars -- see
+    PR #23, which deliberately retains delisted market history). The
+    existing `Validate futures candle file integrity` step already exempts
+    these files via delisted_markets.json; the cadence gate must use the
+    same roster and the same symbol key rather than filing a false alarm."""
+    baseline = _manifest(**{MEGA: _entry(last="2025-06-05T00:00:00+00:00")})
+    current = _manifest(
+        **{
+            MEGA: _entry(
+                breaks=[("2025-06-05T00:00:00+00:00", "2025-06-13T21:00:00+00:00", 213)],
+                last="2025-06-14T00:00:00+00:00",
+            )
+        }
+    )
+
+    assert find_cadence_regressions(baseline, current, exempt_symbols={"MEGA"}) == []
+    # Without the exemption it is a regression -- the rule itself is unchanged.
+    assert len(find_cadence_regressions(baseline, current)) == 1
+
+
+def test_exempt_symbols_match_the_roster_case_and_key():
+    """The roster stores bare symbols; the manifest is keyed by filename.
+    Lookup must extract the symbol the same way the integrity step does."""
+    baseline = _manifest(**{MEGA: _entry()})
+    current = _manifest(
+        **{MEGA: _entry(breaks=[("2025-06-02T16:00:00+00:00", "2025-06-03T00:00:00+00:00", 1)])}
+    )
+
+    assert find_cadence_regressions(baseline, current, exempt_symbols={"mega"}) == []
+    assert len(find_cadence_regressions(baseline, current, exempt_symbols={"BTC"})) == 1
+
+
+def test_load_exempt_symbols_unions_every_roster(tmp_path: Path):
+    """The live roster is rewritten BEFORE collection, and a relisted symbol
+    drops off it at that moment -- which is precisely the run whose seam gap
+    needs exempting. The previous release's roster is unioned in so the
+    relist day is covered exactly once."""
+    live = tmp_path / "delisted_markets.json"
+    live.write_text(json.dumps({"symbols": ["OM"], "updated": "2026-09-06"}), encoding="utf-8")
+    baseline = tmp_path / "delisted-baseline.json"
+    baseline.write_text(json.dumps({"symbols": ["mega"]}), encoding="utf-8")
+
+    assert load_exempt_symbols([live, baseline, tmp_path / "absent.json"]) == {"OM", "MEGA"}
+
+
+def test_load_exempt_symbols_survives_a_malformed_roster(tmp_path: Path):
+    bad = tmp_path / "delisted_markets.json"
+    bad.write_text("{not json", encoding="utf-8")
+
+    assert load_exempt_symbols([bad]) == set()
+
+
+def test_check_command_honours_the_delisted_roster(tmp_path: Path):
+    baseline_path = tmp_path / "baseline.json"
+    manifest_path = tmp_path / "_cadence_manifest.json"
+    roster_path = tmp_path / "delisted_markets.json"
+
+    baseline_path.write_text(json.dumps(_manifest(**{MEGA: _entry()})), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            _manifest(
+                **{
+                    MEGA: _entry(
+                        breaks=[("2025-06-05T00:00:00+00:00", "2025-06-13T21:00:00+00:00", 213)],
+                        last="2025-06-14T00:00:00+00:00",
+                    )
+                }
+            )
+        ),
+        encoding="utf-8",
+    )
+    roster_path.write_text(json.dumps({"symbols": ["MEGA"]}), encoding="utf-8")
+
+    argv = [
+        "check",
+        "--baseline",
+        str(baseline_path),
+        "--manifest",
+        str(manifest_path),
+        "--regressions",
+        str(tmp_path / "regressions.json"),
+        "--delisted-roster",
+        str(roster_path),
+    ]
+    assert main(argv) == EXIT_OK
+    assert json.loads((tmp_path / "regressions.json").read_text(encoding="utf-8")) == []
+
+
+# --------------------------------------------------------------------------
+# Timestamp normalisation
+# --------------------------------------------------------------------------
+
+
+def test_the_same_instant_serialised_differently_is_not_a_regression():
+    """Raw ISO-string equality would mass-false-positive every inherited
+    break at once if the serialisation ever changed (`Z` vs `+00:00`, or a
+    precision change), and there is no second filter left to catch that."""
+    baseline = _manifest(
+        **{NAME: _entry(breaks=[("2025-06-02T16:00:00+00:00", "2025-06-03T00:00:00+00:00", 1)])}
+    )
+    current = _manifest(
+        **{NAME: _entry(breaks=[("2025-06-02T16:00:00Z", "2025-06-03T00:00:00.000000Z", 1)])}
+    )
+
+    assert find_cadence_regressions(baseline, current) == []
+
+
+def test_unparseable_timestamps_fall_back_to_string_comparison():
+    baseline = _manifest(**{NAME: _entry(breaks=[("not-a-date", "also-not", 1)])})
+    current = _manifest(**{NAME: _entry(breaks=[("not-a-date", "also-not", 1)])})
+
+    assert find_cadence_regressions(baseline, current) == []
+
+
+# --------------------------------------------------------------------------
+# Stale-entry hygiene
+# --------------------------------------------------------------------------
+
+
+def test_an_unreadable_feather_is_dropped_from_the_manifest_not_carried_forward(tmp_path: Path):
+    """write_cadence_manifest merges rather than replaces, so a skipped file
+    would otherwise keep yesterday's entry under today's `generated_at` --
+    claiming "checked today" for a file nobody checked. The README's
+    contract is that absence means not-checked, so the entry is dropped."""
+    from gmx_historical_data.freqtrade_exporter import CADENCE_MANIFEST_NAME
+
+    _write_feather(tmp_path / "BTC_USDC_USDC-4h-futures.feather", [0, 4, 8])
+    _write_feather(tmp_path / "BAD_USDC_USDC-4h-futures.feather", [0, 4, 8])
+
+    assert main(["build", "--futures-dir", str(tmp_path)]) == EXIT_OK
+    manifest_path = tmp_path / CADENCE_MANIFEST_NAME
+    assert (
+        "BAD_USDC_USDC-4h-futures.feather"
+        in json.loads(manifest_path.read_text(encoding="utf-8"))["files"]
+    )
+
+    # Now it goes corrupt: the stale entry must not survive as if fresh.
+    (tmp_path / "BAD_USDC_USDC-4h-futures.feather").write_bytes(b"not a feather")
+    assert main(["build", "--futures-dir", str(tmp_path)]) == EXIT_OK
+
+    files = json.loads(manifest_path.read_text(encoding="utf-8"))["files"]
+    assert "BTC_USDC_USDC-4h-futures.feather" in files
+    assert "BAD_USDC_USDC-4h-futures.feather" not in files
+
+
+def test_build_reports_which_files_it_skipped(tmp_path: Path):
+    _write_feather(tmp_path / "BTC_USDC_USDC-4h-futures.feather", [0, 4])
+    (tmp_path / "BAD_USDC_USDC-4h-futures.feather").write_bytes(b"not a feather")
+
+    scan = build_cadence_manifest(tmp_path)
+
+    assert set(scan.entries) == {"BTC_USDC_USDC-4h-futures.feather"}
+    assert scan.skipped == {"BAD_USDC_USDC-4h-futures.feather"}

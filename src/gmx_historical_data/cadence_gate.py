@@ -29,7 +29,8 @@ import logging
 import re
 import sys
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import polars as pl
@@ -62,6 +63,16 @@ DEFAULT_REGRESSIONS_PATH = Path("/tmp/gmx-cadence-regressions.json")
 #: drops null rates by design).
 _FUTURES_FILE_PATTERN = re.compile(r"-(1m|5m|15m|1h|4h|1d)-futures\.feather$")
 
+#: Symbol extractor, character-for-character the one the workflow's
+#: ``Record delisted markets`` and ``Validate futures candle file
+#: integrity`` steps already use, so the cadence gate exempts exactly the
+#: same files those do rather than inventing a second convention.
+_SYMBOL_FROM_FILENAME = re.compile(r"^(.+?)_[^_]+_[^_]+-(?:1m|5m|15m|1h|4h|1d)-")
+
+#: Roster of markets whose history is frozen, written by the workflow's
+#: ``Record delisted markets`` step.
+DEFAULT_DELISTED_ROSTER = Path("./user_data/data/gmx/delisted_markets.json")
+
 
 @dataclass(frozen=True, slots=True)
 class CadenceRegression:
@@ -77,6 +88,85 @@ class CadenceRegression:
     def as_dict(self) -> dict[str, str]:
         """:returns: JSON-serialisable form, as written to the regressions file."""
         return {"file": self.file, "detail": self.detail}
+
+
+@dataclass(frozen=True, slots=True)
+class CadenceScan:
+    """The outcome of scanning a futures directory.
+
+    :param entries: Manifest entries keyed by feather filename.
+    :param skipped: Filenames that could not be read this run.  They are
+        removed from the published manifest rather than left carrying a
+        previous run's entry, so "present" keeps meaning "checked on the
+        run that stamped ``generated_at``".
+    """
+
+    entries: dict[str, dict] = field(default_factory=dict)
+    skipped: set[str] = field(default_factory=set)
+
+
+def symbol_from_filename(filename: str) -> str | None:
+    """Extract the market symbol from an exported feather's filename.
+
+    :param filename: e.g. ``'MEGA_USDC_USDC-1h-futures.feather'``.
+    :returns: The upper-cased symbol, or ``None`` when the name does not
+        match the exported-candle convention.
+    """
+    match = _SYMBOL_FROM_FILENAME.match(filename)
+    return match.group(1).upper() if match else None
+
+
+def load_exempt_symbols(roster_paths: Iterable[Path]) -> set[str]:
+    """Union every delisted-market roster into one exemption set.
+
+    More than one roster matters because the workflow rewrites
+    ``delisted_markets.json`` *before* collection, and a market that has
+    just relisted drops off it at that moment -- which is exactly the run
+    whose relisting seam needs exempting.  Unioning the previous release's
+    roster covers that single run, after which the market is live and the
+    ordinary no-growth rule applies again.
+
+    An unreadable roster yields no exemptions rather than raising: a
+    missing exemption files a false-alarm issue, while a raise here would
+    block the release, and this gate never blocks the release.
+
+    :param roster_paths: Roster files in ``{"symbols": [...]}`` form.
+    :returns: Upper-cased symbols exempt from regression comparison.
+    """
+    exempt: set[str] = set()
+    for path in roster_paths:
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            exempt.update(str(symbol).upper() for symbol in payload.get("symbols", []))
+        except (json.JSONDecodeError, OSError, AttributeError, TypeError) as exc:
+            logger.warning("%s: unreadable delisted roster, ignoring: %s", path, exc)
+    return exempt
+
+
+def _instant_key(value: object) -> object:
+    """Normalise a manifest timestamp so two spellings of one instant match.
+
+    The manifest serialises whole-bar UTC timestamps consistently today, so
+    raw string equality happens to work -- but a future change (``Z`` versus
+    ``+00:00``, or added precision) would make every inherited break look
+    new at once, and there is no second filter left to catch that.
+
+    :param value: An ISO-8601 string from a manifest break entry.
+    :returns: A POSIX timestamp when parseable, else the value unchanged so
+        comparison degrades to the previous string behaviour.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return value
+
+
+def _gap_key(gap: dict) -> tuple[object, object]:
+    return (_instant_key(gap.get("before")), _instant_key(gap.get("after")))
 
 
 def regression_marker(filename: str) -> str:
@@ -106,7 +196,12 @@ def find_issue_number_for_marker(issues: Iterable[dict], marker: str) -> int | N
     return None
 
 
-def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegression]:
+def find_cadence_regressions(
+    baseline: dict,
+    current: dict,
+    *,
+    exempt_symbols: Iterable[str] = (),
+) -> list[CadenceRegression]:
     """Diff two cadence manifests and report every newly-introduced break.
 
     The rule is one sentence: **for a file the previous release already
@@ -125,11 +220,21 @@ def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegre
     baseline never carried is skipped, because there is genuinely nothing
     to compare it against.
 
+    Delisted markets are exempt.  Their history freezes at delisting and
+    resumes at relisting, leaving one large legitimate seam (MEGA 1h, 213
+    bars -- PR #23 deliberately retains delisted market history), which is
+    a listing artifact rather than a collection defect.  The workflow's
+    existing ``Validate futures candle file integrity`` step exempts the
+    same files from the same roster; see :func:`load_exempt_symbols`.
+
     :param baseline: Previous release's manifest (``{"files": {...}}``).
     :param current: This run's manifest.
+    :param exempt_symbols: Market symbols whose files are skipped entirely
+        -- the delisted/relisted roster.
     :returns: Regressions in filename order; empty when nothing grew.
     """
     base_files = baseline.get("files", {}) or {}
+    exempt = {str(symbol).upper() for symbol in exempt_symbols}
     regressions: list[CadenceRegression] = []
 
     for name, entry in sorted((current.get("files", {}) or {}).items()):
@@ -138,7 +243,11 @@ def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegre
             # New file, or first run after rollout: nothing to compare.
             continue
 
-        entry_total = entry.get("breaks_total", 0)
+        symbol = symbol_from_filename(name)
+        if symbol is not None and symbol in exempt:
+            logger.info("%s: delisted/relisted market, exempt from the cadence gate", name)
+            continue
+
         before_total = before.get("breaks_total")
         if before_total is None:
             # Malformed or legacy baseline entry. Degrade to "nothing to
@@ -154,6 +263,7 @@ def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegre
             # gaps cannot be set-differenced. ``breaks_total`` is always
             # exact even when the list is truncated, so compare that. This
             # is intentionally the only place the two branches differ.
+            entry_total = entry.get("breaks_total", 0)
             if entry_total > before_total:
                 regressions.append(
                     CadenceRegression(
@@ -166,9 +276,9 @@ def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegre
                 )
             continue
 
-        known = {(gap.get("before"), gap.get("after")) for gap in (before.get("breaks") or [])}
+        known = {_gap_key(gap) for gap in (before.get("breaks") or [])}
         for gap in entry.get("breaks") or []:
-            if (gap.get("before"), gap.get("after")) in known:
+            if _gap_key(gap) in known:
                 continue
             regressions.append(
                 CadenceRegression(
@@ -183,7 +293,7 @@ def find_cadence_regressions(baseline: dict, current: dict) -> list[CadenceRegre
     return regressions
 
 
-def build_cadence_manifest(futures_dir: Path) -> dict[str, dict]:
+def build_cadence_manifest(futures_dir: Path) -> CadenceScan:
     """Scan every published candle feather and build its manifest entry.
 
     One unreadable file is skipped with a warning rather than aborting the
@@ -191,10 +301,16 @@ def build_cadence_manifest(futures_dir: Path) -> dict[str, dict]:
     a single corrupt or legacy feather must not cost the other ~700 files
     their cadence record.
 
+    A skipped file is also reported so the caller can *remove* its previous
+    manifest entry: the manifest merges rather than replaces, so leaving the
+    entry behind would republish yesterday's verdict under today's
+    ``generated_at`` and claim a file was checked when it was not.
+
     :param futures_dir: Directory holding the exported ``*-futures.feather``.
-    :returns: Manifest entries keyed by feather filename.
+    :returns: A :class:`CadenceScan` of entries plus skipped filenames.
     """
     entries: dict[str, dict] = {}
+    skipped: set[str] = set()
     for path in sorted(futures_dir.glob("*-futures.feather")):
         match = _FUTURES_FILE_PATTERN.search(path.name)
         if match is None:
@@ -205,9 +321,11 @@ def build_cadence_manifest(futures_dir: Path) -> dict[str, dict]:
             frame = pl.read_ipc(path, memory_map=False)
         except DATA_DEFECT_ERRORS as exc:
             logger.warning("%s: unreadable, excluded from the cadence manifest: %s", path.name, exc)
+            skipped.add(path.name)
             continue
         if frame.is_empty() or "date" not in frame.columns:
             logger.warning("%s: no candle rows, excluded from the cadence manifest", path.name)
+            skipped.add(path.name)
             continue
 
         breaks = find_cadence_breaks(
@@ -221,7 +339,7 @@ def build_cadence_manifest(futures_dir: Path) -> dict[str, dict]:
             frame.get_column("date").max(),
             breaks,
         )
-    return entries
+    return CadenceScan(entries=entries, skipped=skipped)
 
 
 def _load_json(path: Path) -> dict | list:
@@ -229,19 +347,26 @@ def _load_json(path: Path) -> dict | list:
 
 
 def _command_build(args: argparse.Namespace) -> int:
-    entries = build_cadence_manifest(args.futures_dir)
-    if not entries:
+    scan = build_cadence_manifest(args.futures_dir)
+    if not scan.entries:
         print("ERROR: no futures feathers found to build a cadence manifest.", file=sys.stderr)
         return EXIT_ERROR
 
     exporter = FreqtradeExporter(args.futures_dir, args.futures_dir)
-    manifest_path = exporter.write_cadence_manifest(args.futures_dir, entries)
-    total = sum(entry["breaks_total"] for entry in entries.values())
-    gapped = sum(1 for entry in entries.values() if entry["breaks_total"])
+    manifest_path = exporter.write_cadence_manifest(
+        args.futures_dir, scan.entries, drop=scan.skipped
+    )
+    total = sum(entry["breaks_total"] for entry in scan.entries.values())
+    gapped = sum(1 for entry in scan.entries.values() if entry["breaks_total"])
     print(
-        f"Wrote {manifest_path.name}: {len(entries)} files, "
+        f"Wrote {manifest_path.name}: {len(scan.entries)} files, "
         f"{gapped} with a break, {total} break(s) total."
     )
+    if scan.skipped:
+        print(
+            f"Dropped {len(scan.skipped)} unreadable file(s) from the manifest "
+            f"(absence means not-checked): {', '.join(sorted(scan.skipped))}"
+        )
     return EXIT_OK
 
 
@@ -257,7 +382,10 @@ def _command_check(args: argparse.Namespace) -> int:
         print(f"ERROR: cannot read cadence manifests: {exc}", file=sys.stderr)
         return EXIT_ERROR
 
-    regressions = find_cadence_regressions(baseline, current)
+    exempt = load_exempt_symbols(args.delisted_roster)
+    if exempt:
+        print(f"Exempt (delisted/relisted) markets: {', '.join(sorted(exempt))}")
+    regressions = find_cadence_regressions(baseline, current, exempt_symbols=exempt)
     args.regressions.write_text(
         json.dumps([item.as_dict() for item in regressions], indent=2), encoding="utf-8"
     )
@@ -333,6 +461,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     check.add_argument("--baseline", type=Path, default=DEFAULT_BASELINE_PATH)
     check.add_argument("--manifest", type=Path, default=DEFAULT_FUTURES_DIR / CADENCE_MANIFEST_NAME)
     check.add_argument("--regressions", type=Path, default=DEFAULT_REGRESSIONS_PATH)
+    check.add_argument(
+        "--delisted-roster",
+        type=Path,
+        action="append",
+        default=None,
+        help=(
+            "delisted-market roster to exempt (repeatable; defaults to the "
+            "live roster). Pass the previous release's roster too so a "
+            "relisting seam is exempt on the run that relists."
+        ),
+    )
     check.set_defaults(func=_command_check)
 
     annotate = sub.add_parser("annotate", help="stamp regressed_from onto the affected entries")
@@ -349,6 +488,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     find_issue.set_defaults(func=_command_find_issue)
 
     args = parser.parse_args(argv)
+    if getattr(args, "delisted_roster", None) is None and args.command == "check":
+        args.delisted_roster = [DEFAULT_DELISTED_ROSTER]
     return args.func(args)
 
 
