@@ -10,6 +10,15 @@ from hypersync import ClientConfig, HypersyncClient
 
 logger = logging.getLogger(__name__)
 
+# The underlying Rust client retries 429s internally by default and never
+# raises back to Python, which silently defeats rotate()/mark_failed() below --
+# they never get called because no exception ever surfaces. Capping retries
+# here forces a 429 to raise quickly so the Python-level rotation actually runs.
+_MAX_NUM_RETRIES = 1
+_RETRY_BASE_MS = 250
+_RETRY_BACKOFF_MS = 250
+_RETRY_CEILING_MS = 1000
+
 
 class HyperSyncKeyRotator:
     """Rotates between multiple HyperSync API keys to handle rate limits.
@@ -109,4 +118,16 @@ class HyperSyncKeyRotator:
         :param endpoint: HyperSync endpoint URL.
         :return: List of clients, one per key.
         """
-        return [HypersyncClient(ClientConfig(url=endpoint, bearer_token=key)) for key in self.keys]
+        return [
+            HypersyncClient(
+                ClientConfig(
+                    url=endpoint,
+                    bearer_token=key,
+                    max_num_retries=_MAX_NUM_RETRIES,
+                    retry_base_ms=_RETRY_BASE_MS,
+                    retry_backoff_ms=_RETRY_BACKOFF_MS,
+                    retry_ceiling_ms=_RETRY_CEILING_MS,
+                )
+            )
+            for key in self.keys
+        ]

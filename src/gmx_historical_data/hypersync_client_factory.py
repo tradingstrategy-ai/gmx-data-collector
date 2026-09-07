@@ -33,6 +33,32 @@ logger = logging.getLogger(__name__)
 # the collect-update path.
 _RATE_LIMIT_MARKERS = ("rate limit", "too many requests", "429", "quota")
 
+# The underlying Rust client retries 429s internally by default and never
+# raises back to Python, which silently defeats rotate_on_error() below -- it
+# never gets called because no exception ever surfaces. Capping retries here
+# forces a 429 to raise quickly so the Python-level rotation actually runs.
+_MAX_NUM_RETRIES = 1
+_RETRY_BASE_MS = 250
+_RETRY_BACKOFF_MS = 250
+_RETRY_CEILING_MS = 1000
+
+
+def _client_config(endpoint: str, bearer_token: str | None) -> ClientConfig:
+    """Build a :class:`ClientConfig` with retries capped for fast 429 rotation.
+
+    :param endpoint: HyperSync endpoint URL.
+    :param bearer_token: API key, or ``None`` for an unauthenticated client.
+    :returns: A :class:`ClientConfig` with a low internal retry ceiling.
+    """
+    return ClientConfig(
+        url=endpoint,
+        bearer_token=bearer_token,
+        max_num_retries=_MAX_NUM_RETRIES,
+        retry_base_ms=_RETRY_BASE_MS,
+        retry_backoff_ms=_RETRY_BACKOFF_MS,
+        retry_ceiling_ms=_RETRY_CEILING_MS,
+    )
+
 
 def build_hypersync_client_or_rotator(
     raw_token: str | None,
@@ -58,7 +84,7 @@ def build_hypersync_client_or_rotator(
     if len(keys) > 1:
         return HyperSyncKeyRotator(raw_token)
 
-    return HypersyncClient(ClientConfig(url=endpoint, bearer_token=keys[0]))
+    return HypersyncClient(_client_config(endpoint, keys[0]))
 
 
 class RotatingHypersyncClient:
@@ -100,7 +126,7 @@ class RotatingHypersyncClient:
         elif isinstance(pool, HypersyncClient):
             self._clients = [pool]
         else:
-            self._clients = [HypersyncClient(ClientConfig(url=endpoint, bearer_token=None))]
+            self._clients = [HypersyncClient(_client_config(endpoint, None))]
             logger.warning(
                 "No HYPERSYNC_API_TOKEN set for %s -- may hit 403/rate-limit errors", endpoint
             )
