@@ -633,8 +633,14 @@ class OraclePriceCollector:
         query = self.build_query(chunk_start, chunk_end, token_addresses)
 
         # Use streaming API for efficient batched fetching
-        # Server optimizes batch sizes and pre-fetches while we process
-        stream_config = StreamConfig()
+        # Server optimizes batch sizes and pre-fetches while we process.
+        # concurrency=1: an unset StreamConfig lets the Rust client fan out
+        # multiple in-flight requests per stream, all under the *same*
+        # currently-active key -- that produces bursts of a dozen-plus 429s
+        # within the same wall-clock second regardless of key rotation
+        # (observed live: 231 429s/min with only 8 rotations). Forcing
+        # single-flight requests removes that self-inflicted burst.
+        stream_config = StreamConfig(concurrency=1)
 
         try:
             stream = await self.client.stream(query, stream_config)
