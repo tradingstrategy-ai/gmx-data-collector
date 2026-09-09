@@ -70,6 +70,29 @@ _GMX_PRECISION = 1e30
 # All OHLCV timeframes to collect from the GMX API.
 TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
+# Incremental lookback floors (bars). 1m must match 15m's 72h coverage
+# (4320 minutes): a 24h floor (1440) has zero margin vs the daily cron and
+# misses interior holes ~36h back (2026-09-08 02:17). The request is
+# max(floor, bars since last stored + INCREMENTAL_OVERLAP).
+INCREMENTAL_LIMIT_FLOOR = {
+    "1m": 4320,
+    "5m": 576,
+    "15m": 288,
+    "1h": 120,
+    "4h": 60,
+    "1d": 5,
+}
+MAX_CANDLE_LIMIT = 10000
+INCREMENTAL_OVERLAP = pd.Timedelta(hours=1)
+_TIMEFRAME_DELTAS = {
+    "1m": pd.Timedelta(minutes=1),
+    "5m": pd.Timedelta(minutes=5),
+    "15m": pd.Timedelta(minutes=15),
+    "1h": pd.Timedelta(hours=1),
+    "4h": pd.Timedelta(hours=4),
+    "1d": pd.Timedelta(days=1),
+}
+
 # APY periods available from the GMX API.
 APY_PERIODS = ["1d", "7d", "30d", "90d", "180d", "1y", "total"]
 
@@ -106,6 +129,45 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
     feather.write_feather(combined, filepath, compression="zstd", compression_level=3)
+
+
+def incremental_candle_limit(
+    timeframe: str,
+    last_bar: pd.Timestamp | datetime | None,
+    now: pd.Timestamp | datetime | None = None,
+) -> int:
+    """How many most-recent candles to request for an incremental fetch.
+
+    GMX ``get_candlesticks_dataframe(limit=N)`` returns the N most-recent
+    candles ending at request time. Sizing N from a 24h constant (1440 1m
+    bars) leaves a hole whenever the next daily run starts later than the
+    previous last bar plus 24h, and misses interior holes just outside
+    that window. Size the request from ``last_bar`` (and a 72h 1m floor)
+    so the slice overlaps stored history.
+
+    :param timeframe: Candle timeframe (``1m``, ``5m``, ...).
+    :param last_bar: Latest timestamp already on disk, or ``None`` if the
+        file does not exist.
+    :param now: Request-time UTC clock. Defaults to ``datetime.now(UTC)``.
+    :returns: Positive int ``<= MAX_CANDLE_LIMIT``.
+    """
+    if last_bar is None:
+        return MAX_CANDLE_LIMIT
+    now_ts = pd.Timestamp(now if now is not None else datetime.now(UTC))
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    last_ts = pd.Timestamp(last_bar)
+    if last_ts.tzinfo is None:
+        last_ts = last_ts.tz_localize("UTC")
+    interval = _TIMEFRAME_DELTAS.get(timeframe, pd.Timedelta(minutes=1))
+    elapsed = now_ts - last_ts
+    if elapsed.total_seconds() <= 0:
+        return INCREMENTAL_LIMIT_FLOOR.get(timeframe, 100)
+    elapsed_bars = int(elapsed / interval)
+    overlap_bars = max(1, int(INCREMENTAL_OVERLAP / interval))
+    needed = elapsed_bars + overlap_bars
+    floor = INCREMENTAL_LIMIT_FLOOR.get(timeframe, 100)
+    return min(max(floor, needed), MAX_CANDLE_LIMIT)
 
 
 def _expected_last_bar(
@@ -513,6 +575,8 @@ def collect_and_save_ohlcv(
     *,
     force_refresh: bool = False,
     target_date: str | None = None,
+    repair: bool = False,
+    now: pd.Timestamp | datetime | None = None,
 ) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
 
@@ -521,13 +585,19 @@ def collect_and_save_ohlcv(
     the Freqtrade naming convention.
 
     On first run (file doesn't exist): fetches max history (``limit=10000``).
-    On subsequent runs (file exists): fetches recent candles proportional
-    to the timeframe resolution.
+    On subsequent runs (file exists): fetches enough recent candles to
+    overlap the last stored bar (timeframe floor + 1h, sized from last bar).
+    ``repair=True`` bypasses the coverage gate and requests
+    ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be merged
+    back in (the 2026-09-07 / 2026-09-09 1m seams).
 
     :param api: Initialised GMXAPI client.
     :param markets: Raw market dicts from ``get_markets_info()``.
     :param futures_dir: Directory for CCXT feather files.
     :param timeframes: List of timeframes to collect (default: all from TIMEFRAMES).
+    :param repair: When ``True``, skip the coverage gate and request
+        ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be filled.
+    :param now: Request-time UTC clock. Defaults to ``datetime.now(UTC)``.
     :returns: Tuple of ``(total files saved, failed symbol/timeframe pairs,
         coverage_map)``. ``coverage_map`` is keyed by ``(symbol, tf)`` and
         each value is a dict with ``pre_merge``, ``api_slice``, ``post_merge``
@@ -542,17 +612,7 @@ def collect_and_save_ohlcv(
     saved = 0
     failed = []
     coverage: dict[tuple[str, str], dict] = {}
-
-    # Recent-fetch limits per timeframe (how many candles to fetch on incremental runs)
-    # 1m: ~24h = 1440, 5m: ~2d = 576, 15m: ~3d = 288, 1h: ~5d = 120, 4h: ~10d = 60, 1d: 5
-    incremental_limits = {
-        "1m": 1440,
-        "5m": 576,
-        "15m": 288,
-        "1h": 120,
-        "4h": 60,
-        "1d": 5,
-    }
+    now = now if now is not None else datetime.now(UTC)
 
     for symbol in symbols:
         for tf in tfs:
@@ -562,7 +622,7 @@ def collect_and_save_ohlcv(
             # Coverage gate — skip fetch entirely if on-disk feather already
             # covers today's last expected bar. ``has_ohlcv_through`` is
             # imported at the top of this module alongside ``is_current``.
-            if target_date is not None:
+            if target_date is not None and not repair:
                 expected_last = _expected_last_bar(tf, target_date=target_date)
                 gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
                 if gate.skip:
@@ -583,7 +643,11 @@ def collect_and_save_ohlcv(
             coverage[(symbol, tf)] = entry
 
             try:
-                limit = incremental_limits.get(tf, 100) if filepath.exists() else 10000
+                if filepath.exists() and not repair:
+                    last_bar = pre_stats["max_date"] if pre_stats else None
+                    limit = incremental_candle_limit(tf, last_bar, now)
+                else:
+                    limit = MAX_CANDLE_LIMIT
                 df = _fetch_candles_with_retry(api, symbol, tf, limit)
 
                 api_stats = _date_stats(df["timestamp"])
@@ -1143,6 +1207,15 @@ Examples:
             "workflow."
         ),
     )
+    parser.add_argument(
+        "--repair-ohlcv",
+        action="store_true",
+        help=(
+            "Re-fetch up to MAX_CANDLE_LIMIT candles per timeframe and merge "
+            "them into existing feathers. Fills interior 1m holes the daily "
+            "incremental lookback cannot reach (e.g. 2026-09-07 / 2026-09-09)."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -1225,6 +1298,7 @@ Examples:
         futures_dir,
         force_refresh=args.force_refresh,
         target_date=date_str,
+        repair=args.repair_ohlcv,
     )
     console.print()
 

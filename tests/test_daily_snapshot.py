@@ -410,6 +410,198 @@ class TestOhlcvGateSkip:
         assert failed == []
 
 
+class TestOhlcvIncrementalLookback:
+    """collect_and_save_ohlcv — incremental 1m fetch must overlap last stored bar."""
+
+    def test_late_daily_run_does_not_leave_a_1m_hole(self, tmp_path, monkeypatch):
+        """A later daily run must not drop the minutes between last stored bar and now-1440.
+
+        Incident 2026-09-09: previous 1m last bar sat 1443 minutes behind request-time
+        ``now``. GMX ``get_candlesticks_dataframe(limit=N)`` returns the N most-recent
+        candles. The hardcoded 1m limit of 1440 therefore started at ``now-1440`` and
+        the merge left ``now-1442`` / ``now-1441`` missing. The on-disk series must
+        stay contiguous through those minutes.
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp.now(tz="UTC").floor("min")
+        last_closed = now - pd.Timedelta(minutes=1)
+        last_stored = now - pd.Timedelta(minutes=1443)
+        hole = (
+            now - pd.Timedelta(minutes=1442),
+            now - pd.Timedelta(minutes=1441),
+        )
+        world = pd.date_range(end=last_closed, periods=1500, freq="min", tz="UTC")
+
+        existing_dates = world[world <= last_stored][-5:]
+        assert last_stored in existing_dates
+        assert hole[0] not in existing_dates
+
+        filepath = tmp_path / "ETH_USDC_USDC-1m-futures.feather"
+        feather.write_feather(_make_ohlcv(existing_dates, [1.0] * len(existing_dates)), filepath)
+
+        class RollingWindowAPI:
+            """GMX-shaped API: ``limit`` most-recent candles of ``world``."""
+
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                slice_dates = world[-int(limit) :]
+                return pd.DataFrame(
+                    {
+                        "timestamp": slice_dates,
+                        "open": 1.0,
+                        "high": 1.0,
+                        "low": 1.0,
+                        "close": 1.0,
+                    }
+                )
+
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            RollingWindowAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1m"],
+        )
+
+        assert failed == []
+        assert saved == 1
+        assert coverage[("ETH", "1m")]["status"] in {"OK", "FLAT"}
+
+        merged = pd.read_feather(filepath)
+        dates = set(pd.to_datetime(merged["date"], utc=True).dt.floor("min"))
+        assert hole[0] in dates, f"missing {hole[0]} (the 1440-bar lookback hole)"
+        assert hole[1] in dates, f"missing {hole[1]} (the 1440-bar lookback hole)"
+        assert last_stored in dates
+
+    def test_limit_covers_the_2026_09_09_run_start_drift(self):
+        """Incident numbers: 1443 min late → 1m limit must exceed the 1440 floor."""
+        from scripts.collect_daily_snapshot import incremental_candle_limit
+
+        last = pd.Timestamp("2026-09-08 02:17", tz="UTC")
+        now = pd.Timestamp("2026-09-09 02:20", tz="UTC")
+        limit = incremental_candle_limit("1m", last, now)
+        assert limit >= 1503
+        assert limit <= 10000
+
+    def test_limit_keeps_1m_floor_for_a_short_gap(self):
+        """A few missing minutes still request the 72h 1m floor (not 24h)."""
+        from scripts.collect_daily_snapshot import incremental_candle_limit
+
+        last = pd.Timestamp("2026-09-09 02:10", tz="UTC")
+        now = pd.Timestamp("2026-09-09 02:20", tz="UTC")
+        assert incremental_candle_limit("1m", last, now) == 4320
+
+    def test_limit_is_max_when_no_stored_bar(self):
+        from scripts.collect_daily_snapshot import MAX_CANDLE_LIMIT, incremental_candle_limit
+
+        assert incremental_candle_limit("1m", None) == MAX_CANDLE_LIMIT
+
+    def test_daily_1m_floor_fills_the_2026_09_08_interior_hole(
+        self, tmp_path, monkeypatch
+    ):
+        """The 02:17 hole is ~36h behind a same-day afternoon last bar.
+
+        15m already fetches 72h; 1m fetched 24h and missed it. The daily
+        1m floor must be 72h so the cron heals this class of hole without
+        ``repair=True``.
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-09-09 18:00", tz="UTC")
+        last_closed = now - pd.Timedelta(minutes=1)
+        hole = pd.Timestamp("2026-09-08 02:18", tz="UTC")
+        world = pd.date_range(end=last_closed, periods=5000, freq="min", tz="UTC")
+        assert hole in world
+
+        existing = world[world != hole]
+        filepath = tmp_path / "ETH_USDC_USDC-1m-futures.feather"
+        feather.write_feather(_make_ohlcv(existing, [1.0] * len(existing)), filepath)
+
+        class RollingWindowAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                slice_dates = world[-int(limit) :]
+                return pd.DataFrame(
+                    {
+                        "timestamp": slice_dates,
+                        "open": 1.0,
+                        "high": 1.0,
+                        "low": 1.0,
+                        "close": 1.0,
+                    }
+                )
+
+        saved, failed, _coverage = cds.collect_and_save_ohlcv(
+            RollingWindowAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1m"],
+            now=now,
+        )
+        assert failed == []
+        assert saved == 1
+        dates = set(pd.to_datetime(pd.read_feather(filepath)["date"], utc=True))
+        assert hole in dates
+
+    def test_repair_fills_an_interior_1m_hole_default_lookback_cannot_reach(
+        self, tmp_path, monkeypatch
+    ):
+        """Holes older than the 72h 1m floor still need ``repair=True``."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-09-09 18:00", tz="UTC")
+        last_closed = now - pd.Timedelta(minutes=1)
+        hole = now - pd.Timedelta(days=5)
+        world = pd.date_range(end=last_closed, periods=8000, freq="min", tz="UTC")
+        assert hole in world
+
+        existing = world[world != hole]
+        filepath = tmp_path / "ETH_USDC_USDC-1m-futures.feather"
+        feather.write_feather(_make_ohlcv(existing, [1.0] * len(existing)), filepath)
+
+        class RollingWindowAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                slice_dates = world[-int(limit) :]
+                return pd.DataFrame(
+                    {
+                        "timestamp": slice_dates,
+                        "open": 1.0,
+                        "high": 1.0,
+                        "low": 1.0,
+                        "close": 1.0,
+                    }
+                )
+
+        saved, failed, _coverage = cds.collect_and_save_ohlcv(
+            RollingWindowAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1m"],
+            now=now,
+        )
+        assert failed == []
+        assert saved == 1
+        default_dates = set(pd.to_datetime(pd.read_feather(filepath)["date"], utc=True))
+        assert hole not in default_dates
+
+        saved, failed, _coverage = cds.collect_and_save_ohlcv(
+            RollingWindowAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1m"],
+            repair=True,
+            now=now,
+        )
+        assert failed == []
+        assert saved == 1
+        repaired = set(pd.to_datetime(pd.read_feather(filepath)["date"], utc=True))
+        assert hole in repaired
+
+
 class TestReportSkippedSection:
     def test_section_present_when_skips_recorded(self, tmp_path):
         from gmx_historical_data.coverage_gate import SkipDecision
