@@ -196,6 +196,27 @@ def test_regression_flag_is_set_before_any_best_effort_reporting() -> None:
     assert tail.count("||") >= 5
 
 
+def test_release_notes_include_the_per_asset_coverage_table() -> None:
+    """The release body must carry the same Asset/Timeframe/From/To/Candles
+    table the Apex-Historical-Data sibling repo publishes, not just a file
+    count -- consumers decide whether to pull a release from it."""
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    create_release = next(
+        s["run"]
+        for s in workflow["jobs"]["release"]["steps"]
+        if s.get("name") == "Create GitHub Release"
+    )
+
+    assert "gmx_historical_data.release_notes build" in create_release
+    assert "--futures-dir ./user_data/data/gmx/futures" in create_release
+    assert create_release.index("gmx_historical_data.release_notes build") < create_release.index(
+        "gh release create"
+    )
+    assert 'cat /tmp/gmx-coverage-table.md >> "$NOTES_FILE"' in create_release
+
+
 def test_cadence_gate_exempts_delisted_and_just_relisted_markets() -> None:
     """A relisting seam is a legitimate break (MEGA 1h, 213 bars). The gate
     reads the same roster the futures-integrity step does, plus the roster

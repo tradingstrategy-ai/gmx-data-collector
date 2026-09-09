@@ -557,6 +557,14 @@ jobs:
           Consume with \`scripts/download_gmx_data.sh\` (see repo README).
           NOTES
 
+          # Per-asset OHLCV coverage table (Asset/Timeframe/From/To/Candles),
+          # matching the sibling Apex-Historical-Data release notes.
+          PYTHONPATH=src python -m gmx_historical_data.release_notes build \
+              --futures-dir ./user_data/data/gmx/futures \
+              --out /tmp/gmx-coverage-table.md
+          printf '\n' >> "$NOTES_FILE"
+          cat /tmp/gmx-coverage-table.md >> "$NOTES_FILE"
+
           ASSETS=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
           if [ -f data_report.txt ]; then
             ASSETS+=(data_report.txt)
