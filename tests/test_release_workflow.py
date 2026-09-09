@@ -78,6 +78,49 @@ def test_cadence_regression_ships_and_annotates_rather_than_blocking() -> None:
     )
 
 
+def test_release_workflow_checks_out_the_triggering_ref() -> None:
+    """Hardcoding ``ref: master`` on checkout made ``workflow_dispatch --ref
+    <branch>`` still run the old collector. Scheduled runs on master
+    already have ``github.ref = refs/heads/master``.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    checkout = next(
+        s
+        for s in workflow["jobs"]["release"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/checkout")
+    )
+    assert "ref" not in (checkout.get("with") or {})
+
+
+def test_release_workflow_can_opt_in_to_ohlcv_repair() -> None:
+    """Interior 1m holes (2026-09-08 02:17) survive an incremental run.
+    ``workflow_dispatch`` must be able to pass ``--repair-ohlcv``; the
+    02:00 UTC cron must not, because a 10000-bar re-fetch of every
+    timeframe every night is wasted work once the hole is gone.
+    """
+    text = WORKFLOW.read_text()
+
+    assert "repair_ohlcv:" in text
+    assert "default: 'false'" in text
+    assert "--repair-ohlcv" in text
+    assert "github.event.inputs.repair_ohlcv" in text
+
+    import yaml
+
+    workflow = yaml.safe_load(text)
+    collect = next(
+        s["run"]
+        for s in workflow["jobs"]["release"]["steps"]
+        if s.get("name") == "Collect daily snapshot"
+    )
+    assert "collect_daily_snapshot.py" in collect
+    assert "--repair-ohlcv" in collect
+    # Scheduled runs have empty inputs; the flag is added only when the input is true.
+    assert '[ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]' in collect
+
+
 def test_cadence_regression_files_a_deduped_issue() -> None:
     text = WORKFLOW.read_text()
 
@@ -96,7 +139,21 @@ def test_cadence_issue_dedupe_matches_a_marker_not_a_fuzzy_search() -> None:
 
     assert "in:title cadence regression" not in text
     assert "--json number,body" in text
-    assert "cadence_gate find-issue" in text
+    assert "cadence_issue find-issue" in text
+
+
+def test_cadence_regression_files_one_issue_per_incident() -> None:
+    """A fleet-wide outage is one incident. Cap-of-10 alphabetical slices
+    (#33–#42) buried the actual per-file signal in 10 duplicate bodies."""
+    text = WORKFLOW.read_text()
+    script = _cadence_step()
+
+    assert 'FILED" -ge 10' not in text
+    assert "while IFS= read -r FILE" not in script
+    assert "cadence-regression:${FILE}" not in script
+    assert "cadence_issue format" in script
+    assert "cadence-regression-incident:" in script
+    assert script.count("gh issue create") == 1
 
 
 def test_cadence_gate_logic_is_importable_not_inlined() -> None:
@@ -128,16 +185,15 @@ def test_regression_flag_is_set_before_any_best_effort_reporting() -> None:
 
     for call in (
         "cadence_gate annotate",
-        "FILES=$(",
-        "DETAILS=$(",
-        "cadence_gate find-issue",
+        "cadence_issue format",
+        "cadence_issue find-issue",
         "gh issue comment",
         "gh issue create",
     ):
         assert flag < script.index(call), f"{call} runs before the flag is set"
 
     tail = script[flag:]
-    assert tail.count("||") >= 6
+    assert tail.count("||") >= 5
 
 
 def test_cadence_gate_exempts_delisted_and_just_relisted_markets() -> None:

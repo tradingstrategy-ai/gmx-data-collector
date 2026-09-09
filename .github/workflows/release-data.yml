@@ -13,6 +13,10 @@ on:
         description: 'Allow starting without a previous data release. Only use for the first seed release.'
         required: false
         default: 'false'
+      repair_ohlcv:
+        description: 'Re-fetch MAX_CANDLE_LIMIT candles and merge to fill interior 1m holes (2026-09-08 02:17). Off on the daily cron.'
+        required: false
+        default: 'false'
 
 permissions:
   contents: write
@@ -34,10 +38,12 @@ jobs:
       issues: write
 
     steps:
-      - name: Checkout code from master
+      # Do not pin checkout to the default branch: scheduled runs already
+      # fire there, and ``workflow_dispatch --ref <branch>`` must collect
+      # with that branch's collector or a dispatch still ships the hole
+      # this job exists to catch.
+      - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: master
 
       - name: Free disk space
         run: |
@@ -224,7 +230,12 @@ jobs:
           JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
         run: |
-          PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data
+          REPAIR_FLAG=""
+          if [ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]; then
+            REPAIR_FLAG="--repair-ohlcv"
+            echo "repair_ohlcv=true: filling interior holes with MAX_CANDLE_LIMIT"
+          fi
+          PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data $REPAIR_FLAG
 
       - name: Validate candle history integrity
         run: |
@@ -413,53 +424,43 @@ jobs:
           REPO=${{ github.repository }}
           RUN_URL="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
           DATE=$(date -u +%Y-%m-%d)
-          FILES=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join(sorted({i['file'] for i in json.load(open(sys.argv[1]))})))" /tmp/gmx-cadence-regressions.json || echo "")
-          DETAILS=$(PYTHONPATH=src python -c "import json,sys;print('\n'.join('- '+i['detail'] for i in json.load(open(sys.argv[1]))[:50]))" /tmp/gmx-cadence-regressions.json || echo "(details unavailable)")
+
+          # One ticket per incident (the whole regressions list), not one
+          # per file. A fleet-wide outage used to open 10 alphabetical
+          # duplicates (#33–#42) whose bodies all listed the same 50 markets.
+          PYTHONPATH=src python -m gmx_historical_data.cadence_issue format \
+              --regressions /tmp/gmx-cadence-regressions.json \
+              --previous-tag "${PREVIOUS_TAG:-unknown}" \
+              --run-url "$RUN_URL" \
+              --date "$DATE" \
+              --out /tmp/gmx-cadence-incident.json \
+            || echo "WARNING: could not format the cadence incident issue." >&2
+
+          TITLE=$(PYTHONPATH=src python -c "import json,sys;print(json.load(open(sys.argv[1]))['title'])" /tmp/gmx-cadence-incident.json || echo "cadence regression — ${DATE}")
+          BODY=$(PYTHONPATH=src python -c "import json,sys;print(json.load(open(sys.argv[1]))['body'])" /tmp/gmx-cadence-incident.json || echo "(incident body unavailable) <!-- cadence-regression-incident:${DATE} -->")
 
           # Fetch the open ticket list ONCE, with bodies, and match on the
-          # exact hidden marker below. `gh issue list --search` tokenises, and
+          # exact hidden marker. `gh issue list --search` tokenises, and
           # every candle filename shares `usdc`/`futures`/`feather` and a
           # timeframe token with every other one, so relevance ranking can
           # hand back a different symbol's ticket and we would comment on it.
           gh issue list --repo "$REPO" --state open --limit 200 --json number,body \
               > /tmp/gmx-open-issues.json 2>/dev/null || echo '[]' > /tmp/gmx-open-issues.json
 
-          # A fleet-wide upstream outage regresses ~107 symbols at once; cap
-          # issue churn so one bad night cannot open a hundred tickets.
-          FILED=0
-          while IFS= read -r FILE; do
-            if [ -z "$FILE" ]; then
-              continue
-            fi
-            if [ "$FILED" -ge 10 ]; then
-              echo "Issue cap reached; remaining regressions are in the job log and the manifest."
-              break
-            fi
-            BODY="A new cadence break appeared in \`${FILE}\` that the previous release (\`${PREVIOUS_TAG:-unknown}\`) recorded as contiguous.
-
-          Run: ${RUN_URL}
-
-          ${DETAILS}
-
-          The release still shipped: this file's data is unchanged from before the regression, and its \`_cadence_manifest.json\` entry is annotated with \`\"regressed_from\": \"${PREVIOUS_TAG:-unknown}\"\` so a consumer can quarantine just this file.
-
-          <!-- cadence-regression:${FILE} -->"
-            EXISTING=$(PYTHONPATH=src python -m gmx_historical_data.cadence_gate find-issue \
-                --issues /tmp/gmx-open-issues.json --file "$FILE" || echo "")
-            if [ -n "$EXISTING" ]; then
-              gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" \
-                || echo "WARNING: could not comment on issue #${EXISTING}" >&2
-              echo "Commented on existing issue #${EXISTING} for ${FILE}."
-            else
-              gh issue create --repo "$REPO" \
-                  --title "cadence regression: ${FILE} — ${DATE}" \
-                  --assignee Aviksaikat \
-                  --label bug \
-                  --body "$BODY" \
-                || echo "WARNING: could not file an issue for ${FILE}" >&2
-            fi
-            FILED=$((FILED + 1))
-          done <<< "$FILES"
+          EXISTING=$(PYTHONPATH=src python -m gmx_historical_data.cadence_issue find-issue \
+              --issues /tmp/gmx-open-issues.json --date "$DATE" || echo "")
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" \
+              || echo "WARNING: could not comment on issue #${EXISTING}" >&2
+            echo "Commented on existing incident issue #${EXISTING}."
+          else
+            gh issue create --repo "$REPO" \
+                --title "$TITLE" \
+                --assignee Aviksaikat \
+                --label bug \
+                --body "$BODY" \
+              || echo "WARNING: could not file the cadence incident issue" >&2
+          fi
 
           echo "Cadence regression recorded; the release will publish and the job will end red."
 
