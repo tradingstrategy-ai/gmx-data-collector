@@ -497,9 +497,7 @@ class TestOhlcvIncrementalLookback:
 
         assert incremental_candle_limit("1m", None) == MAX_CANDLE_LIMIT
 
-    def test_daily_1m_floor_fills_the_2026_09_08_interior_hole(
-        self, tmp_path, monkeypatch
-    ):
+    def test_daily_1m_floor_fills_the_2026_09_08_interior_hole(self, tmp_path, monkeypatch):
         """The 02:17 hole is ~36h behind a same-day afternoon last bar.
 
         15m already fetches 72h; 1m fetched 24h and missed it. The daily

@@ -87,7 +87,9 @@ def test_release_workflow_checks_out_the_triggering_ref() -> None:
 
     workflow = yaml.safe_load(WORKFLOW.read_text())
     checkout = next(
-        s for s in workflow["jobs"]["release"]["steps"] if str(s.get("uses", "")).startswith("actions/checkout")
+        s
+        for s in workflow["jobs"]["release"]["steps"]
+        if str(s.get("uses", "")).startswith("actions/checkout")
     )
     assert "ref" not in (checkout.get("with") or {})
 
@@ -109,7 +111,9 @@ def test_release_workflow_can_opt_in_to_ohlcv_repair() -> None:
 
     workflow = yaml.safe_load(text)
     collect = next(
-        s["run"] for s in workflow["jobs"]["release"]["steps"] if s.get("name") == "Collect daily snapshot"
+        s["run"]
+        for s in workflow["jobs"]["release"]["steps"]
+        if s.get("name") == "Collect daily snapshot"
     )
     assert "collect_daily_snapshot.py" in collect
     assert "--repair-ohlcv" in collect
