@@ -48,7 +48,6 @@ from gmx_historical_data.gmx_api_integration import (
 )
 from gmx_historical_data.gmx_event_collector import GMXEventCollector
 from gmx_historical_data.gmx_token_discovery import GMXTokenDiscovery
-from gmx_historical_data.hypersync_collector import HyperSyncCollector
 from gmx_historical_data.market_registry import fetch_markets, get_disabled_market_symbols
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
@@ -138,14 +137,9 @@ class DataCollector:
             self.web3 = Web3(Web3.HTTPProvider(config.rpc_url))
             self.rpc_collector = ChainlinkRPCCollector(self.web3)
 
-        # Only initialize HyperSync if needed (for non-Chainlink symbols or oracle events)
-        if use_hypersync:
-            self.hypersync = HyperSyncCollector(
-                config.hypersync_endpoint,
-                config.hypersync_api_token,
-            )
-        else:
-            self.hypersync = None
+        # Non-Chainlink symbols and oracle-event fallbacks need HyperSync;
+        # callers that only exercise Chainlink data can turn it off.
+        self.hypersync_enabled = use_hypersync
         self.storage = ParquetStorage(config.output_dir)
         orphaned_tmp = self.storage.sweep_orphaned_tmp_files()
         if orphaned_tmp:
@@ -597,7 +591,7 @@ class DataCollector:
                     chainlink_feed_address = None  # Disable Chainlink backfill
 
                     # Try oracle event fallback for this symbol (requires HyperSync)
-                    if self.hypersync is None:
+                    if not self.hypersync_enabled:
                         console.print(
                             "[yellow]  Oracle events unavailable (HyperSync not initialized)[/yellow]"
                         )
@@ -624,7 +618,7 @@ class DataCollector:
                 console.print("\n[green]✓[/green] Chainlink backfill not needed - data is complete")
         else:
             # No Chainlink feed - use oracle events for historical data (requires HyperSync)
-            if self.hypersync is None:
+            if not self.hypersync_enabled:
                 console.print(
                     "\n[yellow]⚠ No Chainlink feed found and HyperSync not initialized[/yellow]"
                 )
@@ -834,7 +828,7 @@ class DataCollector:
         if use_events:
             disabled_upper = {s.upper() for s in disabled_symbols} if disabled_symbols else set()
             # Event-based collection mode requires HyperSync
-            if self.hypersync is None:
+            if not self.hypersync_enabled:
                 console.print(
                     "[red]✗ HyperSync not initialized - cannot use event-based collection[/red]"
                 )
@@ -1118,7 +1112,7 @@ class DataCollector:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
 
         # Check HyperSync availability (required for oracle events)
-        if self.hypersync is None:
+        if not self.hypersync_enabled:
             console.print(
                 "[red]✗ HyperSync not initialized - cannot collect non-Chainlink markets[/red]"
             )

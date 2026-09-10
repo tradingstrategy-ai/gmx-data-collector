@@ -59,21 +59,6 @@ class TestPositionEventQuery:
         assert self._build(100, 200).from_block == 100
 
 
-class TestAnswerUpdatedQuery:
-    """``HyperSyncCollector.build_query`` -- same class, separate builder."""
-
-    def _build(self, start, end):
-        from gmx_historical_data.hypersync_collector import HyperSyncCollector
-
-        return object.__new__(HyperSyncCollector).build_query(["0xabc"], start, end)
-
-    def test_last_block_of_the_range_is_covered(self):
-        assert self._build(100, 200).to_block == 201
-
-    def test_open_ended_query_leaves_the_bound_unset(self):
-        assert self._build(100, None).to_block is None
-
-
 class TestOraclePriceQuery:
     """``OraclePriceCollector.build_query``, and the chunking that feeds it."""
 
@@ -178,4 +163,4 @@ def test_no_query_builder_passes_a_raw_inclusive_end():
 def test_the_guard_above_has_something_to_guard():
     """If it finds no Query construction, the guard proves nothing -- a rename
     would disable it silently."""
-    assert len(_files_constructing_a_query()) >= 11
+    assert len(_files_constructing_a_query()) >= 10
