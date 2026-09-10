@@ -116,53 +116,80 @@ class GMXEventCollector:
     ) -> list[GMXPositionEvent]:
         """Collect position events from HyperSync.
 
+        HyperSync caps a response by payload size, not by the range
+        requested: a single ``get()`` can silently return only a fraction of
+        a large range, with ``next_block`` marking where to resume. This
+        pages until the range is covered -- or, when ``end_block`` is
+        ``None`` ("to the tip"), until the server stops making forward
+        progress.
+
         :param start_block: Starting block number
         :param end_block: Ending block number (None = latest)
         :return: List of parsed position events
         """
-        query = self.build_query(start_block, end_block)
+        if end_block is not None and start_block > end_block:
+            return []
 
-        # Execute query
-        response = await self.client.get(query)
+        logs = []
+        blocks = []
+        cursor = start_block
+
+        while end_block is None or cursor <= end_block:
+            response = await self.client.get(self.build_query(cursor, end_block))
+            logs.extend(response.data.logs or [])
+            blocks.extend(response.data.blocks or [])
+
+            next_block = getattr(response, "next_block", None)
+            if not next_block or next_block <= cursor:
+                # No forward progress: either the range is done or the
+                # server cannot advance. Either way, looping again would
+                # never finish.
+                break
+            cursor = next_block
 
         # Build block timestamp mapping
         # HyperSync may return timestamps as hex strings, convert to int
         block_timestamps = {}
-        if response.data.blocks:
-            for block in response.data.blocks:
-                timestamp = block.timestamp
-                # Convert hex string to int if needed
-                if isinstance(timestamp, str) and timestamp.startswith("0x"):
-                    timestamp = int(timestamp, 16)
-                elif isinstance(timestamp, str):
-                    timestamp = int(timestamp)
-                block_timestamps[block.number] = timestamp
+        for block in blocks:
+            timestamp = block.timestamp
+            # Convert hex string to int if needed
+            if isinstance(timestamp, str) and timestamp.startswith("0x"):
+                timestamp = int(timestamp, 16)
+            elif isinstance(timestamp, str):
+                timestamp = int(timestamp)
+            block_timestamps[block.number] = timestamp
 
         # Parse events
         events = []
-        if response.data.logs:
-            for log in response.data.logs:
-                try:
-                    # Convert HyperSync log to dict format
-                    log_dict = {
-                        "block_number": log.block_number,
-                        "block_hash": log.block_hash or "",
-                        "transaction_hash": log.transaction_hash or "",
-                        "transaction_index": log.transaction_index
-                        if log.transaction_index is not None
-                        else 0,
-                        "log_index": log.log_index if log.log_index is not None else 0,
-                        "address": log.address or "",
-                        "topics": [t for t in (log.topics or []) if t is not None],
-                        "data": log.data or "0x",
-                    }
+        for log in logs:
+            try:
+                # Convert HyperSync log to dict format
+                log_dict = {
+                    "block_number": log.block_number,
+                    "block_hash": log.block_hash or "",
+                    "transaction_hash": log.transaction_hash or "",
+                    "transaction_index": log.transaction_index
+                    if log.transaction_index is not None
+                    else 0,
+                    "log_index": log.log_index if log.log_index is not None else 0,
+                    "address": log.address or "",
+                    "topics": [t for t in (log.topics or []) if t is not None],
+                    "data": log.data or "0x",
+                }
 
-                    event = parse_position_event(self.web3, log_dict, block_timestamps)
-                    events.append(event)
+                event = parse_position_event(self.web3, log_dict, block_timestamps)
+                events.append(event)
 
-                except Exception as e:
-                    # Skip events that fail to parse
-                    logging.warning("Failed to parse event: %s", e)
-                    continue
+            except Exception as e:
+                # Skip events that fail to parse
+                logging.warning("Failed to parse event: %s", e)
+                continue
 
+        logging.info(
+            "Collected %d position events from %d logs in blocks %d-%s",
+            len(events),
+            len(logs),
+            start_block,
+            end_block if end_block is not None else "tip",
+        )
         return events
