@@ -360,7 +360,7 @@ async def collect_ticks_with_retry(
     tokens: dict[str, TokenMeta],
     max_retries: int = 3,
     base_delay: float = 2.0,
-) -> list[TradeTick]:
+) -> tuple[list[TradeTick], int]:
     """Collect ticks, rotating the API key on rate limits before backing off.
 
     HyperSync answers a hammered key with ``429``. The repo's convention --
@@ -376,7 +376,8 @@ async def collect_ticks_with_retry(
     :param tokens: Token address -> :class:`TokenMeta`.
     :param max_retries: Retries after rotation is exhausted.
     :param base_delay: Seconds for the first backoff, doubled each retry.
-    :returns: Decoded ticks, unsorted.
+    :returns: Tuple of (decoded ticks, highest block confirmed fully
+        scanned) -- see :func:`collect_ticks`.
     :raises Exception: The last error, once the retry budget is spent.
     """
     attempt = 0
@@ -412,7 +413,7 @@ async def collect_ticks(
     web3: Any,
     markets: dict[str, TokenMeta],
     tokens: dict[str, TokenMeta],
-) -> list[TradeTick]:
+) -> tuple[list[TradeTick], int]:
     """Fetch and decode every trade fill in a block range.
 
     HyperSync caps a response by payload size, not by the range requested: a
@@ -421,16 +422,32 @@ async def collect_ticks(
     fraction of the range, so this pages until the range is covered or the
     server stops making progress.
 
+    Decoding resolves the EventEmitter contract via a one-time
+    ``web3.eth.chain_id`` RPC call (cached after success). If that RPC is
+    unreachable, every log would otherwise fail to decode and get swallowed
+    by :func:`decode_ticks`'s per-log guard, making an infrastructure outage
+    indistinguishable from "no fills in this range" -- and the caller would
+    then checkpoint past blocks that were never actually decoded. This
+    probes that RPC once, loudly, before scanning.
+
     :param client: HyperSync client (or rotator's active client).
     :param start_block: First block, inclusive.
     :param end_block: Last block, inclusive.
     :param web3: ``Web3`` instance used for ABI decoding.
     :param markets: Market token address -> index :class:`TokenMeta`.
     :param tokens: Token address -> :class:`TokenMeta`.
-    :returns: Decoded ticks, unsorted.
+    :returns: Tuple of (decoded ticks, highest block confirmed fully
+        scanned). The second value is less than ``end_block`` when the
+        server stopped making forward progress before the requested end was
+        reached -- callers must checkpoint against it, not ``end_block``, or
+        a stalled scan is silently treated as a completed one.
+    :raises Exception: If ``web3`` cannot reach the RPC endpoint.
     """
     if start_block > end_block:
-        return []
+        return [], start_block - 1
+
+    if web3 is not None:
+        web3.eth.chain_id
 
     ticks: list[TradeTick] = []
     total_logs = 0
@@ -449,11 +466,20 @@ async def collect_ticks(
             break
         cursor = next_block
 
+    reached_block = cursor - 1
+    if reached_block < end_block:
+        logger.warning(
+            "Tick scan stalled at block %d, short of requested end %d (%d blocks unscanned)",
+            reached_block,
+            end_block,
+            end_block - reached_block,
+        )
+
     logger.info(
         "Decoded %d ticks from %d logs in blocks %d-%d",
         len(ticks),
         total_logs,
         start_block,
-        end_block,
+        reached_block,
     )
-    return ticks
+    return ticks, reached_block

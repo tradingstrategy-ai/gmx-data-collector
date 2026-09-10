@@ -110,7 +110,7 @@ async def _scan(
         task = progress.add_task(f"Scanning {len(chunks)} chunks", total=len(chunks))
         for chunk_start, chunk_end in chunks:
             try:
-                ticks = await collect_ticks_with_retry(
+                ticks, reached_block = await collect_ticks_with_retry(
                     pool, chunk_start, chunk_end, web3, markets, tokens
                 )
             except Exception as e:  # noqa: BLE001 - keep the progress already made
@@ -122,12 +122,21 @@ async def _scan(
 
             total += len(ticks)
             touched |= write_tick_tapes(ticks, ticks_dir)
-            # Advance only after the tape is durably written, so an
-            # interrupted run re-scans the chunk rather than skipping it.
-            write_tick_checkpoint(checkpoint_path, chunk_end)
+            # Advance only to what was actually confirmed scanned, and only
+            # after the tape is durably written -- a chunk that stalls
+            # short of chunk_end (lagging archive, or an --to-block past
+            # the real tip) must not be checkpointed as fully covered, or
+            # the unscanned tail is silently skipped forever.
+            write_tick_checkpoint(checkpoint_path, reached_block)
             progress.update(
-                task, description=f"Scanning {chunk_end:,} ({total:,} ticks)", advance=1
+                task, description=f"Scanning {reached_block:,} ({total:,} ticks)", advance=1
             )
+            if reached_block < chunk_end:
+                console.print(
+                    f"  [yellow]Chunk {chunk_start}-{chunk_end} stalled at "
+                    f"{reached_block:,}; stopping so the checkpoint stays honest[/yellow]"
+                )
+                break
 
     return total, touched
 
@@ -139,7 +148,18 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--output-dir", type=Path, default=Path("./user_data"))
-    parser.add_argument("--network", choices=["arbitrum", "avalanche"], default="arbitrum")
+    parser.add_argument(
+        "--network",
+        choices=["arbitrum"],
+        default="arbitrum",
+        help=(
+            "GMX chain. Only arbitrum is supported -- trade_tick_collector "
+            "hardcodes the Arbitrum EventEmitter address and this script's RPC "
+            "env vars are Arbitrum-only, so another chain would silently scan "
+            "against the wrong contract and produce an empty, checkpointed "
+            "'success'."
+        ),
+    )
     parser.add_argument(
         "--from-block",
         type=int,
@@ -202,7 +222,12 @@ def main() -> None:
         os.environ.get("HYPERSYNC_API_TOKEN"), f"https://{args.network}.hypersync.xyz"
     ).client
     tip = asyncio.run(client.get_height())
-    end = args.to_block if args.to_block is not None else tip
+    if args.to_block is not None and args.to_block > tip:
+        console.print(
+            f"  [yellow]--to-block {args.to_block:,} is past the current tip "
+            f"{tip:,}; clamping[/yellow]"
+        )
+    end = min(args.to_block, tip) if args.to_block is not None else tip
     if args.max_blocks is not None:
         end = min(end, start + args.max_blocks - 1)
 

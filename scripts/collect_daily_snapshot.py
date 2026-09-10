@@ -52,12 +52,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.feather as feather
 import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
+from gmx_historical_data.atomic_parquet import atomic_write_ipc_pandas, atomic_write_parquet_pandas
 from gmx_historical_data.candle_volume import (
     CANDLE_VOLUME_KINDS,
     apply_volume_from_tapes,
@@ -165,7 +164,7 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
-    feather.write_feather(combined, filepath, compression="zstd", compression_level=3)
+    atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
 
 
 def incremental_candle_limit(
@@ -513,8 +512,12 @@ def _collect_ticks_sync(
         start, end = resolve_scan_range(tip, last_scanned, max_blocks)
         if start > end:
             return [], last_scanned or tip
-        ticks = await collect_ticks_with_retry(pool, start, end, web3, market_map, tokens)
-        return ticks, end
+        # reached_block, not end: a stalled scan must not checkpoint past
+        # blocks it never actually covered (see collect_ticks docstring).
+        ticks, reached_block = await collect_ticks_with_retry(
+            pool, start, end, web3, market_map, tokens
+        )
+        return ticks, reached_block
 
     return asyncio.run(run())
 
@@ -534,11 +537,17 @@ def collect_and_save_ticks(
 ) -> dict:
     """Collect on-chain trade fills, store the tape, and fill candle volume.
 
-    This is the only phase that needs HyperSync and an RPC endpoint. Every
-    failure path here is soft: without a key, or on any collection error,
-    the run reports zero ticks and leaves the checkpoint untouched so the
-    missed range is picked up next time. The rest of the snapshot is worth
-    publishing without volume.
+    This is the only phase that needs HyperSync and an RPC endpoint. Missing
+    config, an unsupported chain, and a collection error (HyperSync down, or
+    RPC unreachable -- see :func:`~gmx_historical_data.trade_tick_collector.
+    collect_ticks`) are all soft: the run reports zero ticks and leaves the
+    checkpoint untouched so the missed range is picked up next time. Once
+    ticks are in hand, though, failures are NOT soft -- an exception from
+    writing the tape or re-aggregating volume propagates, since silently
+    discarding fills that were already fetched (rather than never having
+    scanned for them) would be a worse outcome than failing the run.
+
+    The rest of the snapshot is worth publishing without volume.
 
     Fills are filed into the per-UTC-day tick tape and the candle volume is
     then recomputed for each day this run touched, from that day's whole tape
@@ -562,6 +571,17 @@ def collect_and_save_ticks(
         ``reason`` keys.
     """
     result = {"ticks": 0, "files_updated": 0, "skipped": True, "reason": ""}
+
+    if chain != "arbitrum":
+        # trade_tick_collector hardcodes the Arbitrum EventEmitter address
+        # and this phase's RPC env vars are Arbitrum-only; scanning another
+        # chain with that config would silently return an empty, successful
+        # scan and advance the checkpoint past blocks never actually
+        # queried. Reject explicitly rather than plumb unverified
+        # per-chain config for a path only Arbitrum ever exercises today.
+        result["reason"] = f"trade-tick volume only supports arbitrum, got chain={chain!r}"
+        console.print(f"  [yellow]Skipped — {result['reason']}[/yellow]")
+        return result
 
     if not os.environ.get("HYPERSYNC_API_TOKEN"):
         result["reason"] = "HYPERSYNC_API_TOKEN not set"

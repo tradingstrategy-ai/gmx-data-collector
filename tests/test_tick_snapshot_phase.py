@@ -79,6 +79,33 @@ class TestFailSoft:
         assert result["ticks"] == 0
         assert result["skipped"] is True
 
+    def test_non_arbitrum_chain_skips_rather_than_scanning_wrong_contract(
+        self, tmp_path, monkeypatch
+    ):
+        """trade_tick_collector hardcodes the Arbitrum EventEmitter address
+        and this phase's RPC env vars are Arbitrum-only. Scanning another
+        chain with that config would silently return an empty, successful
+        scan and advance the checkpoint past blocks queried against the
+        wrong contract entirely -- reject it up front instead."""
+        from scripts.collect_daily_snapshot import collect_and_save_ticks
+
+        monkeypatch.setenv("HYPERSYNC_API_TOKEN", "test-token")
+        monkeypatch.setenv("ARBITRUM_RPC_URL", "https://example.invalid")
+
+        result = collect_and_save_ticks(
+            markets=[],
+            date_str="2026-09-10",
+            ticks_dir=tmp_path / "ticks",
+            tick_volume_dir=tmp_path / "tick_volume",
+            futures_dir=tmp_path / "futures",
+            checkpoint_path=tmp_path / "cp.json",
+            chain="avalanche",
+        )
+
+        assert result["ticks"] == 0
+        assert result["skipped"] is True
+        assert "avalanche" in result["reason"]
+
     def test_collection_failure_is_swallowed(self, tmp_path, monkeypatch):
         """A HyperSync 5xx mid-run must not abort the whole snapshot."""
         import scripts.collect_daily_snapshot as mod

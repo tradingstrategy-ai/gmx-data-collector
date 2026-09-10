@@ -5,6 +5,8 @@ resolves to the wrong decimals does not fail loudly -- it publishes volume
 off by a power of ten -- so unresolvable entries must be dropped here.
 """
 
+import pytest
+
 from gmx_historical_data.gmx_trade_ticks import TokenMeta
 from gmx_historical_data.trade_tick_collector import (
     build_market_map,
@@ -251,36 +253,124 @@ class TestCollectTicksPaging:
             ]
         )
 
-        asyncio.run(self._run(client, 100, 200))
+        _, reached_block = asyncio.run(self._run(client, 100, 200))
 
         assert client.requested == [(100, 201), (150, 201), (200, 201)]
+        assert reached_block == 200
 
     def test_stops_when_the_cursor_stops_advancing(self):
-        """A next_block that does not move would loop forever."""
+        """A next_block that does not move would loop forever.
+
+        The caller must checkpoint against what was actually reached, not
+        the requested end -- a stall short of it is a real, unfinished scan,
+        not a completed one.
+        """
         import asyncio
 
         client = _PagingClient([_FakeResponse([_FakeLog(100)], next_block=100)])
 
-        asyncio.run(self._run(client, 100, 200))
+        _, reached_block = asyncio.run(self._run(client, 100, 200))
 
         assert len(client.requested) == 1
+        assert reached_block == 99
 
     def test_stops_when_next_block_is_absent(self):
         import asyncio
 
         client = _PagingClient([_FakeResponse([_FakeLog(100)], next_block=None)])
 
-        asyncio.run(self._run(client, 100, 200))
+        _, reached_block = asyncio.run(self._run(client, 100, 200))
 
         assert len(client.requested) == 1
+        assert reached_block == 99
 
     def test_empty_range_makes_no_request(self):
         import asyncio
 
         client = _PagingClient([])
 
-        assert asyncio.run(self._run(client, 200, 100)) == []
+        assert asyncio.run(self._run(client, 200, 100)) == ([], 199)
         assert client.requested == []
+
+    def test_reached_block_equals_end_when_the_full_range_is_covered(self):
+        import asyncio
+
+        client = _PagingClient([_FakeResponse([_FakeLog(100)], next_block=101)])
+
+        _, reached_block = asyncio.run(self._run(client, 100, 100))
+
+        assert reached_block == 100
+
+
+class _FakeWeb3Eth:
+    """Stands in for ``Web3().eth`` -- just enough for the one property
+    ``collect_ticks`` touches before it starts scanning."""
+
+    def __init__(self, chain_id_error: Exception | None = None):
+        self._chain_id_error = chain_id_error
+
+    @property
+    def chain_id(self) -> int:
+        if self._chain_id_error is not None:
+            raise self._chain_id_error
+        return 42161
+
+
+class _FakeWeb3:
+    def __init__(self, chain_id_error: Exception | None = None):
+        self.eth = _FakeWeb3Eth(chain_id_error)
+
+
+class TestCollectTicksRpcHealthCheck:
+    """``decode_gmx_event`` resolves the EventEmitter contract via a
+    one-time ``web3.eth.chain_id`` RPC call; ``decode_ticks``'s per-log
+    ``except Exception`` would otherwise swallow an unreachable RPC exactly
+    like a malformed log, so a daily run would checkpoint an empty result
+    as if it were a genuinely quiet window.
+    """
+
+    def test_raises_before_scanning_when_rpc_is_unreachable(self):
+        import asyncio
+
+        from gmx_historical_data.trade_tick_collector import collect_ticks
+
+        client = _PagingClient([_FakeResponse([_FakeLog(100)], next_block=150)])
+        web3 = _FakeWeb3(chain_id_error=ConnectionError("no route to host"))
+
+        with pytest.raises(ConnectionError):
+            asyncio.run(collect_ticks(client, 100, 200, web3, markets={}, tokens={}))
+
+        # Failed before making a single HyperSync request -- a retry must
+        # not burn a page against a dead RPC.
+        assert client.requested == []
+
+    def test_skips_the_check_when_web3_is_none(self):
+        import asyncio
+
+        from gmx_historical_data.trade_tick_collector import collect_ticks
+
+        client = _PagingClient([_FakeResponse([_FakeLog(100)], next_block=101)])
+
+        ticks, reached_block = asyncio.run(
+            collect_ticks(client, 100, 100, None, markets={}, tokens={})
+        )
+
+        assert reached_block == 100
+
+    def test_does_not_check_rpc_health_for_an_empty_range(self):
+        import asyncio
+
+        from gmx_historical_data.trade_tick_collector import collect_ticks
+
+        client = _PagingClient([])
+        web3 = _FakeWeb3(chain_id_error=ConnectionError("no route to host"))
+
+        # Would raise if the health check ran for an empty range.
+        ticks, reached_block = asyncio.run(
+            collect_ticks(client, 200, 100, web3, markets={}, tokens={})
+        )
+
+        assert ticks == []
 
 
 class _FlakyPool:
