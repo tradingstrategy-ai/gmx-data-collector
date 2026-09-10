@@ -136,6 +136,51 @@ def _classify_export_failure(symbol: str, timeframe: str, exc: Exception) -> Exp
     return ExportFailure(symbol=symbol, timeframe=timeframe, reason=reason, message=str(exc))
 
 
+def _restore_cleared_volume(merged: pl.DataFrame, existing: pl.DataFrame) -> pl.DataFrame:
+    """Put back any non-zero ``volume`` the merge replaced with a zero.
+
+    ``_transform_dataframe`` always emits ``volume=0`` -- GMX's oracle
+    candles carry no volume of their own. Exporting on top of a
+    ``--output-dir`` that already has real collected volume (the daily
+    snapshot and backfill write the exact same ``futures/*.feather`` files
+    this exporter does, per the README) would silently zero it out on every
+    matching date, since ``unique(keep="last")`` prefers the freshly
+    exported row. Mirrors
+    :func:`~gmx_historical_data.candle_volume.restore_cleared_volume`
+    (pandas) for this file's Polars pipeline.
+
+    A no-op for funding-rate exports: their ``volume`` column is always 0
+    by design (:meth:`FreqtradeExporter._transform_funding_rate`), so
+    ``existing`` never has anything non-zero to restore.
+
+    :param merged: Frame after ``concat().unique(keep="last")``.
+    :param existing: Frame as it was on disk before the merge.
+    :returns: ``merged`` with previously-known volume restored where the
+        merge cleared it.
+    """
+    if "volume" not in merged.columns or "volume" not in existing.columns:
+        return merged
+
+    prior = (
+        existing.select(["date", "volume"])
+        .filter(pl.col("volume").fill_null(0) != 0)
+        .unique(subset=["date"], keep="last")
+    )
+    if prior.is_empty():
+        return merged
+
+    return (
+        merged.join(prior, on="date", how="left", suffix="_prior")
+        .with_columns(
+            pl.when(pl.col("volume").fill_null(0) == 0)
+            .then(pl.col("volume_prior").fill_null(0.0))
+            .otherwise(pl.col("volume"))
+            .alias("volume")
+        )
+        .select(merged.columns)
+    )
+
+
 class FreqtradeExporter:
     """Export GMX candle and funding rate data to Freqtrade format.
 
@@ -877,6 +922,7 @@ class FreqtradeExporter:
             .unique(subset=["date"], keep="last", maintain_order=False)
             .sort("date")
         )
+        merged = _restore_cleared_volume(merged, existing)
         validate_ohlcv(
             merged,
             timestamp_column="date",

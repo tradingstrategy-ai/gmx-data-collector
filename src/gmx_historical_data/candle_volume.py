@@ -21,9 +21,8 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.feather as feather
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
+from gmx_historical_data.atomic_parquet import atomic_write_ipc_pandas, atomic_write_parquet_pandas
 from gmx_historical_data.gmx_trade_ticks import (
     PERP_KIND,
     SWAP_KIND,
@@ -121,7 +120,7 @@ def apply_volume_to_candles(
             continue
 
         candles["volume"] = matched.fillna(candles["volume"]).astype(float)
-        feather.write_feather(candles, filepath, compression="zstd", compression_level=3)
+        atomic_write_ipc_pandas(candles, filepath, compression="zstd", compression_level=3)
         updated += 1
 
     return updated
