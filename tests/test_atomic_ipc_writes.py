@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pandas as pd
 import polars as pl
+import pyarrow.feather as feather
 import pytest
 
-from gmx_historical_data.atomic_parquet import atomic_write_ipc
+from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_ipc_pandas
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
 from gmx_historical_data.storage import ParquetStorage
 
@@ -159,3 +160,91 @@ def test_freqtrade_exporter_single_feather_write_is_atomic(
     assert "ETH" not in results
     assert target.exists()
     assert pl.read_ipc(target).equals(before)
+
+
+def _simulate_interrupted_feather_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Monkeypatch ``pyarrow.feather.write_feather`` to fail mid-write.
+
+    Same technique as the Polars IPC crash-mid-write tests above.
+
+    :param monkeypatch: pytest's monkeypatch fixture.
+    """
+
+    def _crash_mid_write(df, path, *args, **kwargs) -> None:
+        Path(path).write_bytes(b"TRUNCATED-NOT-A-REAL-FEATHER-FILE")
+        raise OSError("simulated interruption mid-write")
+
+    monkeypatch.setattr(feather, "write_feather", _crash_mid_write)
+
+
+def test_atomic_write_ipc_pandas_leaves_no_corrupt_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An interrupted candle-volume feather rewrite leaves the previous
+    target intact -- ``candle_volume.apply_volume_to_candles`` writes real
+    production ``futures/*.feather`` files this way."""
+    target = tmp_path / "ETH_USDC_USDC-1h-futures.feather"
+    before_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01T00:00"], utc=True).as_unit("ns"),
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [12.5],
+        }
+    )
+    atomic_write_ipc_pandas(before_df, target)
+    assert target.exists()
+    before = pd.read_feather(target)
+
+    _simulate_interrupted_feather_write(monkeypatch)
+
+    new_df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01T01:00"], utc=True).as_unit("ns"),
+            "open": [2.0],
+            "high": [2.0],
+            "low": [2.0],
+            "close": [2.0],
+            "volume": [8.25],
+        }
+    )
+    with pytest.raises(OSError, match="simulated interruption"):
+        atomic_write_ipc_pandas(new_df, target)
+
+    monkeypatch.undo()
+
+    # The previous target is untouched and still fully readable.
+    assert target.exists()
+    pd.testing.assert_frame_equal(pd.read_feather(target), before)
+
+    # Only a stray .tmp file was left, not a corrupt target.
+    tmp_files = list(target.parent.glob("*.feather.tmp"))
+    assert len(tmp_files) == 1
+
+
+def test_atomic_write_ipc_pandas_leaves_no_target_when_none_existed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An interrupted first-ever feather write leaves no target at all."""
+    target = tmp_path / "ETH_USDC_USDC-1h-futures.feather"
+    _simulate_interrupted_feather_write(monkeypatch)
+
+    df = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-01T00:00"], utc=True).as_unit("ns"),
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [0.0],
+        }
+    )
+    with pytest.raises(OSError, match="simulated interruption"):
+        atomic_write_ipc_pandas(df, target)
+
+    monkeypatch.undo()
+
+    assert not target.exists()
+    assert (target.parent / f"{target.name}.tmp").exists()

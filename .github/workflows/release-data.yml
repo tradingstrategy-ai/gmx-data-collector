@@ -509,14 +509,22 @@ jobs:
             exit 1
           fi
 
+          # tick_volume/ and ticks/ are absent whenever the trade-tick phase
+          # skipped (no HyperSync key, or an outage), and tar fails on a
+          # missing path -- so create them before packaging either bundle.
           mkdir -p user_data/data/gmx/volumes
+          mkdir -p user_data/data/gmx/tick_volume
+          mkdir -p user_data/data/gmx/ticks
 
           tar -czf /tmp/gmx-full.tar.gz user_data/data/gmx/
+          # The light bundle carries per-symbol volume (small aggregates) but
+          # not the raw tick tape, which is per-fill and grows without bound.
           tar -czf /tmp/gmx-light.tar.gz \
               user_data/data/gmx/apy/ \
               user_data/data/gmx/snapshots/ \
               user_data/data/gmx/tickers/ \
-              user_data/data/gmx/volumes/
+              user_data/data/gmx/volumes/ \
+              user_data/data/gmx/tick_volume/
 
           ls -lh /tmp/gmx-*.tar.gz
 

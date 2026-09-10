@@ -229,3 +229,32 @@ def test_cadence_gate_exempts_delisted_and_just_relisted_markets() -> None:
     assert "--delisted-roster /tmp/gmx-delisted-baseline.json" in text
     assert "/tmp/gmx-delisted-baseline.json" in text
     assert text.index("Record delisted markets") < text.index("Validate candle cadence")
+
+
+def test_release_packages_tick_and_volume_directories() -> None:
+    """The trade-tick phase is skippable, so its output directories may not
+    exist -- and `tar` fails on a missing path, which would take the whole
+    release down with it."""
+    text = WORKFLOW.read_text()
+
+    assert "mkdir -p user_data/data/gmx/tick_volume" in text
+    assert "mkdir -p user_data/data/gmx/ticks" in text
+    assert text.index("mkdir -p user_data/data/gmx/ticks") < text.index("tar -czf /tmp/gmx-full")
+    # Per-symbol volume is small and belongs in the light bundle; the raw
+    # per-fill tape does not.
+    assert "user_data/data/gmx/tick_volume/ \\\n" in text or "tick_volume/" in text
+
+
+def test_collect_step_has_the_credentials_the_tick_phase_needs() -> None:
+    """Volume comes from HyperSync plus an RPC. Without both, the phase
+    degrades to no-volume rather than failing -- but then no volume ever
+    ships, which is a silent loss."""
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    collect = next(
+        s for s in workflow["jobs"]["release"]["steps"] if s.get("name") == "Collect daily snapshot"
+    )
+
+    assert "HYPERSYNC_API_TOKEN" in collect["env"]
+    assert "JSON_RPC_ARBITRUM" in collect["env"]

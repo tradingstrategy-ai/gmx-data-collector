@@ -48,6 +48,7 @@ from web3.providers.base import BaseProvider
 from web3.types import RPCEndpoint, RPCResponse
 
 from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
+from gmx_historical_data.hypersync_range import exclusive_end
 
 # Forward reference for type hints
 if False:  # TYPE_CHECKING
@@ -378,7 +379,7 @@ class OraclePriceCollector:
         """Build HyperSync query for oracle price events.
 
         :param start_block: Starting block number
-        :param end_block: Ending block number (None = latest)
+        :param end_block: Last block to cover, inclusive (None = latest)
         :param token_addresses: Optional filter for specific token addresses
         :return: HyperSync query
         """
@@ -426,7 +427,7 @@ class OraclePriceCollector:
 
         return Query(
             from_block=start_block,
-            to_block=end_block,
+            to_block=exclusive_end(end_block),
             logs=[log_selection],
             field_selection=field_selection,
         )
@@ -802,7 +803,10 @@ class OraclePriceCollector:
 
             return events
 
-        # Split into chunks for parallel processing
+        # Split into chunks for parallel processing. Bounds are inclusive, and
+        # the chunks tile the range exactly: chunk i ends at chunk (i+1)'s
+        # first block minus one, so no block is covered twice or skipped --
+        # provided build_query converts the inclusive end, which it does.
         chunk_size = total_blocks // concurrency
         chunks = []
         for i in range(concurrency):

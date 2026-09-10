@@ -660,3 +660,91 @@ def test_export_candles_skips_an_unparseable_timeframe_without_aborting(tmp_path
     assert failed_symbols == ["AAA"]
     assert [f.reason for f in failures] == ["unknown_timeframe"]
     assert failures[0].timeframe == "1w"
+
+
+def _ohlcv_frame(dates: list[str], volumes: list[float]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "date": pl.Series(dates).str.to_datetime(time_unit="ns", time_zone="UTC"),
+            "open": [100.0] * len(dates),
+            "high": [101.0] * len(dates),
+            "low": [99.0] * len(dates),
+            "close": [100.5] * len(dates),
+            "volume": volumes,
+        }
+    )
+
+
+class TestRestoreClearedVolume:
+    """``_transform_dataframe`` always emits ``volume=0`` (GMX's oracle
+    candles carry no volume). Exporting on top of a directory the daily
+    collector already wrote real volume into -- the README documents
+    ``export-freqtrade --output-dir ./user_data``, the same tree the
+    collector fills -- must not silently zero it out.
+    """
+
+    def test_zeroed_incoming_volume_is_restored_from_existing(self):
+        from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
+
+        existing = _ohlcv_frame(["2026-09-10T00:00", "2026-09-10T01:00"], [12.5, 8.25])
+        incoming = _ohlcv_frame(["2026-09-10T00:00", "2026-09-10T01:00"], [0.0, 0.0])
+        merged = incoming  # matches _merge_export_frames: keep="last" already applied
+
+        result = _restore_cleared_volume(merged, existing)
+
+        assert result["volume"].to_list() == [12.5, 8.25]
+
+    def test_real_incoming_volume_still_wins(self):
+        """Restoration only guards against zeros -- a later run with real
+        size must not be frozen at the old value."""
+        from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
+
+        existing = _ohlcv_frame(["2026-09-10T00:00"], [12.5])
+        merged = _ohlcv_frame(["2026-09-10T00:00"], [99.0])
+
+        result = _restore_cleared_volume(merged, existing)
+
+        assert result["volume"].to_list() == [99.0]
+
+    def test_noop_when_existing_volume_was_already_zero(self):
+        """A funding-rate export's ``volume`` column is always 0 by design
+        -- there is nothing real to restore, so this must not inject
+        anything."""
+        from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
+
+        existing = _ohlcv_frame(["2026-09-10T00:00"], [0.0])
+        merged = _ohlcv_frame(["2026-09-10T00:00"], [0.0])
+
+        result = _restore_cleared_volume(merged, existing)
+
+        assert result["volume"].to_list() == [0.0]
+        assert result.columns == merged.columns
+
+    def test_new_dates_with_no_prior_row_are_unaffected(self):
+        from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
+
+        existing = _ohlcv_frame(["2026-09-10T00:00"], [12.5])
+        merged = _ohlcv_frame(["2026-09-10T00:00", "2026-09-10T01:00"], [0.0, 0.0])
+
+        result = _restore_cleared_volume(merged, existing)
+
+        assert result["volume"].to_list() == [12.5, 0.0]
+
+    def test_export_merge_preserves_real_volume_end_to_end(self, tmp_path: Path):
+        """The actual bug: exporting on top of a directory the daily
+        collector already wrote volume into must not zero it out."""
+        data_dir = tmp_path / "data"
+        storage = ParquetStorage(data_dir)
+        storage.save_candles(_gapped_candles("BTC", [0, 1]), "1h", "BTC")
+
+        exporter = FreqtradeExporter(data_dir, tmp_path / "out")
+        exporter.export_candles(symbols=["BTC"], timeframes=["1h"])
+        path = tmp_path / "out" / "gmx" / "futures" / "BTC_USDC_USDC-1h-futures.feather"
+
+        existing = pl.read_ipc(path)
+        with_real_volume = existing.with_columns(pl.lit(42.0).alias("volume"))
+        with_real_volume.write_ipc(path)
+
+        exporter.export_candles(symbols=["BTC"], timeframes=["1h"])
+
+        assert pl.read_ipc(path)["volume"].to_list() == [42.0, 42.0]

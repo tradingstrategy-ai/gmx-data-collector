@@ -382,7 +382,7 @@ All errors include complete context for debugging:
 Traceback (most recent call last):
   File "/path/to/oracle_price_collector.py", line 563
     events = await hypersync_client.get_events(...)
-  File "/path/to/hypersync_collector.py", line 123
+  File "/path/to/hypersync_client_factory.py", line 123
     response = await self.client.query(query)
 hypersync.HyperSyncError: Rate limit exceeded (429)
 

@@ -36,6 +36,7 @@ from typing import Any
 
 import pandas as pd
 import polars as pl
+import pyarrow.feather as feather
 from pyarrow.lib import ArrowInvalid
 
 from gmx_historical_data.ohlcv_validation import ExportValidationError
@@ -191,6 +192,35 @@ def atomic_write_ipc(
     """
     tmp_path = output_path.with_name(output_path.name + ".tmp")
     df.write_ipc(tmp_path, compression=compression)
+    _commit_tmp_file(tmp_path, output_path)
+
+
+def atomic_write_ipc_pandas(
+    df: pd.DataFrame,
+    output_path: Path,
+    *,
+    compression: str = "zstd",
+    compression_level: int = 3,
+) -> None:
+    """Write a pandas DataFrame to Feather/IPC atomically.
+
+    Same contract as :func:`atomic_write_ipc`, for the call sites (candle
+    volume writes) that use pyarrow's ``feather.write_feather`` instead of
+    Polars. These specific feathers are the ``user_data/data/gmx/futures/
+    *.feather`` files Freqtrade reads directly, so a write interrupted
+    mid-flight must not be able to leave one truncated.
+
+    :param df: pandas DataFrame to write.
+    :param output_path: Final destination path for the Feather file.
+    :param compression: IPC compression codec.
+    :param compression_level: Compression level for the chosen codec.
+    :raises OSError: If the temporary file cannot be written, fsynced, or
+        renamed onto the target.
+    """
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    feather.write_feather(
+        df, tmp_path, compression=compression, compression_level=compression_level
+    )
     _commit_tmp_file(tmp_path, output_path)
 
 

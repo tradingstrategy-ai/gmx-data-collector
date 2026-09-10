@@ -80,6 +80,7 @@ from web3 import Web3
 
 from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
+from gmx_historical_data.hypersync_range import exclusive_end
 from gmx_historical_data.market_registry import fetch_markets
 from gmx_historical_data.oracle_price_collector import ArbitrumMockProvider
 
@@ -290,7 +291,7 @@ async def extract_pool_events(
 
     query = Query(
         from_block=from_block,
-        to_block=to_block,
+        to_block=exclusive_end(to_block),
         logs=[
             LogSelection(
                 address=[emitter],

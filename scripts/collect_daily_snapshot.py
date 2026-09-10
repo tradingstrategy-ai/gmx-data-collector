@@ -1,7 +1,9 @@
 """Daily GMX V2 comprehensive data collector.
 
 Fetches a point-in-time snapshot of **all** GMX V2 markets (perpetual +
-swap-only) via the public REST API. No HyperSync, no RPC, no API keys.
+swap-only) via the public REST API. Everything except the trade-tick phase
+runs keyless; that one phase reads on-chain fills through HyperSync and an
+Arbitrum RPC, and degrades to "no volume today" when either is unavailable.
 
 Captures:
 
@@ -13,6 +15,7 @@ Captures:
 - Ticker data (bid/ask prices)
 - APY data (yield across 7 periods: 1d, 7d, 30d, 90d, 180d, 1y, total)
 - 24h trading volume per market (from Subsquid GraphQL)
+- Trade ticks: every on-chain fill, and the candle volume derived from them
 
 Output follows the existing ``user_data/`` layout::
 
@@ -21,7 +24,9 @@ Output follows the existing ``user_data/`` layout::
     ├── snapshots/{date}.parquet                       # All markets snapshot
     ├── tickers/{date}.parquet                         # Bid/ask prices
     ├── apy/{date}.parquet                             # Yield data
-    └── volumes/{date}.parquet                         # 24h volume per market
+    ├── volumes/{date}.parquet                         # 24h volume per market
+    ├── ticks/{date}.parquet                           # Per-fill trade tape
+    └── tick_volume/{date}.parquet                     # Per-symbol volume + USD
 
 A ``data_report.txt`` file is generated in the output root after each run.
 
@@ -38,6 +43,8 @@ Usage::
 """
 
 import argparse
+import asyncio
+import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -45,21 +52,43 @@ from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.feather as feather
 import pyarrow.parquet as pq
 from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
-from gmx_historical_data.atomic_parquet import atomic_write_parquet_pandas
+from gmx_historical_data.atomic_parquet import atomic_write_ipc_pandas, atomic_write_parquet_pandas
+from gmx_historical_data.candle_volume import (
+    CANDLE_VOLUME_KINDS,
+    apply_volume_from_tapes,
+    write_tick_tapes,
+)
+from gmx_historical_data.candle_volume import (
+    read_tick_checkpoint as _read_tick_checkpoint,
+)
+from gmx_historical_data.candle_volume import (
+    restore_cleared_volume as _restore_cleared_volume,
+)
+from gmx_historical_data.candle_volume import (
+    write_tick_checkpoint as _write_tick_checkpoint,
+)
 from gmx_historical_data.coverage_gate import (
     SkipDecision,
     has_ohlcv_through,
     is_current,
 )
+from gmx_historical_data.gmx_trade_ticks import PERP_KIND
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
     seed_from_release,
+)
+from gmx_historical_data.trade_tick_collector import (
+    DEFAULT_MAX_BLOCKS,
+    build_decoder_web3,
+    build_market_map,
+    collect_ticks_with_retry,
+    fetch_token_map,
+    resolve_scan_range,
 )
 
 console = Console()
@@ -104,6 +133,12 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
     replaced with the newer values (``keep='last'``). Output is always
     sorted by date.
 
+    One exception to ``keep='last'``: a zero volume never overwrites a
+    non-zero one. The OHLCV fetch builds its rows with ``volume=0.0``
+    because the oracle candle API carries no size, so without this guard
+    each daily run would wipe the real volume a previous run computed from
+    on-chain fills for every bar in the overlap window.
+
     :param new_df: New rows with columns ``[date, open, high, low, close, volume]``.
     :param filepath: Path to the feather file (created if missing).
     """
@@ -121,6 +156,7 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
         existing["date"] = existing["date"].dt.as_unit("ns")
         combined = pd.concat([existing, new_df], ignore_index=True)
         combined = combined.drop_duplicates(subset=["date"], keep="last")
+        combined = _restore_cleared_volume(combined, existing)
     else:
         combined = new_df
 
@@ -128,7 +164,7 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
-    feather.write_feather(combined, filepath, compression="zstd", compression_level=3)
+    atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
 
 
 def incremental_candle_limit(
@@ -441,6 +477,171 @@ def collect_and_save_volumes(
     console.print(f"  [green]Saved {len(df)} market volumes ({nonzero} active)[/green] → {path}")
     console.print(f"  Total 24h volume: ${total:,.0f}")
     return len(df), volumes
+
+
+def _collect_ticks_sync(
+    markets: list[dict],
+    last_scanned: int | None,
+    max_blocks: int,
+    chain: str,
+) -> tuple[list, int]:
+    """Run the async tick collection to completion.
+
+    :param markets: Raw market dicts from ``get_markets_info()``.
+    :param last_scanned: Checkpoint block, or ``None`` on a first run.
+    :param max_blocks: Ceiling on this run's scan width.
+    :param chain: GMX chain name.
+    :returns: Tuple of (ticks, highest block scanned).
+    """
+    from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
+
+    rpc = (
+        os.environ.get("ARBITRUM_RPC_URL")
+        or os.environ.get("JSON_RPC_ARBITRUM")
+        or os.environ.get("ARBITRUM_CHAIN_JSON_RPC")
+    )
+    web3 = build_decoder_web3(rpc)
+    tokens = fetch_token_map(chain)
+    market_map = build_market_map(markets, tokens)
+
+    endpoint = f"https://{chain}.hypersync.xyz"
+    pool = RotatingHypersyncClient(os.environ.get("HYPERSYNC_API_TOKEN"), endpoint)
+
+    async def run() -> tuple[list, int]:
+        tip = await pool.get_height()
+        start, end = resolve_scan_range(tip, last_scanned, max_blocks)
+        if start > end:
+            return [], last_scanned or tip
+        # reached_block, not end: a stalled scan must not checkpoint past
+        # blocks it never actually covered (see collect_ticks docstring).
+        ticks, reached_block = await collect_ticks_with_retry(
+            pool, start, end, web3, market_map, tokens
+        )
+        return ticks, reached_block
+
+    return asyncio.run(run())
+
+
+def collect_and_save_ticks(
+    markets: list[dict],
+    date_str: str,
+    ticks_dir: Path,
+    tick_volume_dir: Path,
+    futures_dir: Path,
+    checkpoint_path: Path,
+    *,
+    chain: str = "arbitrum",
+    timeframes: list[str] | None = None,
+    max_blocks: int = DEFAULT_MAX_BLOCKS,
+    volume_kinds: tuple[str, ...] = CANDLE_VOLUME_KINDS,
+) -> dict:
+    """Collect on-chain trade fills, store the tape, and fill candle volume.
+
+    This is the only phase that needs HyperSync and an RPC endpoint. Missing
+    config, an unsupported chain, and a collection error (HyperSync down, or
+    RPC unreachable -- see :func:`~gmx_historical_data.trade_tick_collector.
+    collect_ticks`) are all soft: the run reports zero ticks and leaves the
+    checkpoint untouched so the missed range is picked up next time. Once
+    ticks are in hand, though, failures are NOT soft -- an exception from
+    writing the tape or re-aggregating volume propagates, since silently
+    discarding fills that were already fetched (rather than never having
+    scanned for them) would be a worse outcome than failing the run.
+
+    The rest of the snapshot is worth publishing without volume.
+
+    Fills are filed into the per-UTC-day tick tape and the candle volume is
+    then recomputed for each day this run touched, from that day's whole tape
+    rather than from the fills this run happened to see -- see
+    :func:`~gmx_historical_data.candle_volume.apply_volume_from_tapes`.
+
+    :param markets: Raw market dicts from ``get_markets_info()``.
+    :param date_str: ISO date of this run, used only to label the log line:
+        output files are keyed by the UTC date each fill happened, and one run
+        routinely spans two of them.
+    :param ticks_dir: Directory of ``{UTC fill date}.parquet`` tape files.
+    :param tick_volume_dir: Directory for per-symbol volume parquet, which
+        carries the USD notional the 6-column feather cannot hold.
+    :param futures_dir: Directory holding the candle feathers to update.
+    :param checkpoint_path: File tracking the highest block scanned.
+    :param chain: GMX chain name.
+    :param timeframes: Candle timeframes to fill (default: all).
+    :param max_blocks: Ceiling on this run's scan width.
+    :param volume_kinds: Which tick kinds count toward candle ``volume``.
+    :returns: Dict with ``ticks``, ``files_updated``, ``skipped`` and
+        ``reason`` keys.
+    """
+    result = {"ticks": 0, "files_updated": 0, "skipped": True, "reason": ""}
+
+    if chain != "arbitrum":
+        # trade_tick_collector hardcodes the Arbitrum EventEmitter address
+        # and this phase's RPC env vars are Arbitrum-only; scanning another
+        # chain with that config would silently return an empty, successful
+        # scan and advance the checkpoint past blocks never actually
+        # queried. Reject explicitly rather than plumb unverified
+        # per-chain config for a path only Arbitrum ever exercises today.
+        result["reason"] = f"trade-tick volume only supports arbitrum, got chain={chain!r}"
+        console.print(f"  [yellow]Skipped — {result['reason']}[/yellow]")
+        return result
+
+    if not os.environ.get("HYPERSYNC_API_TOKEN"):
+        result["reason"] = "HYPERSYNC_API_TOKEN not set"
+        console.print("  [yellow]Skipped — HYPERSYNC_API_TOKEN not set[/yellow]")
+        return result
+
+    if not (
+        os.environ.get("ARBITRUM_RPC_URL")
+        or os.environ.get("JSON_RPC_ARBITRUM")
+        or os.environ.get("ARBITRUM_CHAIN_JSON_RPC")
+    ):
+        result["reason"] = "no Arbitrum RPC configured"
+        console.print("  [yellow]Skipped — no Arbitrum RPC configured[/yellow]")
+        return result
+
+    last_scanned = _read_tick_checkpoint(checkpoint_path)
+    try:
+        ticks, end_block = _collect_ticks_sync(markets, last_scanned, max_blocks, chain)
+    except Exception as e:  # noqa: BLE001 - volume is optional, the release is not
+        result["reason"] = str(e)
+        console.print(f"  [yellow]Warning: tick collection failed — {e}[/yellow]")
+        return result
+
+    result["skipped"] = False
+    result["ticks"] = len(ticks)
+    if not ticks:
+        _write_tick_checkpoint(checkpoint_path, end_block)
+        console.print("  [yellow]No new fills in the scanned range[/yellow]")
+        return result
+
+    touched = write_tick_tapes(ticks, ticks_dir)
+
+    perp = sum(1 for t in ticks if t.kind == PERP_KIND)
+    console.print(
+        f"  [green]{date_str}: collected {len(ticks)} fills[/green] "
+        f"({perp} perp, {len(ticks) - perp} swap) → {len(touched)} day(s) in {ticks_dir}"
+    )
+
+    # Volume is recomputed for each touched day from that day's *complete*
+    # tape, never from this run's slice of it. The 02:00 UTC cron window
+    # straddles midnight, so a bar is routinely filled by two different runs --
+    # and apply_volume_to_candles replaces a bar rather than adding to it, so
+    # writing a partial sum would leave the last run of the day as the whole
+    # answer, with the other run's fills silently dropped.
+    updated_total = apply_volume_from_tapes(
+        ticks_dir,
+        tick_volume_dir,
+        futures_dir,
+        timeframes or TIMEFRAMES,
+        dates=sorted(touched),
+        volume_kinds=volume_kinds,
+    )
+    console.print(
+        f"  [green]Wrote volume to {updated_total} candle files[/green]; "
+        f"per-flow USD notional → {tick_volume_dir}"
+    )
+
+    result["files_updated"] = updated_total
+    _write_tick_checkpoint(checkpoint_path, end_block)
+    return result
 
 
 def _fetch_all_markets(api: GMXAPI) -> list[dict]:
@@ -1217,6 +1418,17 @@ Examples:
         ),
     )
 
+    parser.add_argument(
+        "--tick-max-blocks",
+        type=int,
+        default=DEFAULT_MAX_BLOCKS,
+        help=(
+            "Ceiling on how many blocks the trade-tick phase scans in one "
+            f"run (default: {DEFAULT_MAX_BLOCKS}, ~1.4 days of Arbitrum). "
+            "Raise it to catch up faster after an outage."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.quickstart:
@@ -1249,6 +1461,9 @@ Examples:
     tickers_dir = args.output_dir / "data" / "gmx" / "tickers"
     apy_dir = args.output_dir / "data" / "gmx" / "apy"
     volumes_dir = args.output_dir / "data" / "gmx" / "volumes"
+    ticks_dir = args.output_dir / "data" / "gmx" / "ticks"
+    tick_volume_dir = args.output_dir / "data" / "gmx" / "tick_volume"
+    tick_checkpoint = args.output_dir / "data" / "gmx" / "checkpoints" / "trade_ticks.json"
     report_path = args.output_dir.parent / "data_report.txt"
 
     console.print(f"\n[bold]GMX Daily Snapshot — {date_str}[/bold]")
@@ -1302,8 +1517,22 @@ Examples:
     )
     console.print()
 
-    # Phase 3: Volume collection runs in a separate workflow (collect-volume.yml)
+    # Phase 3: 24h per-market volume runs in a separate workflow (collect-volume.yml)
     volume_count, volume_data = 0, {}
+
+    # --- Phase 3b: Trade ticks -> real candle volume ---
+    console.print("[bold]Phase 3b: Trade ticks (on-chain fills → candle volume)[/bold]")
+    tick_result = collect_and_save_ticks(
+        markets=all_markets,
+        date_str=date_str,
+        ticks_dir=ticks_dir,
+        tick_volume_dir=tick_volume_dir,
+        futures_dir=futures_dir,
+        checkpoint_path=tick_checkpoint,
+        chain=args.network,
+        max_blocks=args.tick_max_blocks,
+    )
+    console.print()
 
     # --- Phase 4: Tickers (bid/ask prices) ---
     console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
@@ -1369,6 +1598,13 @@ Examples:
     console.print(f"  Candles:   {candle_count} files ({len(TIMEFRAMES)} timeframes)")
     console.print(f"  Tickers:   {ticker_count}")
     console.print(f"  APY:       {apy_count} entries")
+    if tick_result["skipped"]:
+        console.print(f"  Ticks:     skipped ({tick_result['reason']})")
+    else:
+        console.print(
+            f"  Ticks:     {tick_result['ticks']} fills → "
+            f"{tick_result['files_updated']} candle files got volume"
+        )
     console.print("[green]Done.[/green]")
 
 
