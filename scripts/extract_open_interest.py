@@ -101,6 +101,7 @@ from rich.table import Table
 
 from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
+from gmx_historical_data.hypersync_range import exclusive_end
 from gmx_historical_data.market_registry import fetch_markets as _fetch_markets_cached
 
 # Optional imports
@@ -686,7 +687,7 @@ async def extract_oi_events(
 
     query = Query(
         from_block=from_block,
-        to_block=to_block,
+        to_block=exclusive_end(to_block),
         logs=[
             LogSelection(
                 address=[emitter],

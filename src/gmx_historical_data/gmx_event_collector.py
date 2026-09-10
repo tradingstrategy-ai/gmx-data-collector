@@ -20,6 +20,7 @@ from web3 import Web3
 
 from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent, parse_position_event
+from gmx_historical_data.hypersync_range import exclusive_end
 
 # EventLog1 signature hash from GMX EventEmitter contract
 # EventLog1(address,string,string,bytes32,EventData)
@@ -66,7 +67,7 @@ class GMXEventCollector:
         """Build HyperSync query for position events.
 
         :param start_block: Starting block number
-        :param end_block: Ending block number (None = latest)
+        :param end_block: Last block to cover, inclusive (None = latest)
         :return: HyperSync query
         """
         event_hashes = get_position_event_hashes()
@@ -103,7 +104,7 @@ class GMXEventCollector:
 
         return Query(
             from_block=start_block,
-            to_block=end_block,
+            to_block=exclusive_end(end_block),
             logs=[log_selection],
             field_selection=field_selection,
         )

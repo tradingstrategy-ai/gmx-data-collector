@@ -19,6 +19,7 @@ from hypersync import (
 
 from gmx_historical_data.config import ANSWER_UPDATED_TOPIC
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent, EventDecoder
+from gmx_historical_data.hypersync_range import exclusive_end
 
 
 @dataclass
@@ -193,7 +194,7 @@ class HyperSyncCollector:
 
         :param aggregator_addresses: List of aggregator contract addresses to query
         :param start_block: Starting block number
-        :param end_block: Ending block number (None = latest)
+        :param end_block: Last block to cover, inclusive (None = latest)
         :return: HyperSync query object
         """
         # Normalize addresses to lowercase for HyperSync
@@ -228,7 +229,7 @@ class HyperSyncCollector:
         # Build query
         query = Query(
             from_block=start_block,
-            to_block=end_block,
+            to_block=exclusive_end(end_block),
             logs=[log_selection],
             field_selection=field_selection,
         )

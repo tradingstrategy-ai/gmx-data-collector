@@ -1535,7 +1535,7 @@ def cli(
     end_block: int | None = typer.Option(
         None,
         "--end-block",
-        help="Ending block number (default: latest)",
+        help="Last block to include, inclusive (default: latest)",
     ),
     use_gmx_api: bool = typer.Option(
         True,
