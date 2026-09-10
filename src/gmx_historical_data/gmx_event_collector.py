@@ -119,22 +119,40 @@ class GMXEventCollector:
         HyperSync caps a response by payload size, not by the range
         requested: a single ``get()`` can silently return only a fraction of
         a large range, with ``next_block`` marking where to resume. This
-        pages until the range is covered -- or, when ``end_block`` is
-        ``None`` ("to the tip"), until the server stops making forward
-        progress.
+        pages until the range is covered.
+
+        ``end_block=None`` ("to the tip", the CLI's ``--end-block`` default)
+        resolves the current height once, up front, rather than chasing a
+        moving target with no upper bound: at a live head the archive keeps
+        growing while the scan runs, so ``next_block`` can stay ahead of the
+        cursor indefinitely and the "stop when the server stops making
+        progress" exit condition may never fire (confirmed live: 8
+        consecutive pages, cursor never caught up).
 
         :param start_block: Starting block number
         :param end_block: Ending block number (None = latest)
         :return: List of parsed position events
         """
-        if end_block is not None and start_block > end_block:
+        if end_block is None:
+            end_block = await self.client.get_height()
+
+        if start_block > end_block:
             return []
+
+        if self.web3 is not None:
+            # parse_position_event resolves the EventEmitter contract via a
+            # one-time `web3.eth.chain_id` RPC call (cached after success).
+            # If that RPC is unreachable, every log below would silently
+            # fail to parse and get swallowed by the per-log except, making
+            # an infrastructure outage indistinguishable from "no events in
+            # this range". Fail loudly here, once, before scanning.
+            self.web3.eth.chain_id
 
         logs = []
         blocks = []
         cursor = start_block
 
-        while end_block is None or cursor <= end_block:
+        while cursor <= end_block:
             response = await self.client.get(self.build_query(cursor, end_block))
             logs.extend(response.data.logs or [])
             blocks.extend(response.data.blocks or [])
@@ -146,6 +164,15 @@ class GMXEventCollector:
                 # never finish.
                 break
             cursor = next_block
+
+        if cursor <= end_block:
+            logging.warning(
+                "Position event scan stalled at block %d, short of requested end %d "
+                "(%d blocks unscanned)",
+                cursor - 1,
+                end_block,
+                end_block - cursor + 1,
+            )
 
         # Build block timestamp mapping
         # HyperSync may return timestamps as hex strings, convert to int
@@ -186,10 +213,10 @@ class GMXEventCollector:
                 continue
 
         logging.info(
-            "Collected %d position events from %d logs in blocks %d-%s",
+            "Collected %d position events from %d logs in blocks %d-%d",
             len(events),
             len(logs),
             start_block,
-            end_block if end_block is not None else "tip",
+            end_block,
         )
         return events
