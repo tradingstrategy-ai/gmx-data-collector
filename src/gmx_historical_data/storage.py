@@ -40,6 +40,56 @@ def _coverage_stats(df: "pl.DataFrame", ts_col: str) -> dict:
     }
 
 
+def _merge_preferring_dense(existing: "pl.DataFrame", incoming: "pl.DataFrame") -> "pl.DataFrame":
+    """Merge two OHLCV frames on ``timestamp``, preferring the denser row.
+
+    On a timestamp collision, plain ``keep="last"`` dedup (the prior
+    behaviour) always kept whichever frame was listed second in the
+    ``concat`` regardless of quality -- so a flat (``high == low``)
+    placeholder from a coarser source (e.g. Chainlink's classic feed,
+    forward-filled by the resampler) could silently overwrite a genuine,
+    denser candle from GMX's own API, or vice versa, purely based on call
+    order. This is the merge-layer half of the fix for the BTC ``1m``
+    regression where ``candles/arbitrum/BTC/1m.parquet`` was 92% flat even
+    for the recent ~6 months GMX's API demonstrably has dense data for --
+    see :mod:`gmx_historical_data.ohlcv_density` for the full root-cause
+    writeup.
+
+    A row with ``high != low`` (real intrabar movement) always wins over a
+    flat row for the same timestamp. When both rows are equally dense (or
+    equally flat), the *incoming* row wins -- preserving the previous
+    "newer write wins" semantics so existing merge/overwrite behaviour for
+    same-density updates is unchanged.
+
+    :param existing: On-disk OHLCV frame (already timestamp-cast).
+    :param incoming: New OHLCV frame to merge in (already validated/cast).
+    :return: Merged, timestamp-sorted frame with the dense/incoming tiebreak
+        columns dropped.
+    """
+    existing_marked = existing.with_columns(
+        [
+            (pl.col("high") != pl.col("low")).alias("__dense"),
+            pl.lit(0, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    incoming_marked = incoming.with_columns(
+        [
+            (pl.col("high") != pl.col("low")).alias("__dense"),
+            pl.lit(1, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    # Sort so that, within each timestamp, a dense row always sorts after a
+    # flat one, and (among equal density) incoming always sorts after
+    # existing -- so unique(keep="last") below picks dense-over-flat, then
+    # incoming-over-existing on a true tie.
+    combined = pl.concat([existing_marked, incoming_marked]).sort(["timestamp", "__dense", "__seq"])
+    return (
+        combined.unique(subset=["timestamp"], keep="last", maintain_order=True)
+        .drop(["__dense", "__seq"])
+        .sort("timestamp")
+    )
+
+
 def _assert_history_preserved(
     existing_stats: dict,
     incoming_stats: dict,
@@ -360,11 +410,7 @@ class ParquetStorage:
             )
             existing_stats = _coverage_stats(existing, "timestamp")
             incoming_stats = _coverage_stats(incoming, "timestamp")
-            merged = (
-                pl.concat([existing, incoming])
-                .unique(subset=["timestamp"], keep="last", maintain_order=True)
-                .sort("timestamp")
-            )
+            merged = _merge_preferring_dense(existing, incoming)
             validate_ohlcv(
                 merged,
                 timestamp_column="timestamp",

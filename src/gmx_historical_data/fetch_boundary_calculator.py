@@ -171,6 +171,10 @@ class FetchBoundaryCalculator:
         3. If NORMAL_GAP: Fetch only from our_latest + interval to now
         4. If DATA_LOSS_GAP: Fetch from api_earliest (lost data) to now
         5. If NO_EXISTING_DATA: Fall back to full collection
+        6. If STALE_DENSITY: Timestamps are current but the recent window is
+           dominated by flat placeholders a denser source (GMX API) could
+           cover -- refetch that window from api_earliest to now (same shape
+           as DATA_LOSS_GAP, but not a coverage gap: no Chainlink backfill).
 
         For Chainlink backfill:
         - Only fetch if our earliest > gmx_earliest (we need older data)
@@ -239,6 +243,27 @@ class FetchBoundaryCalculator:
                     chainlink_start_timestamp=chainlink_start,  # Bounded feed floor
                     chainlink_end_timestamp=chainlink_end,
                     oracle_needed=False,  # Incremental mode doesn't use oracle events
+                    oracle_start_block=None,
+                    oracle_end_block=None,
+                    mode=FetchMode.INCREMENTAL,
+                )
+
+            elif gap_result.status == GapStatus.STALE_DENSITY:
+                # Not a coverage gap -- no timestamps are missing -- so no
+                # Chainlink backfill is needed. Just re-pull the recent
+                # GMX-API-coverable window so its dense candles can replace
+                # the flat placeholders currently on disk (storage.py's
+                # merge prefers the denser row on timestamp collision).
+                now = datetime.now(UTC)
+
+                return FetchBoundaries(
+                    gmx_api_needed=True,
+                    gmx_api_start=gap_result.fetch_start,  # api_earliest
+                    gmx_api_end=now,
+                    chainlink_needed=False,
+                    chainlink_start_timestamp=None,
+                    chainlink_end_timestamp=None,
+                    oracle_needed=False,
                     oracle_start_block=None,
                     oracle_end_block=None,
                     mode=FetchMode.INCREMENTAL,
