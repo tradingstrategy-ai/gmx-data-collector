@@ -550,7 +550,9 @@ class TestOhlcvGateStaleDensity:
         from scripts import collect_daily_snapshot as cds
 
         symbol = "ZZZ"
-        dates = pd.date_range("2026-05-07", periods=4, freq="D", tz="UTC")  # < MIN_STALE_DENSITY_SAMPLE
+        dates = pd.date_range(
+            "2026-05-07", periods=4, freq="D", tz="UTC"
+        )  # < MIN_STALE_DENSITY_SAMPLE
         df = _make_ohlcv(dates, [1.0] * len(dates))
         filepath = tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather"
         feather.write_feather(df, filepath)
