@@ -13,11 +13,16 @@ arise from two different situations that must not be conflated:
    source ended up on disk anyway — a data-quality regression.
 
 These helpers quantify "how flat" a slice of OHLCV data is. They are used
-both by the merge layer (:mod:`gmx_historical_data.storage`, preferring
-denser rows on timestamp collision) and by collection gap detection
+by the merge layer (:mod:`gmx_historical_data.storage` and
+:mod:`gmx_historical_data.freqtrade_exporter`, preferring denser rows on
+timestamp collision), by collection gap detection
 (:mod:`gmx_historical_data.daemon.gap_detector`, so a store that is
 timestamp-continuous but density-starved for a window a denser source could
-have covered is not mistaken for "up to date" and skipped forever).
+have covered is not mistaken for "up to date" and skipped forever), and by
+the daily snapshot collector (:mod:`scripts.collect_daily_snapshot`, both
+for its own dense-preferring merge into ``gmx/futures/*.feather`` and for
+its pre-fetch coverage gate -- see :func:`is_stale_density_pandas` callers
+there).
 
 Root cause this module exists to guard against: ``candles/arbitrum/BTC/
 1m.parquet`` was found 92% flat (``high == low``) across its *entire*
@@ -137,3 +142,70 @@ def is_stale_density_pandas(
     if df.empty:
         return False
     return flat_fraction_pandas(df) > threshold
+
+
+#: Minimum row count a window must have before :func:`is_stale_density_pandas`
+#: is trusted to declare it stale. Below this, a single (or handful of)
+#: flat row(s) -- routine for a brand-new listing, a quiet market, or a test
+#: fixture -- would otherwise look "100% flat" purely from small-sample
+#: noise. Chosen well below any real incremental lookback window (the
+#: smallest is the daily timeframe's 5-bar floor in
+#: ``scripts/collect_daily_snapshot.py``, so this must stay <= that) while
+#: still being large enough that a genuine stale run cannot hide inside it.
+MIN_STALE_DENSITY_SAMPLE = 5
+
+
+def merge_ohlcv_preferring_dense_pandas(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+    ts_col: str = "date",
+) -> pd.DataFrame:
+    """Pandas equivalent of :func:`merge_ohlcv_preferring_dense`.
+
+    Used by :mod:`scripts.collect_daily_snapshot`, which merges GMX API
+    fetches into ``gmx/futures/*.feather`` in pandas (the Freqtrade export
+    and source candle store merges are polars). Plain
+    ``drop_duplicates(keep="last")`` on a concatenated frame always keeps
+    whichever frame was listed second regardless of quality, so a flat
+    placeholder candle from a GMX API hiccup could silently overwrite an
+    already-dense row in this file purely based on call order -- the same
+    failure shape :func:`merge_ohlcv_preferring_dense` guards against for
+    the other two merge sites, and this file is the one the README
+    documents as "the deepest copy" for non-Chainlink tokens, so a
+    regression here is not recoverable from a denser alternative.
+
+    A row with ``high != low`` (real intrabar movement) always wins over a
+    flat row for the same timestamp. When both rows are equally dense (or
+    equally flat), the *incoming* row wins -- preserving "newer write wins"
+    semantics for genuine same-density updates.
+
+    :param existing: On-disk OHLCV frame (empty-safe).
+    :param incoming: New OHLCV frame to merge in (empty-safe).
+    :param ts_col: Name of the timestamp column to dedup on.
+    :return: Merged, timestamp-sorted frame with the dense/incoming tiebreak
+        columns dropped and the index reset.
+    """
+    if existing.empty:
+        return incoming.copy()
+    if incoming.empty:
+        return existing.copy()
+
+    existing_marked = existing.copy()
+    existing_marked["__dense"] = existing_marked["high"] != existing_marked["low"]
+    existing_marked["__seq"] = 0
+
+    incoming_marked = incoming.copy()
+    incoming_marked["__dense"] = incoming_marked["high"] != incoming_marked["low"]
+    incoming_marked["__seq"] = 1
+
+    combined = pd.concat([existing_marked, incoming_marked], ignore_index=True)
+    # Stable sort so that, within each timestamp, a dense row always sorts
+    # after a flat one, and (among equal density) incoming always sorts
+    # after existing -- so drop_duplicates(keep="last") below picks
+    # dense-over-flat, then incoming-over-existing on a true tie.
+    combined = combined.sort_values([ts_col, "__dense", "__seq"], kind="mergesort")
+    combined = combined.drop_duplicates(subset=[ts_col], keep="last")
+    combined = (
+        combined.drop(columns=["__dense", "__seq"]).sort_values(ts_col).reset_index(drop=True)
+    )
+    return combined
