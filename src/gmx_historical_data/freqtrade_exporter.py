@@ -34,6 +34,7 @@ from gmx_historical_data.atomic_parquet import (
     atomic_write_parquet,
     is_fatal_environment_error,
 )
+from gmx_historical_data.ohlcv_density import merge_ohlcv_preferring_dense
 from gmx_historical_data.ohlcv_validation import (
     CadenceBreak,
     ExportValidationError,
@@ -334,6 +335,7 @@ class FreqtradeExporter:
                         overwrite,
                         unsafe_overwrite,
                         expected_interval=expected_interval,
+                        prefer_dense=True,
                     )
                     manifest_key = Path(futures_name).with_suffix(".feather").name
                     cadence_entries[manifest_key] = self._cadence_manifest_entry(
@@ -366,6 +368,7 @@ class FreqtradeExporter:
                         output_format,
                         overwrite,
                         unsafe_overwrite,
+                        prefer_dense=True,
                     )
                     mark_files += 2 if output_format == "both" else 1
 
@@ -383,6 +386,7 @@ class FreqtradeExporter:
                         output_format,
                         overwrite,
                         unsafe_overwrite,
+                        prefer_dense=True,
                     )
                     index_files += 2 if output_format == "both" else 1
 
@@ -871,8 +875,24 @@ class FreqtradeExporter:
         *,
         file_size: int,
         allow_nonpositive_prices: bool,
+        prefer_dense: bool = False,
     ) -> pl.DataFrame:
-        """Merge validated export frames while preserving history."""
+        """Merge validated export frames while preserving history.
+
+        :param prefer_dense: When ``True``, a timestamp collision resolves
+            to whichever row has ``high != low`` (real intrabar movement)
+            rather than always taking ``incoming``. Set for genuine OHLCV
+            exports (candles, mark/index price) so this merge can't regress
+            an already-dense row -- e.g. one this exporter's own source
+            (``candles/arbitrum/``) recently gained via
+            ``ParquetStorage.save_candles``'s matching dense-preference
+            fix -- back to a flat placeholder purely because ``incoming``
+            was concatenated last. Left ``False`` for funding-rate/other
+            non-price exports, where ``high``/``low`` don't carry that
+            "real intrabar movement" meaning and a density tiebreak would
+            be semantically wrong. See
+            :func:`gmx_historical_data.ohlcv_density.merge_ohlcv_preferring_dense`.
+        """
         if set(incoming.columns) != set(existing.columns):
             extra_in_existing = set(existing.columns) - set(incoming.columns)
             extra_in_incoming = set(incoming.columns) - set(existing.columns)
@@ -917,11 +937,14 @@ class FreqtradeExporter:
 
         existing_stats = _coverage_stats(existing, ts_col="date")
         incoming_stats = _coverage_stats(incoming, ts_col="date")
-        merged = (
-            pl.concat([existing, incoming])
-            .unique(subset=["date"], keep="last", maintain_order=False)
-            .sort("date")
-        )
+        if prefer_dense:
+            merged = merge_ohlcv_preferring_dense(existing, incoming, ts_col="date")
+        else:
+            merged = (
+                pl.concat([existing, incoming])
+                .unique(subset=["date"], keep="last", maintain_order=False)
+                .sort("date")
+            )
         merged = _restore_cleared_volume(merged, existing)
         validate_ohlcv(
             merged,
@@ -951,12 +974,15 @@ class FreqtradeExporter:
         fmt: str,
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
+        prefer_dense: bool = False,
     ) -> pl.DataFrame:
         """Merge incoming export data with any existing destination file.
 
         ``unsafe_overwrite`` bypasses reading the destination entirely so a
         corrupt existing file can be regenerated — validation of the existing
         frame must not run before that escape hatch.
+
+        :param prefer_dense: See :meth:`_merge_export_frames`.
         """
         if unsafe_overwrite or not path.exists():
             return df
@@ -972,6 +998,7 @@ class FreqtradeExporter:
             path,
             file_size=path.stat().st_size,
             allow_nonpositive_prices=allow_nonpositive_prices,
+            prefer_dense=prefer_dense,
         )
 
     def _publish_result(
@@ -1062,6 +1089,7 @@ class FreqtradeExporter:
         unsafe_overwrite: bool,
         allow_nonpositive_prices: bool,
         expected_interval: timedelta | None = None,
+        prefer_dense: bool = False,
     ) -> ExportWriteResult:
         """Publish matching Feather and Parquet files from one canonical frame.
 
@@ -1071,6 +1099,7 @@ class FreqtradeExporter:
         :param expected_interval: When set, the merged frame -- the bytes this
             call actually publishes -- is scanned for interior cadence breaks.
             Findings are returned and logged, never raised (issue #29).
+        :param prefer_dense: See :meth:`_merge_export_frames`.
         :returns: An :class:`ExportWriteResult` describing the merged frame
             this call published.
         """
@@ -1106,6 +1135,7 @@ class FreqtradeExporter:
                     feather_path,
                     file_size=feather_path.stat().st_size if feather_path.exists() else 0,
                     allow_nonpositive_prices=allow_nonpositive_prices,
+                    prefer_dense=prefer_dense,
                 )
 
         result = self._publish_result(df, feather_path, expected_interval)
@@ -1163,6 +1193,7 @@ class FreqtradeExporter:
         unsafe_overwrite: bool = False,
         allow_nonpositive_prices: bool = False,
         expected_interval: timedelta | None = None,
+        prefer_dense: bool = False,
     ) -> ExportWriteResult:
         """Merge-write dataframe into an existing file or create it.
 
@@ -1198,6 +1229,7 @@ class FreqtradeExporter:
             call actually publishes -- is scanned for interior cadence breaks.
             Findings are returned and logged, never raised: see the module's
             ``export_candles`` docstring and issue #29.  ``None`` skips the scan.
+        :param prefer_dense: See :meth:`_merge_export_frames`.
         :returns: An :class:`ExportWriteResult` describing the merged frame
             this call published -- its cadence breaks, row count and extents.
         :raises ValueError: If a merge would shrink existing history and
@@ -1213,6 +1245,7 @@ class FreqtradeExporter:
                 unsafe_overwrite,
                 allow_nonpositive_prices,
                 expected_interval,
+                prefer_dense,
             )
 
         if fmt not in {"feather", "parquet"}:
@@ -1224,6 +1257,7 @@ class FreqtradeExporter:
             fmt=fmt,
             unsafe_overwrite=unsafe_overwrite,
             allow_nonpositive_prices=allow_nonpositive_prices,
+            prefer_dense=prefer_dense,
         )
         result = self._publish_result(merged, path, expected_interval)
         self._write_single_frame(merged, path, fmt)

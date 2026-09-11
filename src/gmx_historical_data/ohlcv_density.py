@@ -67,6 +67,60 @@ def flat_fraction_polars(df: pl.DataFrame) -> float:
     return float((df["high"] == df["low"]).mean())
 
 
+def merge_ohlcv_preferring_dense(
+    existing: pl.DataFrame,
+    incoming: pl.DataFrame,
+    ts_col: str = "timestamp",
+) -> pl.DataFrame:
+    """Merge two OHLCV frames on a timestamp column, preferring the denser row.
+
+    Plain ``keep="last"`` dedup after ``pl.concat([existing, incoming])``
+    always keeps whichever frame was listed second, regardless of quality --
+    so a flat (``high == low``) placeholder from a coarser source could
+    silently overwrite a genuine, denser candle purely based on call order
+    (or vice versa). This is the shared merge used by both the source
+    candle store (:meth:`gmx_historical_data.storage.ParquetStorage.
+    save_candles`) and the Freqtrade export
+    (:meth:`gmx_historical_data.freqtrade_exporter.FreqtradeExporter.
+    _merge_export_frames`), so a store fixed by one path can't be
+    regressed back to flat by the other.
+
+    A row with ``high != low`` (real intrabar movement) always wins over a
+    flat row for the same timestamp. When both rows are equally dense (or
+    equally flat), the *incoming* row wins -- preserving "newer write wins"
+    semantics for genuine same-density updates.
+
+    :param existing: On-disk OHLCV frame.
+    :param incoming: New OHLCV frame to merge in.
+    :param ts_col: Name of the timestamp column to dedup on (``"timestamp"``
+        for the candle store, ``"date"`` for the Freqtrade export).
+    :return: Merged, timestamp-sorted frame with the dense/incoming tiebreak
+        columns dropped.
+    """
+    existing_marked = existing.with_columns(
+        [
+            (pl.col("high") != pl.col("low")).alias("__dense"),
+            pl.lit(0, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    incoming_marked = incoming.with_columns(
+        [
+            (pl.col("high") != pl.col("low")).alias("__dense"),
+            pl.lit(1, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    # Sort so that, within each timestamp, a dense row always sorts after a
+    # flat one, and (among equal density) incoming always sorts after
+    # existing -- so unique(keep="last") below picks dense-over-flat, then
+    # incoming-over-existing on a true tie.
+    combined = pl.concat([existing_marked, incoming_marked]).sort([ts_col, "__dense", "__seq"])
+    return (
+        combined.unique(subset=[ts_col], keep="last", maintain_order=True)
+        .drop(["__dense", "__seq"])
+        .sort(ts_col)
+    )
+
+
 def is_stale_density_pandas(
     df: pd.DataFrame,
     threshold: float = DEFAULT_STALE_DENSITY_THRESHOLD,
