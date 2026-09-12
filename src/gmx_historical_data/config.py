@@ -128,6 +128,15 @@ ANSWER_UPDATED_TOPIC = "0x0559884fd3a460db3073b7fc896cc77986f16e378210ded4318617
 # GMX V2 EventEmitter contract address (Arbitrum)
 EVENT_EMITTER_ADDRESS = "0xC8ee91A54287DB53897056e12D9819156D3822Fb"
 
+# Default ceiling on a single trade-tick run's scan, so catching up after an
+# outage cannot blow the daily job's time budget in one go.
+#
+# This lives here rather than in ``trade_tick_collector`` because the daily
+# snapshot reads it at module scope (a default argument and an argparse
+# default) while importing the collector itself only inside the tick phase --
+# HyperSync is an optional dependency of that script and must stay one.
+DEFAULT_MAX_BLOCKS = 500_000
+
 # GMX V2 Launch Information (Arbitrum)
 GMX_V2_GENESIS_BLOCK = 120_000_000  # Aug 2023 (approximate)
 GMX_V2_GENESIS_TIMESTAMP = 1691366400  # Aug 7, 2023 00:00:00 UTC (approximate)

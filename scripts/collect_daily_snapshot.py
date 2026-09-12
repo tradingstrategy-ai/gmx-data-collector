@@ -71,6 +71,7 @@ from gmx_historical_data.candle_volume import (
 from gmx_historical_data.candle_volume import (
     write_tick_checkpoint as _write_tick_checkpoint,
 )
+from gmx_historical_data.config import DEFAULT_MAX_BLOCKS
 from gmx_historical_data.coverage_gate import (
     SkipDecision,
     has_ohlcv_through,
@@ -82,14 +83,12 @@ from gmx_historical_data.quickstart import (
     print_coverage_summary,
     seed_from_release,
 )
-from gmx_historical_data.trade_tick_collector import (
-    DEFAULT_MAX_BLOCKS,
-    build_decoder_web3,
-    build_market_map,
-    collect_ticks_with_retry,
-    fetch_token_map,
-    resolve_scan_range,
-)
+
+# `trade_tick_collector` is deliberately NOT imported here: it pulls in
+# `hypersync`, which is optional to this script. Every phase but the trade-tick
+# one runs off the keyless REST API, so an absent or broken HyperSync install
+# must cost only volume -- see `_collect_ticks_sync`, which imports it at call
+# time alongside the HyperSync client factory.
 
 console = Console()
 
@@ -493,7 +492,18 @@ def _collect_ticks_sync(
     :param chain: GMX chain name.
     :returns: Tuple of (ticks, highest block scanned).
     """
+    # Imported at call time, not module scope: both modules reach `hypersync`,
+    # which is optional to this script. The caller wraps this in a broad
+    # `except Exception`, so a missing install degrades to "no volume today"
+    # like any other HyperSync failure instead of failing the release.
     from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
+    from gmx_historical_data.trade_tick_collector import (
+        build_decoder_web3,
+        build_market_map,
+        collect_ticks_with_retry,
+        fetch_token_map,
+        resolve_scan_range,
+    )
 
     rpc = (
         os.environ.get("ARBITRUM_RPC_URL")

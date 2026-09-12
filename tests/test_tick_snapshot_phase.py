@@ -6,7 +6,78 @@ HyperSync outage must degrade to "no volume today" rather than failing the
 release -- candles, snapshots, tickers and APY are worth shipping without it.
 """
 
+import importlib
 import json
+import sys
+from types import ModuleType
+
+
+def _import_snapshot_without_hypersync(monkeypatch) -> ModuleType:
+    """Import the snapshot entry point with ``hypersync`` unimportable.
+
+    Reproduces the runner environment that broke the daily release: the
+    package is simply absent, so every ``import hypersync`` raises. A ``None``
+    entry in ``sys.modules`` is CPython's own way of poisoning a name, and it
+    survives the fresh import below.
+
+    :param monkeypatch: pytest's monkeypatch fixture, which restores
+        ``sys.modules`` afterwards.
+    :returns: A freshly executed ``scripts.collect_daily_snapshot`` module.
+    """
+    poisoned = [
+        name
+        for name in list(sys.modules)
+        if name == "hypersync"
+        or name.startswith("hypersync.")
+        or name.startswith("gmx_historical_data.trade_tick_collector")
+        or name.startswith("gmx_historical_data.hypersync")
+        or name == "scripts.collect_daily_snapshot"
+    ]
+    for name in poisoned:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    monkeypatch.setitem(sys.modules, "hypersync", None)
+    return importlib.import_module("scripts.collect_daily_snapshot")
+
+
+class TestHyperSyncIsOptional:
+    """The collector must survive HyperSync being *uninstalled*, not just
+    unreachable. Everything outside the tick phase runs off the keyless REST
+    API and is worth publishing without volume."""
+
+    def test_snapshot_imports_without_hypersync_installed(self, monkeypatch):
+        """The entry point died at import time on 2026-09-11 and 2026-09-12,
+        before a single market was fetched, because a module-level import
+        chain reached ``hypersync``."""
+        module = _import_snapshot_without_hypersync(monkeypatch)
+
+        assert module.DEFAULT_MAX_BLOCKS > 0
+
+    def test_tick_phase_degrades_when_hypersync_is_missing(self, tmp_path, monkeypatch):
+        """With credentials present but the package absent, the phase reports
+        a skip with a reason -- the same soft failure as a HyperSync outage."""
+        module = _import_snapshot_without_hypersync(monkeypatch)
+
+        monkeypatch.setenv("HYPERSYNC_API_TOKEN", "test-token")
+        monkeypatch.setenv("ARBITRUM_RPC_URL", "https://example.invalid")
+
+        checkpoint = tmp_path / "cp.json"
+        module._write_tick_checkpoint(checkpoint, 1000)
+
+        result = module.collect_and_save_ticks(
+            markets=[],
+            date_str="2026-09-12",
+            ticks_dir=tmp_path / "ticks",
+            tick_volume_dir=tmp_path / "tick_volume",
+            futures_dir=tmp_path / "futures",
+            checkpoint_path=checkpoint,
+        )
+
+        assert result["ticks"] == 0
+        assert result["skipped"] is True
+        assert "hypersync" in result["reason"].lower()
+        # An unscanned range must stay unscanned, not be checkpointed past.
+        assert module._read_tick_checkpoint(checkpoint) == 1000
 
 
 class TestTickCheckpoint:
