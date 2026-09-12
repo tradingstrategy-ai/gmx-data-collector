@@ -191,15 +191,11 @@ def merge_ohlcv_preferring_dense_pandas(
         return existing.copy()
 
     existing_marked = existing.copy()
-    existing_marked["__dense"] = (
-        existing_marked["high"] > existing_marked["low"]
-    ).fillna(False)
+    existing_marked["__dense"] = (existing_marked["high"] > existing_marked["low"]).fillna(False)
     existing_marked["__seq"] = 0
 
     incoming_marked = incoming.copy()
-    incoming_marked["__dense"] = (
-        incoming_marked["high"] > incoming_marked["low"]
-    ).fillna(False)
+    incoming_marked["__dense"] = (incoming_marked["high"] > incoming_marked["low"]).fillna(False)
     incoming_marked["__seq"] = 1
 
     combined = pd.concat([existing_marked, incoming_marked], ignore_index=True)
