@@ -210,3 +210,34 @@ class TestWarningTracksAvailabilityNotSelection:
             exporter.export_funding(timeframes=["1h"])
 
         assert "1h_datastore" in caplog.text
+
+
+class TestNothingExportableAtAll:
+    """#47 inverted: if the lake holds only companion products, nothing is
+    exportable and the per-variant scan is meaningless -- but silence is the
+    wrong answer, because every file on disk is then frozen."""
+
+    def test_warns_once_when_no_canonical_source_exists(self, tmp_path, caplog):
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h_datastore")
+        _write_funding_source(data_dir, "BTC", "1h_factor")
+        _touch_export(out_dir / "gmx" / "futures", "BTC_USDC_USDC", "1h_datastore")
+        _touch_export(out_dir / "gmx" / "futures", "ETH_USDC_USDC", "1h_factor")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding()
+
+        assert "no exportable funding source" in caplog.text
+        assert "2 pair(s)" in caplog.text
+
+    def test_silent_when_nothing_exportable_and_nothing_on_disk(self, tmp_path, caplog):
+        data_dir = tmp_path / "data"
+        _write_funding_source(data_dir, "BTC", "1h_factor")
+
+        exporter = FreqtradeExporter(data_dir, tmp_path / "out")
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding()
+
+        assert caplog.text.strip() == ""

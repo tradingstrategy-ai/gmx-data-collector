@@ -597,14 +597,26 @@ class FreqtradeExporter:
         # is. Nothing regenerates those files, so they are frozen at whenever
         # they were last written, and a consumer still reading them has no way
         # to tell that from live data (issue #47).
-        # Skip the check entirely when nothing is exportable: with an empty
-        # `available_variants` every file on disk would look retired, including
-        # the canonical one.
-        orphans = (
-            find_orphaned_funding_variants(gmx_dir, available_variants)
-            if available_variants
-            else {}
-        )
+        # With an empty `available_variants` every file on disk would look
+        # retired, canonical included, so the per-variant scan is meaningless.
+        # Staying silent is not the answer either -- a lake holding only
+        # companion products means nothing is exportable at all, which is #47
+        # inverted. Say that once, plainly, instead of listing variants.
+        if not available_variants:
+            frozen = find_orphaned_funding_variants(gmx_dir, set())
+            if frozen:
+                logger.warning(
+                    "export_funding: no exportable funding source found under %s, yet %d "
+                    "variant(s) are present in %s covering %d pair(s). Nothing refreshes "
+                    "them -- the funding lake has no canonical '1h' parquet.",
+                    self.funding_dir,
+                    len(frozen),
+                    gmx_dir,
+                    sum(frozen.values()),
+                )
+            return results, failed_symbols, failures
+
+        orphans = find_orphaned_funding_variants(gmx_dir, available_variants)
         for variant, pairs in sorted(orphans.items()):
             logger.warning(
                 "export_funding: %r is present for %d pair(s) in %s but is no longer "

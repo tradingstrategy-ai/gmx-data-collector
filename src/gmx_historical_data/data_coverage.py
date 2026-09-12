@@ -78,9 +78,14 @@ class DataTypeSpec:
 
 #: The daily-stamped types every release bundle must carry.
 #:
-#: ``max_age_days`` is 1 for everything the 02:00 UTC cron writes on each run:
-#: a one-day lag is normal (the run straddles midnight and is stamped for the
-#: day it started), two days means a run was skipped or a phase broke.
+#: ``max_age_days`` is 0 for the keyless REST phases. The collector stamps its
+#: output with ``date_str = now()`` taken at start, and the cron fires at 02:00
+#: UTC with a 60-minute timeout, so a scheduled run always writes *today*. A
+#: one-day lag there therefore means today's write never happened -- tolerating
+#: it would only catch the *second* consecutive missed day.
+#:
+#: The tick types keep 1: they are keyed by the UTC date each fill happened, and
+#: the 02:00 window routinely straddles midnight, so a one-day lag is normal.
 DAILY_STAMPED_TYPES: tuple[DataTypeSpec, ...] = (
     DataTypeSpec(
         name="snapshots",
@@ -90,17 +95,17 @@ DAILY_STAMPED_TYPES: tuple[DataTypeSpec, ...] = (
             "those four -- their hourly time-series stores are refreshed by a "
             "separate pipeline that does not run in the release."
         ),
-        max_age_days=1,
+        max_age_days=0,
     ),
     DataTypeSpec(
         name="tickers",
         description="Bid/ask prices per market.",
-        max_age_days=1,
+        max_age_days=0,
     ),
     DataTypeSpec(
         name="apy",
         description="Yield data across all seven periods.",
-        max_age_days=1,
+        max_age_days=0,
     ),
     DataTypeSpec(
         name="volumes",
@@ -252,12 +257,13 @@ def format_coverage_report(entries: list[CoverageEntry]) -> str:
     """
     lines: list[str] = []
     for entry in entries:
+        kind = "required" if entry.required else "degradable"
         if entry.latest is None:
-            lines.append(f"- {entry.name}: {entry.status.value} — no dated file found")
+            lines.append(f"- {entry.name} ({kind}): {entry.status.value} — no dated file found")
         else:
             lines.append(
-                f"- {entry.name}: {entry.status.value} — newest {entry.latest.isoformat()} "
-                f"({entry.age_days}d old)"
+                f"- {entry.name} ({kind}): {entry.status.value} — newest "
+                f"{entry.latest.isoformat()} ({entry.age_days}d old)"
             )
         if entry.future_stamps:
             lines.append(

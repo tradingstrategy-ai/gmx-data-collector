@@ -77,7 +77,11 @@ from gmx_historical_data.coverage_gate import (
     has_ohlcv_through,
     is_current,
 )
-from gmx_historical_data.data_coverage import assess_coverage, format_coverage_report
+from gmx_historical_data.data_coverage import (
+    DAILY_STAMPED_TYPES,
+    assess_coverage,
+    format_coverage_report,
+)
 from gmx_historical_data.gmx_trade_ticks import PERP_KIND
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
@@ -1260,14 +1264,21 @@ def generate_report(
     # funding file is invisible until a downstream backtest fails (#47).
     # ------------------------------------------------------------------
     # ------------------------------------------------------------------
-    # Data-type coverage — asserts the bundle carries every type it is
-    # supposed to, so one quietly falling out is a reported fact rather
-    # than a discovery made weeks later downstream (#47, #48).
+    # Data-type coverage — so a type quietly falling out is a reported fact
+    # rather than a discovery made weeks later downstream (#47, #48).
+    #
+    # `volumes` is deliberately excluded: it is written by a later workflow
+    # step than this report, so grading it here would always describe the
+    # *previous* bundle -- reporting MISSING for a file the tarball ends up
+    # carrying, or FRESH while today's fetch silently returned nothing. The
+    # release's own coverage gate runs after that step and grades it properly.
     # ------------------------------------------------------------------
-    coverage_entries = assess_coverage(futures_dir.parent)
+    report_specs = tuple(s for s in DAILY_STAMPED_TYPES if s.name != "volumes")
+    coverage_entries = assess_coverage(futures_dir.parent, specs=report_specs)
     lines.append("")
     lines.append("## Data Type Coverage")
     lines.append(format_coverage_report(coverage_entries))
+    lines.append("    (volumes is graded by the release's coverage gate, which runs later)")
 
     funding = _funding_export_summary(futures_dir)
     lines.append("")

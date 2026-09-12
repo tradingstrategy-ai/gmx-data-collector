@@ -91,11 +91,43 @@ class TestAssessCoverage:
         assert entries["volumes"].status is CoverageStatus.STALE
         assert entries["volumes"].age_days == 11
 
-    def test_yesterday_is_still_fresh(self, tmp_path):
-        """The cron runs at 02:00 UTC and the tick phase straddles midnight, so
-        a one-day lag is normal operation, not a fault."""
+    def test_yesterday_is_fresh_for_ticks_but_stale_for_rest_phases(self, tmp_path):
+        """The two kinds of type tolerate lag differently, and conflating them
+        is what would let a missed day through.
+
+        Tick outputs are keyed by the UTC date each *fill* happened and the
+        02:00 window straddles midnight, so yesterday is normal. The REST
+        phases are stamped ``date_str = now()`` taken when the run starts, so
+        yesterday means today's write never happened -- and accepting it would
+        only catch the second consecutive missed day.
+        """
         today = datetime(2026, 9, 12, 2, 17, tzinfo=UTC)
         _all_current(tmp_path, "2026-09-11")
+
+        entries = {e.name: e for e in assess_coverage(tmp_path, now=today)}
+
+        assert entries["ticks"].status is CoverageStatus.FRESH
+        assert entries["tick_volume"].status is CoverageStatus.FRESH
+        for name in ("snapshots", "tickers", "apy"):
+            assert entries[name].status is CoverageStatus.STALE, name
+
+    def test_a_single_missed_rest_day_blocks(self, tmp_path):
+        """The whole point of the tighter tolerance: catch the *first* miss."""
+        from gmx_historical_data.data_coverage import blocking_entries
+
+        today = datetime(2026, 9, 12, 2, 17, tzinfo=UTC)
+        _all_current(tmp_path, "2026-09-12")
+        for p in (tmp_path / "snapshots").iterdir():
+            p.unlink()
+        _stamp(tmp_path, "snapshots", "2026-09-11")
+
+        blocking = blocking_entries(assess_coverage(tmp_path, now=today))
+
+        assert [e.name for e in blocking] == ["snapshots"]
+
+    def test_todays_stamp_is_fresh_for_every_type(self, tmp_path):
+        today = datetime(2026, 9, 12, 2, 17, tzinfo=UTC)
+        _all_current(tmp_path, "2026-09-12")
 
         entries = assess_coverage(tmp_path, now=today)
 
@@ -149,7 +181,7 @@ def test_every_spec_describes_why_it_matters(spec):
     """A bare directory name is not enough for whoever reads a failing gate at
     02:00 UTC -- each type has to say what depends on it."""
     assert spec.description
-    assert spec.max_age_days >= 1
+    assert spec.max_age_days >= 0
 
 
 class TestBlockingVsReported:
