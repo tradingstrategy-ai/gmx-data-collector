@@ -71,7 +71,12 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          uv pip install pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1"
+          # Hand-maintained list rather than `pyproject.toml`: the runner needs
+          # the collector's deps, not the notebook/plotting stack. It must still
+          # track every package the entry point imports -- omitting `hypersync`
+          # killed two scheduled releases at import time (2026-09-11/12).
+          # tests/test_workflow_dependencies.py enforces that.
+          uv pip install pandas pyarrow polars rich requests eth-utils "web3-ethereum-defi>=1.1" "hypersync>=0.8.5,<0.9"
 
       - name: Collect daily snapshot
         run: |
