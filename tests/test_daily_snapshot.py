@@ -92,6 +92,77 @@ class TestMergeFeather:
         result = pd.read_feather(filepath)
         assert list(result["close"]) == [100.0, 110.0, 120.0]
 
+    def test_flat_incoming_does_not_overwrite_dense_existing(self, tmp_path):
+        """A flat (high==low) new row must not clobber an already-dense one.
+
+        Root cause this guards against: the exact bug fixed in storage.py /
+        freqtrade_exporter.py (see ``ohlcv_density.py``), but for this
+        collector's own merge into ``gmx/futures/*.feather`` -- the file the
+        README calls "the deepest copy" for non-Chainlink tokens. Before this
+        fix, ``_merge_feather`` deduped with plain ``keep='last'``, so a flat
+        placeholder candle from a GMX API hiccup would silently overwrite a
+        genuinely dense bar purely because it was fetched more recently.
+        """
+        from scripts.collect_daily_snapshot import _merge_feather
+
+        filepath = tmp_path / "TEST_USDC_USDC-1h-futures.feather"
+        existing = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-10 00:00"], utc=True).as_unit("ns"),
+                "open": [100.0],
+                "high": [105.0],  # real intrabar movement
+                "low": [98.0],
+                "close": [102.0],
+                "volume": [0.0],
+            }
+        )
+        feather.write_feather(existing, filepath)
+
+        # Same timestamp, but a flat placeholder (as if the API glitched).
+        new_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-10 00:00"], utc=True).as_unit("ns"),
+                "open": [999.0],
+                "high": [999.0],
+                "low": [999.0],
+                "close": [999.0],
+                "volume": [0.0],
+            }
+        )
+        _merge_feather(new_df, filepath)
+
+        result = pd.read_feather(filepath)
+        assert len(result) == 1
+        # The dense existing row survives; the flat incoming row is dropped.
+        assert result.loc[0, "high"] == 105.0
+        assert result.loc[0, "low"] == 98.0
+        assert result.loc[0, "close"] == 102.0
+
+    def test_dense_incoming_replaces_flat_existing(self, tmp_path):
+        """A genuinely dense new row still replaces a flat existing one."""
+        from scripts.collect_daily_snapshot import _merge_feather
+
+        filepath = tmp_path / "TEST_USDC_USDC-1h-futures.feather"
+        existing = _make_ohlcv(["2026-03-10 00:00"], [100.0])  # flat
+        feather.write_feather(existing, filepath)
+
+        new_df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-10 00:00"], utc=True).as_unit("ns"),
+                "open": [100.0],
+                "high": [110.0],
+                "low": [95.0],
+                "close": [108.0],
+                "volume": [0.0],
+            }
+        )
+        _merge_feather(new_df, filepath)
+
+        result = pd.read_feather(filepath)
+        assert len(result) == 1
+        assert result.loc[0, "high"] == 110.0
+        assert result.loc[0, "low"] == 95.0
+
 
 class TestExtractSymbols:
     """Tests for the _extract_symbols helper."""
@@ -406,6 +477,136 @@ class TestOhlcvGateSkip:
         assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
         assert coverage[(symbol, "1d")]["api_slice"] is None
         # Saved counts fetches, not skips:
+        assert saved == 0
+        assert failed == []
+
+
+class TestOhlcvGateStaleDensity:
+    """collect_and_save_ohlcv — a stale-flat tail must override the timestamp gate.
+
+    Root cause this guards against: ``has_ohlcv_through`` only compares the
+    feather's max ``date`` against the expected last bar -- the same
+    timestamp-only shape of check that let a Chainlink-backed source store
+    latch onto flat placeholders forever (see ``ohlcv_density.py``). This
+    collector fetches straight from GMX's own dense API, so there's no
+    competing coarser source, but a tail that somehow went flat (a past API
+    hiccup, a bug since fixed) must not be permanently invisible to the
+    collector just because a row already exists at the expected timestamp.
+    """
+
+    def test_forces_refetch_when_tail_is_flat(self, tmp_path):
+        """A flat tail >= MIN_STALE_DENSITY_SAMPLE rows forces a re-fetch."""
+        from scripts import collect_daily_snapshot as cds
+
+        symbol = "ZZZ"
+        # 10 daily bars, all flat (high == low): exceeds both
+        # MIN_STALE_DENSITY_SAMPLE and the 1d incremental floor (5), so the
+        # entire tail window checked is 100% flat.
+        dates = pd.date_range("2026-05-01", periods=10, freq="D", tz="UTC")
+        df = _make_ohlcv(dates, [1.0] * len(dates))
+        filepath = tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather"
+        feather.write_feather(df, filepath)
+
+        class SpyAPI:
+            def __init__(self):
+                self.calls = 0
+
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                self.calls += 1
+                return pd.DataFrame(
+                    {
+                        "timestamp": [dates[-1]],
+                        "open": [1.0],
+                        "high": [1.2],
+                        "low": [0.9],
+                        "close": [1.1],
+                    }
+                )
+
+        api = SpyAPI()
+        markets = [{"name": f"{symbol}/USD", "isListed": True}]
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            api,
+            markets,
+            tmp_path,
+            timeframes=["1d"],
+            target_date=dates[-1].strftime("%Y-%m-%d"),
+        )
+
+        assert api.calls > 0, "stale-flat tail must force a re-fetch despite timestamp coverage"
+        assert coverage[(symbol, "1d")]["status"] != "SKIPPED"
+        assert failed == []
+
+        result = pd.read_feather(filepath)
+        last_row = result.iloc[-1]
+        assert last_row["high"] != last_row["low"], "dense row should replace the flat one"
+
+    def test_does_not_trigger_below_min_sample(self, tmp_path):
+        """Too few tail rows to judge -> no override, gate skips as normal.
+
+        A small file (new listing, short history) must not be misread as
+        "stale" from small-sample noise.
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        symbol = "ZZZ"
+        dates = pd.date_range(
+            "2026-05-07", periods=4, freq="D", tz="UTC"
+        )  # < MIN_STALE_DENSITY_SAMPLE
+        df = _make_ohlcv(dates, [1.0] * len(dates))
+        filepath = tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather"
+        feather.write_feather(df, filepath)
+
+        class FailingAPI:
+            def get_candlesticks_dataframe(self, *args, **kwargs):
+                raise AssertionError("API must not be called when gate fires")
+
+        markets = [{"name": f"{symbol}/USD", "isListed": True}]
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            FailingAPI(),
+            markets,
+            tmp_path,
+            timeframes=["1d"],
+            target_date=dates[-1].strftime("%Y-%m-%d"),
+        )
+
+        assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
+        assert saved == 0
+        assert failed == []
+
+    def test_dense_tail_still_skips(self, tmp_path):
+        """A genuinely dense tail must not be misflagged -- gate skips normally."""
+        from scripts import collect_daily_snapshot as cds
+
+        symbol = "ZZZ"
+        dates = pd.date_range("2026-05-01", periods=10, freq="D", tz="UTC")
+        df = pd.DataFrame(
+            {
+                "date": dates.as_unit("ns"),
+                "open": 1.0,
+                "high": [1.0 + 0.01 * i for i in range(10)],  # real intrabar movement
+                "low": 0.9,
+                "close": 1.0,
+                "volume": 0.0,
+            }
+        )
+        filepath = tmp_path / f"{symbol}_USDC_USDC-1d-futures.feather"
+        feather.write_feather(df, filepath)
+
+        class FailingAPI:
+            def get_candlesticks_dataframe(self, *args, **kwargs):
+                raise AssertionError("API must not be called when the tail is dense")
+
+        markets = [{"name": f"{symbol}/USD", "isListed": True}]
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            FailingAPI(),
+            markets,
+            tmp_path,
+            timeframes=["1d"],
+            target_date=dates[-1].strftime("%Y-%m-%d"),
+        )
+
+        assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
         assert saved == 0
         assert failed == []
 

@@ -78,6 +78,11 @@ from gmx_historical_data.coverage_gate import (
     is_current,
 )
 from gmx_historical_data.gmx_trade_ticks import PERP_KIND
+from gmx_historical_data.ohlcv_density import (
+    MIN_STALE_DENSITY_SAMPLE,
+    is_stale_density_pandas,
+    merge_ohlcv_preferring_dense_pandas,
+)
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
@@ -125,14 +130,24 @@ _TIMEFRAME_DELTAS = {
 APY_PERIODS = ["1d", "7d", "30d", "90d", "180d", "1y", "total"]
 
 
-def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
+def _merge_feather(
+    new_df: pd.DataFrame,
+    filepath: Path,
+    *,
+    prefer_dense: bool = True,
+) -> None:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
-    Existing historical data is never deleted. Overlapping timestamps are
-    replaced with the newer values (``keep='last'``). Output is always
-    sorted by date.
+    Existing historical data is never deleted. By default, overlapping
+    timestamps prefer whichever row has real intrabar movement (``high > low``); a
+    flat placeholder never overwrites an already-dense row purely because
+    it was fetched more recently (see
+    :func:`~gmx_historical_data.ohlcv_density.merge_ohlcv_preferring_dense_pandas`).
+    Among equally-dense (or equally-flat) rows for the same timestamp, the
+    new value wins -- preserving ``keep='last'`` semantics for genuine
+    updates. Output is always sorted by date.
 
-    One exception to ``keep='last'``: a zero volume never overwrites a
+    One exception to that tiebreak: a zero volume never overwrites a
     non-zero one. The OHLCV fetch builds its rows with ``volume=0.0``
     because the oracle candle API carries no size, so without this guard
     each daily run would wipe the real volume a previous run computed from
@@ -140,6 +155,9 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
 
     :param new_df: New rows with columns ``[date, open, high, low, close, volume]``.
     :param filepath: Path to the feather file (created if missing).
+    :param prefer_dense: Preserve dense existing rows over flat incoming rows.
+        Explicit repair/force-refresh runs disable this so a corrected API row
+        can replace a previously erroneous candle.
     """
     if new_df.empty:
         return
@@ -153,8 +171,12 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
         if existing["date"].dt.tz is None:
             existing["date"] = existing["date"].dt.tz_localize("UTC")
         existing["date"] = existing["date"].dt.as_unit("ns")
-        combined = pd.concat([existing, new_df], ignore_index=True)
-        combined = combined.drop_duplicates(subset=["date"], keep="last")
+        if prefer_dense:
+            combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
+        else:
+            combined = pd.concat([existing, new_df], ignore_index=True).drop_duplicates(
+                subset=["date"], keep="last"
+            )
         combined = _restore_cleared_volume(combined, existing)
     else:
         combined = new_df
@@ -761,6 +783,48 @@ def _feather_date_stats(filepath: Path) -> dict | None:
     return _date_stats(df["date"])
 
 
+def _tail_is_stale_density(filepath: Path, tf: str) -> bool:
+    """Check whether the recent tail of an OHLCV feather is stale-flat.
+
+    ``has_ohlcv_through`` (the pre-fetch coverage gate below) only compares
+    the feather's max ``date`` against the expected last bar -- exactly the
+    timestamp-only shape of check that let ``candles/arbitrum/BTC/
+    1m.parquet`` latch onto flat Chainlink placeholders for months (see
+    :mod:`gmx_historical_data.ohlcv_density`). This collector fetches
+    directly from GMX's own dense ``/prices/candles`` API -- there is no
+    second, coarser source competing for the same window here -- but if a
+    past run ever wrote a flat run into the tail (an API hiccup, a bug since
+    fixed, ...), the timestamp gate alone would skip re-fetching that
+    symbol/timeframe forever once a row exists at the expected date, same
+    as the original bug. This reads just the tail (``INCREMENTAL_LIMIT_FLOOR``
+    bars -- the window a normal incremental run re-touches anyway) and
+    flags it stale so the gate below forces a re-fetch instead.
+
+    Guarded by :data:`~gmx_historical_data.ohlcv_density.MIN_STALE_DENSITY_SAMPLE`:
+    a brand-new listing or a small test fixture with only a handful of rows
+    must not be misread as "stale" from small-sample noise.
+
+    :param filepath: Path to the feather file.
+    :param tf: Timeframe string (``1m``, ``5m``, ``15m``, ``1h``, ``4h``, ``1d``).
+    :returns: ``True`` if the tail has enough rows to judge and is
+        dominated by flat (``high == low``) placeholders.
+    """
+    if not filepath.exists():
+        return False
+    try:
+        df = pd.read_feather(filepath, columns=["date", "high", "low"])
+    except Exception:
+        return False
+    if df.empty:
+        return False
+
+    lookback = INCREMENTAL_LIMIT_FLOOR.get(tf, 100)
+    tail = df.sort_values("date").tail(lookback)
+    if len(tail) < MIN_STALE_DENSITY_SAMPLE:
+        return False
+    return is_stale_density_pandas(tail)
+
+
 def _row_count(path: Path) -> int:
     """Return parquet row count via metadata; ``0`` if missing/corrupt.
 
@@ -833,9 +897,23 @@ def collect_and_save_ohlcv(
             # Coverage gate — skip fetch entirely if on-disk feather already
             # covers today's last expected bar. ``has_ohlcv_through`` is
             # imported at the top of this module alongside ``is_current``.
+            # Timestamp coverage alone can't tell a genuine bar from a flat
+            # placeholder, so a gate pass is overridden when the recent tail
+            # is stale-flat (see ``_tail_is_stale_density``) — otherwise a
+            # bad tail would latch "current" forever, never re-fetched.
             if target_date is not None and not repair:
                 expected_last = _expected_last_bar(tf, target_date=target_date)
                 gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
+                if gate.skip and _tail_is_stale_density(filepath, tf):
+                    console.print(
+                        f"    [yellow]STALE DENSITY: {symbol}/{tf} — timestamps are "
+                        "current but the recent tail is dominated by flat (high==low) "
+                        "candles. Forcing a re-fetch instead of treating this as "
+                        "up to date.[/yellow]"
+                    )
+                    gate = SkipDecision(
+                        False, "stale_density", gate.existing_rows, gate.expected_min_rows
+                    )
                 if gate.skip:
                     coverage[(symbol, tf)] = {
                         "pre_merge": pre_stats,
@@ -875,7 +953,11 @@ def collect_and_save_ohlcv(
                     }
                 )
 
-                _merge_feather(new_rows, filepath)
+                _merge_feather(
+                    new_rows,
+                    filepath,
+                    prefer_dense=not (repair or force_refresh),
+                )
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
 
