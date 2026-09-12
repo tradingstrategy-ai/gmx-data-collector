@@ -630,9 +630,14 @@ make pool-liquidity MARKET="ETH/USD"      # Single market
 
 ## Analysis Notebooks
 
-Interactive Plotly notebooks for exploring OI, liquidity, and cross-exchange data. Launch with:
+Interactive Plotly notebooks for exploring OI, liquidity, and cross-exchange data.
+
+JupyterLab, Plotly and statsmodels live in an optional `notebooks` dependency
+group, so that the daily collector's runner does not install them. Install the
+group once, then launch:
 
 ```bash
+poetry install --with notebooks
 poetry run jupyter lab notebooks/
 ```
 
@@ -716,3 +721,22 @@ Get free tokens at https://envio.dev
 export JSON_RPC_ARBITRUM=$ARBITRUM_CHAIN_JSON_RPC
 pytest tests/ -v
 ```
+
+### Changing dependencies
+
+The collector workflows do not install from `pyproject.toml` — Poetry is slow
+on a runner and the daily release is on a clock. They install
+`requirements-collector.txt`, a pinned file generated from `poetry.lock`.
+
+After adding, removing or bumping any dependency, regenerate it:
+
+```bash
+poetry lock
+python scripts/export_requirements.py
+```
+
+Commit `pyproject.toml`, `poetry.lock` and `requirements-collector.txt`
+together. `tests/test_workflow_dependencies.py` fails if the generated file is
+stale, or if an entry point imports a package the file does not pin — that
+check exists because a hand-maintained package list once drifted from the code
+and killed two nightly releases at import time.

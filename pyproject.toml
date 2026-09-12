@@ -20,6 +20,16 @@ rich = ">=13.9.4"
 schedule = ">=1.2.0"
 aiohttp = ">=3.9.0"
 polars = "^1.38.1"
+
+# Notebook-only stack. Nothing under `src/`, `scripts/` or `tests/` imports
+# these -- they exist for `notebooks/`. Kept in an optional group so the
+# collector requirements generated from `poetry.lock` stay small: the daily
+# release runner has no use for JupyterLab, and it already has to free disk
+# space before it starts. Install locally with `poetry install --with notebooks`.
+[tool.poetry.group.notebooks]
+optional = true
+
+[tool.poetry.group.notebooks.dependencies]
 plotly = "^6.6.0"
 jupyterlab = "^4.5.5"
 statsmodels = "^0.14.6"

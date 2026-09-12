@@ -1,34 +1,61 @@
-"""The daily cron installs a hand-written package list, not ``pyproject.toml``.
+"""The daily cron installs generated, pinned requirements -- not a hand list.
 
 ``release-data.yml``, ``collect-gmx-data.yml`` and ``collect-volume.yml`` each
-run a repo entry point after a literal ``uv pip install <list>``. That list is
-maintained by hand, so it can drift from what the code actually imports -- and
-it did. The volume feature added a module-level ``import hypersync``, the list
-was never updated, and every scheduled release died at import time for two
-days (runs 34554048666 and 34667231822) while ``test.yml`` stayed green
-because it installs from ``pyproject.toml`` via Poetry.
+run a repo entry point after installing dependencies. That install used to be a
+literal ``uv pip install <list>`` maintained by hand, so it could drift from
+what the code actually imports -- and it did. The volume feature added a
+module-level ``import hypersync``, the list was never updated, and every
+scheduled release died at import time for two days (runs 34554048666 and
+34667231822) while ``test.yml`` stayed green because it installed from
+``pyproject.toml`` via Poetry.
 
-Two invariants keep that from recurring:
+The list is now generated from ``poetry.lock`` by
+``scripts/export_requirements.py``. These tests keep the generated file
+honest:
 
-1. The hand-written list installs what the collector imports.
-2. The daily entry point does not import HyperSync at module scope at all, so
+1. The workflows install from that file rather than naming packages inline.
+2. The committed file matches what the generator produces from the lock.
+3. The file covers every third-party package the entry points import at
+   module scope.
+4. The daily entry point still does not import HyperSync at module scope, so
    a future drift costs the optional volume phase rather than the release.
 """
 
 import ast
+import subprocess
+import sys
 from pathlib import Path
 
 WORKFLOWS = Path(".github/workflows")
 SRC = Path("src")
-ENTRY_POINT = Path("scripts/collect_daily_snapshot.py")
+REQUIREMENTS = Path("requirements-collector.txt")
+GENERATOR = Path("scripts/export_requirements.py")
 FIRST_PARTY = "gmx_historical_data"
 
-#: Workflows that install by hand and then run a collector entry point.
+#: Workflows that install dependencies and then run a collector entry point.
 COLLECTOR_WORKFLOWS = (
     "release-data.yml",
     "collect-gmx-data.yml",
     "collect-volume.yml",
 )
+
+#: Entry points those workflows execute, as (label, path) pairs.
+ENTRY_POINTS = (
+    ("collect_daily_snapshot", Path("scripts/collect_daily_snapshot.py")),
+    ("subsquid_volume", SRC / FIRST_PARTY / "subsquid_volume.py"),
+)
+
+#: Import name -> distribution name, for the packages whose two names differ.
+#: Resolving this at runtime via ``importlib.metadata`` would only work when
+#: the package happens to be installed, which is exactly the condition this
+#: test exists to stop depending on.
+IMPORT_TO_DISTRIBUTION = {
+    "eth_defi": "web3-ethereum-defi",
+    "eth_utils": "eth-utils",
+    "eth_abi": "eth-abi",
+    "yaml": "pyyaml",
+    "dateutil": "python-dateutil",
+}
 
 
 def _install_lines(workflow_name: str) -> list[str]:
@@ -39,6 +66,22 @@ def _install_lines(workflow_name: str) -> list[str]:
     """
     text = (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
     return [line for line in text.splitlines() if "uv pip install" in line]
+
+
+def _pinned_distributions() -> set[str]:
+    """Return the normalised distribution names pinned in the requirements file.
+
+    :returns: Lower-cased names with ``_`` normalised to ``-``, matching the
+        comparison form used against import names.
+    """
+    names = set()
+    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = line.split(";")[0].split("==")[0].strip()
+        names.add(name.lower().replace("_", "-"))
+    return names
 
 
 def _module_file(dotted: str) -> Path | None:
@@ -102,18 +145,66 @@ def _third_party_import_closure(entry: Path) -> set[str]:
     return third_party
 
 
-def test_collector_workflows_install_hypersync() -> None:
-    """HyperSync is a declared ``pyproject.toml`` dependency, but these
-    workflows do not read ``pyproject.toml``. Without it in their literal
-    list, the tick phase can never collect a single fill."""
-    missing = []
+def test_collector_workflows_install_from_generated_requirements() -> None:
+    """The whole point is that no workflow names packages inline again.
+
+    A literal package list is what drifted from the code and killed two
+    releases; the install must come from the generated file instead."""
+    offenders = []
     for name in COLLECTOR_WORKFLOWS:
         lines = _install_lines(name)
         assert lines, f"{name}: no `uv pip install` step to check"
-        if not any("hypersync" in line for line in lines):
-            missing.append(name)
+        if not all(REQUIREMENTS.name in line for line in lines):
+            offenders.append(name)
 
-    assert not missing, f"workflows run the collector without installing hypersync: {missing}"
+    assert not offenders, (
+        f"workflows install a hand-written package list instead of {REQUIREMENTS.name}: {offenders}"
+    )
+
+
+def test_committed_requirements_match_the_lock() -> None:
+    """A stale generated file is a hand-written list with extra steps.
+
+    ``--check`` re-renders from ``poetry.lock`` and compares, so forgetting to
+    regenerate after a dependency change fails a PR instead of a release."""
+    result = subprocess.run(
+        [sys.executable, str(GENERATOR), "--check"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"{REQUIREMENTS.name} is out of sync with poetry.lock.\n{result.stderr}"
+    )
+
+
+def test_requirements_cover_every_module_scope_import() -> None:
+    """The invariant the old hand-written list could not hold.
+
+    Every third-party package an entry point imports at module scope must be
+    pinned, or the entry point cannot start on the runner."""
+    pinned = _pinned_distributions()
+
+    missing: list[str] = []
+    for label, entry in ENTRY_POINTS:
+        for imported in sorted(_third_party_import_closure(entry)):
+            if imported in sys.stdlib_module_names:
+                continue
+            dist = IMPORT_TO_DISTRIBUTION.get(imported, imported)
+            if dist.lower().replace("_", "-") not in pinned:
+                missing.append(f"{label} imports {imported!r} (distribution {dist!r})")
+
+    assert not missing, (
+        f"entry points import packages that {REQUIREMENTS.name} does not pin: {missing}"
+    )
+
+
+def test_hypersync_is_pinned_for_the_optional_volume_phase() -> None:
+    """HyperSync is imported at call time, so the closure check above cannot
+    see it -- but the tick phase can never collect a fill without it."""
+    assert "hypersync" in _pinned_distributions(), (
+        f"{REQUIREMENTS.name} does not pin hypersync, so the trade-tick phase "
+        f"degrades to 'no volume today' on every run"
+    )
 
 
 def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
@@ -123,7 +214,7 @@ def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
     A module-level ``import hypersync`` throws that away: it takes down
     candles, OI, funding, tickers and APY, none of which need HyperSync at
     all. Keep the import inside the phase that uses it."""
-    closure = _third_party_import_closure(ENTRY_POINT)
+    closure = _third_party_import_closure(ENTRY_POINTS[0][1])
 
     assert "hypersync" not in closure, (
         "collect_daily_snapshot imports hypersync at module scope, so a "

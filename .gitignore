@@ -26,7 +26,11 @@ share/python-wheels/
 MANIFEST
 
 # Poetry
-poetry.lock
+# poetry.lock is deliberately tracked: this is an application, not a library,
+# and the daily release installs from requirements-collector.txt, which is
+# generated from the lock. An untracked lock meant nothing was pinned -- CI
+# re-resolved on every run, so a dependency could change under the collector
+# between a green PR and that night's release.
 .poetry/
 
 # PyInstaller
