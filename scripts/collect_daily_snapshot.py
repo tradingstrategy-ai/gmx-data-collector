@@ -77,6 +77,7 @@ from gmx_historical_data.coverage_gate import (
     has_ohlcv_through,
     is_current,
 )
+from gmx_historical_data.data_coverage import assess_coverage, format_coverage_report
 from gmx_historical_data.gmx_trade_ticks import PERP_KIND
 from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
@@ -1248,6 +1249,16 @@ def generate_report(
     # the release, so without a line here a stale, orphaned or missing
     # funding file is invisible until a downstream backtest fails (#47).
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Data-type coverage — asserts the bundle carries every type it is
+    # supposed to, so one quietly falling out is a reported fact rather
+    # than a discovery made weeks later downstream (#47, #48).
+    # ------------------------------------------------------------------
+    coverage_entries = assess_coverage(futures_dir.parent)
+    lines.append("")
+    lines.append("## Data Type Coverage")
+    lines.append(format_coverage_report(coverage_entries))
+
     funding = _funding_export_summary(futures_dir)
     lines.append("")
     lines.append("## Funding Rate Exports")
