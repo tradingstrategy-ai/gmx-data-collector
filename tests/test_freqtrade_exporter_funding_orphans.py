@@ -163,3 +163,50 @@ def test_a_genuine_timeframe_source_is_exportable(tmp_path):
     exporter = FreqtradeExporter(data_dir, tmp_path / "out")
 
     assert exporter.list_funding_timeframes("BTC") == ["1h", "8h"]
+
+
+class TestWarningTracksAvailabilityNotSelection:
+    """The warning must mean "nothing produces this any more", not "this run
+    happened not to select it". A `--timeframe` or `--symbol` filter narrows
+    what a run writes; it does not retire a variant."""
+
+    def test_a_filtered_out_but_available_variant_is_not_warned(self, tmp_path, caplog):
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        _write_funding_source(data_dir, "BTC", "8h")
+        _touch_export(out_dir / "gmx" / "futures", "BTC_USDC_USDC", "8h")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding(timeframes=["1h"])
+
+        assert "8h" not in caplog.text
+
+    def test_a_variant_absent_from_another_symbol_is_not_warned(self, tmp_path, caplog):
+        """`--symbol BTC` must not declare ETH's variants retired."""
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        _write_funding_source(data_dir, "ETH", "1h")
+        _write_funding_source(data_dir, "ETH", "8h")
+        _touch_export(out_dir / "gmx" / "futures", "ETH_USDC_USDC", "8h")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding(symbols=["BTC"])
+
+        assert "8h" not in caplog.text
+
+    def test_a_genuinely_retired_variant_is_still_warned_under_a_filter(self, tmp_path, caplog):
+        """Narrowing the run must not suppress a real orphan."""
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        _touch_export(out_dir / "gmx" / "futures", "BTC_USDC_USDC", "1h_datastore")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding(timeframes=["1h"])
+
+        assert "1h_datastore" in caplog.text

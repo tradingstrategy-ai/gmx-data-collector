@@ -184,3 +184,51 @@ class TestBlockingVsReported:
         blocking = blocking_entries(assess_coverage(tmp_path, now=today))
 
         assert [e.name for e in blocking] == ["snapshots"]
+
+
+class TestFutureStamps:
+    """A date-stamped file from the future must not certify a type as fresh.
+
+    Clock skew on a runner, or a hand-copied file, would otherwise let one
+    bogus stamp mask months of genuinely stale data -- the exact silent
+    staleness this module exists to catch.
+    """
+
+    def test_a_future_stamp_does_not_mask_stale_data(self, tmp_path):
+        today = datetime(2026, 9, 12, tzinfo=UTC)
+        _all_current(tmp_path, "2026-01-01")
+        _stamp(tmp_path, "snapshots", "2099-01-01")
+
+        entries = {e.name: e for e in assess_coverage(tmp_path, now=today)}
+
+        assert entries["snapshots"].status is CoverageStatus.STALE
+        assert entries["snapshots"].latest.isoformat() == "2026-01-01"
+        assert entries["snapshots"].age_days == 254
+
+    def test_only_future_stamps_reads_as_missing(self, tmp_path):
+        today = datetime(2026, 9, 12, tzinfo=UTC)
+        _all_current(tmp_path, "2026-09-12")
+        for p in (tmp_path / "apy").iterdir():
+            p.unlink()
+        _stamp(tmp_path, "apy", "2099-01-01")
+
+        entries = {e.name: e for e in assess_coverage(tmp_path, now=today)}
+
+        assert entries["apy"].status is CoverageStatus.MISSING
+
+    def test_future_stamps_are_counted_so_the_anomaly_is_visible(self, tmp_path):
+        today = datetime(2026, 9, 12, tzinfo=UTC)
+        _all_current(tmp_path, "2026-09-12")
+        _stamp(tmp_path, "tickers", "2099-01-01")
+
+        entries = {e.name: e for e in assess_coverage(tmp_path, now=today)}
+
+        assert entries["tickers"].future_stamps == 1
+        assert entries["tickers"].status is CoverageStatus.FRESH
+
+    def test_a_naive_now_is_treated_as_utc(self, tmp_path):
+        _all_current(tmp_path, "2026-09-12")
+
+        entries = assess_coverage(tmp_path, now=datetime(2026, 9, 12))
+
+        assert all(e.status is CoverageStatus.FRESH for e in entries)

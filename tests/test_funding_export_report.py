@@ -96,3 +96,61 @@ class TestFundingExportSummary:
         assert summary["canonical_pairs"] == 2
         assert summary["canonical_latest"] == pd.Timestamp(last)
         assert summary["unreadable"] == 1
+
+
+class TestTimezoneRobustness:
+    """A legacy export written without a timezone must not take down the
+    report -- `generate_report` runs at the end of an otherwise successful
+    release, so a TypeError here fails a run whose data was already good."""
+
+    def _write_naive(self, futures_dir, pair: str, last: datetime, rows: int = 3):
+        futures_dir.mkdir(parents=True, exist_ok=True)
+        dates = pd.to_datetime([last - timedelta(hours=i) for i in reversed(range(rows))]).as_unit(
+            "ns"
+        )
+        feather.write_feather(
+            pd.DataFrame(
+                {
+                    "date": dates,
+                    "open": [1e-6] * rows,
+                    "high": [0.0] * rows,
+                    "low": [0.0] * rows,
+                    "close": [0.0] * rows,
+                    "volume": [0.0] * rows,
+                }
+            ),
+            futures_dir / f"{pair}-1h-funding_rate.feather",
+        )
+
+    def test_naive_and_aware_exports_mix_without_raising(self, tmp_path):
+        last = datetime(2026, 6, 12, 5, tzinfo=UTC)
+        _write_funding_export(tmp_path, "AAA_USDC_USDC", "1h", last)
+        self._write_naive(tmp_path, "BBB_USDC_USDC", last.replace(tzinfo=None))
+
+        summary = _funding_export_summary(tmp_path)
+
+        assert summary["canonical_pairs"] == 2
+        assert summary["canonical_latest"] is not None
+        # Whatever it picked must be comparable against an aware "now".
+        assert (pd.Timestamp(datetime.now(UTC)) - summary["canonical_latest"]).days >= 0
+
+    def test_naive_timestamps_are_read_as_utc(self, tmp_path):
+        naive_last = datetime(2026, 6, 12, 5)
+        self._write_naive(tmp_path, "BBB_USDC_USDC", naive_last)
+
+        summary = _funding_export_summary(tmp_path)
+
+        assert summary["canonical_latest"] == pd.Timestamp(naive_last, tz="UTC")
+
+    def test_undated_export_is_counted_unreadable_not_raised(self, tmp_path):
+        """A file whose date column cannot become timestamps at all."""
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        feather.write_feather(
+            pd.DataFrame({"date": ["not-a-date"], "open": [1.0]}),
+            tmp_path / "CCC_USDC_USDC-1h-funding_rate.feather",
+        )
+
+        summary = _funding_export_summary(tmp_path)
+
+        assert summary["canonical_latest"] is None
+        assert summary["unreadable"] == 1

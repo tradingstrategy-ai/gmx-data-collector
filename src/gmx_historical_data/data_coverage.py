@@ -146,6 +146,8 @@ class CoverageEntry:
     :param age_days: Days between ``latest`` and "now", or ``None``.
     :param description: Copied from the spec so a report needs only this.
     :param required: Whether this type blocks a release when not fresh.
+    :param future_stamps: Files dated after "now", excluded from ``latest``
+        and surfaced so the anomaly is visible rather than silently dropped.
     """
 
     name: str
@@ -154,21 +156,29 @@ class CoverageEntry:
     age_days: int | None
     description: str
     required: bool
+    future_stamps: int = 0
 
 
-def _latest_stamped_date(directory: Path) -> date | None:
-    """Find the newest ``{YYYY-MM-DD}.parquet`` date in a directory.
+def _latest_stamped_date(directory: Path, today: date) -> tuple[date | None, int]:
+    """Find the newest non-future ``{YYYY-MM-DD}.parquet`` date in a directory.
 
     Filenames that are not plain ISO dates are ignored rather than treated as
     errors -- manifests and other companions legitimately share the folder.
 
+    Stamps *after* ``today`` are excluded from the answer and counted instead.
+    A file dated in the future is not evidence that a type is current: clock
+    skew on a runner or a hand-copied file would otherwise let one bogus stamp
+    certify a type as fresh while months of real staleness sat behind it.
+
     :param directory: Directory to scan.
-    :returns: The newest date found, or ``None`` if there is none.
+    :param today: The date to treat as "now".
+    :returns: ``(newest non-future date or None, count of future stamps)``.
     """
     if not directory.is_dir():
-        return None
+        return None, 0
 
     newest: date | None = None
+    future = 0
     for path in directory.iterdir():
         if path.name.startswith("._") or path.suffix != ".parquet":
             continue
@@ -176,9 +186,12 @@ def _latest_stamped_date(directory: Path) -> date | None:
             stamped = date.fromisoformat(path.stem)
         except ValueError:
             continue
+        if stamped > today:
+            future += 1
+            continue
         if newest is None or stamped > newest:
             newest = stamped
-    return newest
+    return newest, future
 
 
 def assess_coverage(
@@ -194,15 +207,27 @@ def assess_coverage(
         :data:`DAILY_STAMPED_TYPES`.
     :returns: One :class:`CoverageEntry` per spec, in spec order.
     """
-    today = (now or datetime.now(UTC)).date()
+    # A naive `now` is read as UTC: the release runs on UTC runners and every
+    # stamp is a UTC date, so silently applying local time would shift the
+    # boundary by a day.
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    today = reference.astimezone(UTC).date()
 
     entries: list[CoverageEntry] = []
     for spec in specs:
-        latest = _latest_stamped_date(gmx_root / spec.name)
+        latest, future = _latest_stamped_date(gmx_root / spec.name, today)
         if latest is None:
             entries.append(
                 CoverageEntry(
-                    spec.name, CoverageStatus.MISSING, None, None, spec.description, spec.required
+                    spec.name,
+                    CoverageStatus.MISSING,
+                    None,
+                    None,
+                    spec.description,
+                    spec.required,
+                    future,
                 )
             )
             continue
@@ -210,7 +235,7 @@ def assess_coverage(
         age = (today - latest).days
         status = CoverageStatus.FRESH if age <= spec.max_age_days else CoverageStatus.STALE
         entries.append(
-            CoverageEntry(spec.name, status, latest, age, spec.description, spec.required)
+            CoverageEntry(spec.name, status, latest, age, spec.description, spec.required, future)
         )
 
     return entries
@@ -233,6 +258,11 @@ def format_coverage_report(entries: list[CoverageEntry]) -> str:
             lines.append(
                 f"- {entry.name}: {entry.status.value} — newest {entry.latest.isoformat()} "
                 f"({entry.age_days}d old)"
+            )
+        if entry.future_stamps:
+            lines.append(
+                f"    NOTE: {entry.future_stamps} file(s) dated in the future were "
+                "ignored when judging freshness"
             )
         if entry.status is not CoverageStatus.FRESH:
             lines.append(f"    {entry.description}")

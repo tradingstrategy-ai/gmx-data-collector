@@ -71,17 +71,23 @@ def find_orphaned_funding_variants(gmx_dir: Path, produced: set[str]) -> dict[st
     """Find funding variants on disk that an export run can no longer produce.
 
     The output directory is the only record of what was exported before, so
-    comparing it against what this run actually wrote is what makes a retired
-    variant visible. Without it, a consumer reading
+    comparing it against what the repo can still produce is what makes a
+    retired variant visible. Without it, a consumer reading
     ``*-1h_datastore-funding_rate.feather`` cannot tell "never existed" from
     "deliberately retired" from "the export broke" -- the ambiguity behind
     issue #47.
+
+    ``produced`` must describe *availability*, not one run's selection: a
+    ``--timeframe`` or ``--symbol`` filter narrows what a run writes without
+    retiring anything, so passing a filtered set would report live variants as
+    orphans.
 
     Counts distinct pairs, not files, so a variant published as both Feather
     and Parquet is reported once per symbol rather than twice.
 
     :param gmx_dir: Export directory, e.g. ``{output}/gmx/futures``.
-    :param produced: Variant tokens this run exported, e.g. ``{"1h"}``.
+    :param produced: Variant tokens the repo can still produce, e.g.
+        ``{"1h"}``.
     :returns: Mapping of orphaned variant to the number of pairs carrying it,
         empty when the directory is missing or everything on disk is current.
     """
@@ -512,10 +518,16 @@ class FreqtradeExporter:
         results: dict[str, dict] = {}
         failed_symbols: list[str] = []
         failures: list[ExportFailure] = []
-        # Variants this run considers live. Built from what was *considered*
-        # exportable rather than what was written, so a symbol whose source
-        # parquet happens to be empty does not make its variant look retired.
-        produced_variants: set[str] = set()
+        # Variants the repo can still produce *at all*, taken from the whole
+        # funding lake rather than from this run's selection. A `--timeframe`
+        # or `--symbol` filter narrows what a run writes; it does not retire a
+        # variant, so filtering must not make a live variant look orphaned.
+        # Built from availability rather than from what was written, so a
+        # symbol whose source parquet happens to be empty is also not enough
+        # to retire one.
+        available_variants: set[str] = set()
+        for symbol in sorted(funding_symbols):
+            available_variants.update(self.list_funding_timeframes(symbol))
         for symbol in export_symbols:
             funding_files = 0
             funding_tfs = set(self.list_funding_timeframes(symbol))
@@ -524,7 +536,6 @@ class FreqtradeExporter:
                 if timeframes
                 else sorted(funding_tfs)
             )
-            produced_variants.update(export_tfs)
             symbol_failed = False
 
             for tf in export_tfs:
@@ -586,11 +597,13 @@ class FreqtradeExporter:
         # is. Nothing regenerates those files, so they are frozen at whenever
         # they were last written, and a consumer still reading them has no way
         # to tell that from live data (issue #47).
-        # Skip the check entirely when nothing was exportable: with an empty
-        # `produced_variants` every file on disk would look retired, including
+        # Skip the check entirely when nothing is exportable: with an empty
+        # `available_variants` every file on disk would look retired, including
         # the canonical one.
         orphans = (
-            find_orphaned_funding_variants(gmx_dir, produced_variants) if produced_variants else {}
+            find_orphaned_funding_variants(gmx_dir, available_variants)
+            if available_variants
+            else {}
         )
         for variant, pairs in sorted(orphans.items()):
             logger.warning(

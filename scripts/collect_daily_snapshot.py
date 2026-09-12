@@ -816,14 +816,24 @@ def _funding_export_summary(futures_dir: Path) -> dict:
         canonical.add(match.group("pair"))
         try:
             dates = pd.read_feather(path, columns=["date"])["date"]
+            # Normalise to tz-aware UTC before any comparison. A legacy export
+            # written without a timezone would otherwise raise "Cannot compare
+            # tz-naive and tz-aware timestamps" -- either against another
+            # file's timestamp here, or against `now` in the report below --
+            # and this runs at the end of an otherwise successful release, so
+            # raising fails a run whose data was already good.
+            stamps = pd.to_datetime(dates, utc=True, errors="coerce").dropna()
         except Exception:
-            # One corrupt export must not take down a report that runs after
-            # an otherwise successful release.
+            # One corrupt export must not take down that same report.
             summary["unreadable"] += 1
             continue
-        if dates.empty:
+        if stamps.empty:
+            # Readable, but carries nothing that is a date -- indistinguishable
+            # from corrupt as far as coverage is concerned.
+            if not dates.empty:
+                summary["unreadable"] += 1
             continue
-        newest = pd.Timestamp(dates.max())
+        newest = pd.Timestamp(stamps.max())
         if latest is None or newest > latest:
             latest = newest
 
