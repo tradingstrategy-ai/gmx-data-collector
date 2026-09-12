@@ -16,6 +16,7 @@ from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.config import TIMEFRAME_TO_FILENAME
 from gmx_historical_data.event_decoder import AnswerUpdatedEvent
 from gmx_historical_data.gmx_event_parser import GMXPositionEvent
+from gmx_historical_data.ohlcv_density import merge_ohlcv_preferring_dense
 from gmx_historical_data.ohlcv_validation import (
     ExportValidationError,
     validate_ohlcv,
@@ -360,11 +361,7 @@ class ParquetStorage:
             )
             existing_stats = _coverage_stats(existing, "timestamp")
             incoming_stats = _coverage_stats(incoming, "timestamp")
-            merged = (
-                pl.concat([existing, incoming])
-                .unique(subset=["timestamp"], keep="last", maintain_order=True)
-                .sort("timestamp")
-            )
+            merged = merge_ohlcv_preferring_dense(existing, incoming, ts_col="timestamp")
             validate_ohlcv(
                 merged,
                 timestamp_column="timestamp",

@@ -1,0 +1,211 @@
+"""Helpers for detecting flat/placeholder OHLCV candles.
+
+A "flat" candle (``high == low``) with no genuine intrabar price movement can
+arise from two different situations that must not be conflated:
+
+1. A source that genuinely only prints once per bar (e.g. Chainlink's classic
+   on-chain feed during a quiet period, or any Chainlink window that
+   predates GMX's own ``/prices/candles`` API existing) forward-filled by
+   the resampler. This can be a faithful reflection of that source's real
+   update cadence and is not, by itself, a defect.
+2. A denser source (GMX's own API, which prints genuine per-minute OHLC) was
+   available for that same window but a flat placeholder from a coarser
+   source ended up on disk anyway — a data-quality regression.
+
+These helpers quantify "how flat" a slice of OHLCV data is. They are used
+by the merge layer (:mod:`gmx_historical_data.storage` and
+:mod:`gmx_historical_data.freqtrade_exporter`, preferring denser rows on
+timestamp collision), by collection gap detection
+(:mod:`gmx_historical_data.daemon.gap_detector`, so a store that is
+timestamp-continuous but density-starved for a window a denser source could
+have covered is not mistaken for "up to date" and skipped forever), and by
+the daily snapshot collector (:mod:`scripts.collect_daily_snapshot`, both
+for its own dense-preferring merge into ``gmx/futures/*.feather`` and for
+its pre-fetch coverage gate -- see :func:`is_stale_density_pandas` callers
+there).
+
+Root cause this module exists to guard against: ``candles/arbitrum/BTC/
+1m.parquet`` was found 92% flat (``high == low``) across its *entire*
+2021-07-13 -> 2026-09-06 history, including the most recent ~6 months, even
+though GMX's own API demonstrably provides dense (0% flat) 1-minute data for
+that same recent window (see ``user_data/data/gmx/futures/
+BTC_USDC_USDC-1m-futures.feather``). The gap detectors only ever compared
+*timestamps* ("do we already have a row for every recent minute?"), which
+Chainlink's forward-filled resampling always satisfies, so a GMX-API refetch
+of the recent window was never triggered once the initial Chainlink walk
+reached "now".
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+import polars as pl
+
+#: Fraction of flat (``high == low``) rows in a recent window above which the
+#: window is considered "stale density" — i.e. dominated by a coarser
+#: source's placeholders even though a denser source may be available.
+#: Chosen well below the ~0.92 flat fraction actually observed for the BTC
+#: regression so genuine low-volatility periods (which do produce some flat
+#: real candles) don't false-positive.
+DEFAULT_STALE_DENSITY_THRESHOLD = 0.5
+
+
+def flat_fraction_pandas(df: pd.DataFrame) -> float:
+    """Return the fraction of rows where ``high == low`` in a pandas frame.
+
+    :param df: OHLCV frame with ``high`` and ``low`` columns.
+    :return: Fraction in ``[0.0, 1.0]``; ``0.0`` for an empty frame.
+    """
+    if df.empty:
+        return 0.0
+    return float((df["high"] == df["low"]).mean())
+
+
+def flat_fraction_polars(df: pl.DataFrame) -> float:
+    """Return the fraction of rows where ``high == low`` in a Polars frame.
+
+    :param df: OHLCV frame with ``high`` and ``low`` columns.
+    :return: Fraction in ``[0.0, 1.0]``; ``0.0`` for an empty frame.
+    """
+    if df.is_empty():
+        return 0.0
+    return float((df["high"] == df["low"]).mean())
+
+
+def merge_ohlcv_preferring_dense(
+    existing: pl.DataFrame,
+    incoming: pl.DataFrame,
+    ts_col: str = "timestamp",
+) -> pl.DataFrame:
+    """Merge two OHLCV frames on a timestamp column, preferring the denser row.
+
+    Plain ``keep="last"`` dedup after ``pl.concat([existing, incoming])``
+    always keeps whichever frame was listed second, regardless of quality --
+    so a flat (``high == low``) placeholder from a coarser source could
+    silently overwrite a genuine, denser candle purely based on call order
+    (or vice versa). This is the shared merge used by both the source
+    candle store (:meth:`gmx_historical_data.storage.ParquetStorage.
+    save_candles`) and the Freqtrade export
+    (:meth:`gmx_historical_data.freqtrade_exporter.FreqtradeExporter.
+    _merge_export_frames`), so a store fixed by one path can't be
+    regressed back to flat by the other.
+
+    A row with ``high > low`` (real intrabar movement) always wins over a
+    flat row for the same timestamp. When both rows are equally dense (or
+    equally flat), the *incoming* row wins -- preserving "newer write wins"
+    semantics for genuine same-density updates.
+
+    :param existing: On-disk OHLCV frame.
+    :param incoming: New OHLCV frame to merge in.
+    :param ts_col: Name of the timestamp column to dedup on (``"timestamp"``
+        for the candle store, ``"date"`` for the Freqtrade export).
+    :return: Merged, timestamp-sorted frame with the dense/incoming tiebreak
+        columns dropped.
+    """
+    existing_marked = existing.with_columns(
+        [
+            (pl.col("high") > pl.col("low")).fill_null(False).alias("__dense"),
+            pl.lit(0, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    incoming_marked = incoming.with_columns(
+        [
+            (pl.col("high") > pl.col("low")).fill_null(False).alias("__dense"),
+            pl.lit(1, dtype=pl.Int8).alias("__seq"),
+        ]
+    )
+    # Sort so that, within each timestamp, a dense row always sorts after a
+    # flat one, and (among equal density) incoming always sorts after
+    # existing -- so unique(keep="last") below picks dense-over-flat, then
+    # incoming-over-existing on a true tie.
+    combined = pl.concat([existing_marked, incoming_marked]).sort([ts_col, "__dense", "__seq"])
+    return (
+        combined.unique(subset=[ts_col], keep="last", maintain_order=True)
+        .drop(["__dense", "__seq"])
+        .sort(ts_col)
+    )
+
+
+def is_stale_density_pandas(
+    df: pd.DataFrame,
+    threshold: float = DEFAULT_STALE_DENSITY_THRESHOLD,
+) -> bool:
+    """Check whether a pandas OHLCV window is dominated by flat placeholders.
+
+    :param df: OHLCV frame with ``high`` and ``low`` columns, already sliced
+        to the window of interest (e.g. the range a denser source could
+        cover).
+    :param threshold: Flat-fraction above which the window is considered
+        stale. Defaults to :data:`DEFAULT_STALE_DENSITY_THRESHOLD`.
+    :return: ``True`` if the flat fraction exceeds ``threshold``.
+    """
+    if len(df) < MIN_STALE_DENSITY_SAMPLE:
+        return False
+    return flat_fraction_pandas(df) > threshold
+
+
+#: Minimum row count a window must have before :func:`is_stale_density_pandas`
+#: is trusted to declare it stale. Below this, a single (or handful of)
+#: flat row(s) -- routine for a brand-new listing, a quiet market, or a test
+#: fixture -- would otherwise look "100% flat" purely from small-sample
+#: noise. Chosen well below any real incremental lookback window (the
+#: smallest is the daily timeframe's 5-bar floor in
+#: ``scripts/collect_daily_snapshot.py``, so this must stay <= that) while
+#: still being large enough that a genuine stale run cannot hide inside it.
+MIN_STALE_DENSITY_SAMPLE = 5
+
+
+def merge_ohlcv_preferring_dense_pandas(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+    ts_col: str = "date",
+) -> pd.DataFrame:
+    """Pandas equivalent of :func:`merge_ohlcv_preferring_dense`.
+
+    Used by :mod:`scripts.collect_daily_snapshot`, which merges GMX API
+    fetches into ``gmx/futures/*.feather`` in pandas (the Freqtrade export
+    and source candle store merges are polars). Plain
+    ``drop_duplicates(keep="last")`` on a concatenated frame always keeps
+    whichever frame was listed second regardless of quality, so a flat
+    placeholder candle from a GMX API hiccup could silently overwrite an
+    already-dense row in this file purely based on call order -- the same
+    failure shape :func:`merge_ohlcv_preferring_dense` guards against for
+    the other two merge sites, and this file is the one the README
+    documents as "the deepest copy" for non-Chainlink tokens, so a
+    regression here is not recoverable from a denser alternative.
+
+    A row with ``high > low`` (real intrabar movement) always wins over a
+    flat row for the same timestamp. When both rows are equally dense (or
+    equally flat), the *incoming* row wins -- preserving "newer write wins"
+    semantics for genuine same-density updates.
+
+    :param existing: On-disk OHLCV frame (empty-safe).
+    :param incoming: New OHLCV frame to merge in (empty-safe).
+    :param ts_col: Name of the timestamp column to dedup on.
+    :return: Merged, timestamp-sorted frame with the dense/incoming tiebreak
+        columns dropped and the index reset.
+    """
+    if existing.empty:
+        return incoming.copy()
+    if incoming.empty:
+        return existing.copy()
+
+    existing_marked = existing.copy()
+    existing_marked["__dense"] = (existing_marked["high"] > existing_marked["low"]).fillna(False)
+    existing_marked["__seq"] = 0
+
+    incoming_marked = incoming.copy()
+    incoming_marked["__dense"] = (incoming_marked["high"] > incoming_marked["low"]).fillna(False)
+    incoming_marked["__seq"] = 1
+
+    combined = pd.concat([existing_marked, incoming_marked], ignore_index=True)
+    # Stable sort so that, within each timestamp, a dense row always sorts
+    # after a flat one, and (among equal density) incoming always sorts
+    # after existing -- so drop_duplicates(keep="last") below picks
+    # dense-over-flat, then incoming-over-existing on a true tie.
+    combined = combined.sort_values([ts_col, "__dense", "__seq"], kind="mergesort")
+    combined = combined.drop_duplicates(subset=[ts_col], keep="last")
+    combined = (
+        combined.drop(columns=["__dense", "__seq"]).sort_values(ts_col).reset_index(drop=True)
+    )
+    return combined

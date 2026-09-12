@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 
+from gmx_historical_data.ohlcv_density import (
+    DEFAULT_STALE_DENSITY_THRESHOLD,
+    is_stale_density_pandas,
+)
 from gmx_historical_data.storage import ParquetStorage
 
 logger = logging.getLogger(__name__)
@@ -18,6 +22,11 @@ class GapStatus(Enum):
     :cvar DATA_LOSS_GAP: Our data is older than API earliest - permanent data loss.
     :cvar NO_EXISTING_DATA: Fresh start, no existing data in storage.
     :cvar API_UNAVAILABLE: Could not query API, fallback mode.
+    :cvar STALE_DENSITY: Timestamps are continuous through "now" (no timestamp
+        gap), but the recent window a denser source (GMX API) could cover is
+        dominated by flat placeholder candles from a coarser source. Distinct
+        from ``DATA_LOSS_GAP``: no timestamps are missing, the *quality* of
+        what is there is stale. See :mod:`gmx_historical_data.ohlcv_density`.
     """
 
     NO_GAP = "no_gap"
@@ -25,6 +34,7 @@ class GapStatus(Enum):
     DATA_LOSS_GAP = "data_loss_gap"
     NO_EXISTING_DATA = "no_existing_data"
     API_UNAVAILABLE = "api_unavailable"
+    STALE_DENSITY = "stale_density"
 
 
 @dataclass
@@ -61,6 +71,7 @@ class GapDetectionResult:
             GapStatus.DATA_LOSS_GAP,
             GapStatus.NO_EXISTING_DATA,
             GapStatus.API_UNAVAILABLE,
+            GapStatus.STALE_DENSITY,
         )
 
     @property
@@ -78,6 +89,14 @@ class GapDetector:
     .. deprecated::
         Use :class:`AdaptiveGapDetector` instead. This class does not detect
         sliding window data loss from GMX API and will be removed in a future version.
+        It also does not carry :class:`AdaptiveGapDetector`'s ``STALE_DENSITY``
+        check (see :mod:`gmx_historical_data.ohlcv_density`): a
+        timestamp-continuous but mostly-flat store (e.g. from Chainlink
+        forward-fill) will latch this detector's "no gap" result forever,
+        same as the bug ``STALE_DENSITY`` fixes for the adaptive detector.
+        This is only reachable when ``ENABLE_ADAPTIVE_GAP_DETECTION=false``
+        (adaptive detection is on by default); no further fix is planned
+        here given the deprecation.
 
     The simple GapDetector compares local storage against current time but does NOT
     query the GMX API to detect if data has been permanently lost due to the API's
@@ -241,14 +260,25 @@ class AdaptiveGapDetector:
         "1d": timedelta(days=1),
     }
 
-    def __init__(self, storage: ParquetStorage, gmx_fetcher):
+    def __init__(
+        self,
+        storage: ParquetStorage,
+        gmx_fetcher,
+        stale_density_threshold: float = DEFAULT_STALE_DENSITY_THRESHOLD,
+    ):
         """Initialize adaptive gap detector.
 
         :param storage: ParquetStorage instance.
         :param gmx_fetcher: GMXDataFetcher instance.
+        :param stale_density_threshold: Flat (``high == low``) fraction
+            above which a timestamp-continuous recent window is treated as
+            :attr:`GapStatus.STALE_DENSITY` instead of :attr:`GapStatus.NO_GAP`,
+            forcing a refetch even though no timestamps are missing. See
+            :mod:`gmx_historical_data.ohlcv_density`.
         """
         self.storage = storage
         self.gmx_fetcher = gmx_fetcher
+        self.stale_density_threshold = stale_density_threshold
 
     def _format_timespan(self, delta: timedelta) -> str:
         """Format a timedelta as a human-readable string.
@@ -354,9 +384,36 @@ class AdaptiveGapDetector:
                 api_latest=api_latest,
             )
 
-        # Case 2: Data is current - no gap
+        # Case 2: Timestamps are continuous through "now" - but that alone
+        # does not mean the data is good. Chainlink's forward-filled
+        # resampling makes the store timestamp-continuous even when 90%+ of
+        # candles are flat placeholders, which would otherwise latch this
+        # detector on NO_GAP forever and permanently stop refetching GMX's
+        # denser API data for this symbol/timeframe. Check the recent window
+        # GMX's API can actually cover (api_earliest..api_latest) for flat
+        # dominance before trusting timestamp continuity.
         fetch_start = our_latest + interval_delta
         if fetch_start >= now:
+            recent_window = existing_df[existing_df["timestamp"] >= api_earliest]
+            if is_stale_density_pandas(recent_window, self.stale_density_threshold):
+                flat_pct = recent_window["high"].eq(recent_window["low"]).mean() * 100
+                logger.warning(
+                    f"STALE DENSITY: {symbol} {timeframe} - timestamps are "
+                    f"current through {our_latest.isoformat()}, but "
+                    f"{flat_pct:.1f}% of the {api_earliest.isoformat()} -> "
+                    f"{our_latest.isoformat()} window is flat (high == low) "
+                    "even though GMX's API can cover it densely. Forcing a "
+                    "refetch instead of treating this as up to date."
+                )
+                return GapDetectionResult(
+                    status=GapStatus.STALE_DENSITY,
+                    fetch_start=api_earliest,
+                    fetch_end=now,
+                    our_latest=our_latest,
+                    api_earliest=api_earliest,
+                    api_latest=api_latest,
+                )
+
             return GapDetectionResult(
                 status=GapStatus.NO_GAP,
                 fetch_start=None,
