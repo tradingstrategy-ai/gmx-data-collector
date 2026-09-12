@@ -109,6 +109,69 @@ def find_orphaned_funding_variants(gmx_dir: Path, produced: set[str]) -> dict[st
     return {variant: len(pairs) for variant, pairs in seen.items()}
 
 
+def find_stale_orphaned_funding_variants(
+    gmx_dir: Path,
+    produced: set[str],
+    *,
+    max_age_days: int = 2,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Find unproduced variants whose files are not being refreshed.
+
+    A timeframe-shaped export such as ``8h`` may be maintained by an
+    external compatibility pipeline even when this exporter cannot produce
+    it.  Do not call that live file an orphan merely because it is absent
+    from this repository's source lake; only report an unproduced variant
+    when its newest readable bar is stale (or every file is unreadable).
+
+    :param gmx_dir: Export directory, e.g. ``{output}/gmx/futures``.
+    :param produced: Variants this exporter can produce.
+    :param max_age_days: Maximum age of a live external export.
+    :param now: UTC reference time, injectable for tests.
+    :returns: Mapping of stale variant to distinct pair count.
+    """
+    candidates = find_orphaned_funding_variants(gmx_dir, produced)
+    if not candidates or not gmx_dir.is_dir():
+        return candidates
+
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    cutoff = reference - timedelta(days=max_age_days)
+    stale: dict[str, int] = {}
+    for variant, pair_count in candidates.items():
+        newest: datetime | None = None
+        readable = False
+        for path in gmx_dir.iterdir():
+            match = _FUNDING_EXPORT_PATTERN.match(path.name)
+            if match is None or match.group("variant") != variant:
+                continue
+            try:
+                frame = (
+                    pl.read_ipc(path, columns=["date"])
+                    if path.suffix == ".feather"
+                    else pl.read_parquet(path, columns=["date"])
+                )
+                if frame.is_empty():
+                    continue
+                value = frame.select(pl.col("date").max()).item()
+                if value is None:
+                    continue
+                stamp = value.to_pydatetime() if hasattr(value, "to_pydatetime") else value
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=UTC)
+                else:
+                    stamp = stamp.astimezone(UTC)
+                readable = True
+                if newest is None or stamp > newest:
+                    newest = stamp
+            except Exception:
+                continue
+        if not readable or newest is None or newest < cutoff:
+            stale[variant] = pair_count
+    return stale
+
+
 #: Filename of the cadence manifest published beside the exported feathers.
 #: It lands inside ``gmx-full.tar.gz`` because the release workflow tars
 #: ``user_data/data/gmx/`` wholesale, so downstream consumers can tell "this
@@ -603,7 +666,7 @@ class FreqtradeExporter:
         # companion products means nothing is exportable at all, which is #47
         # inverted. Say that once, plainly, instead of listing variants.
         if not available_variants:
-            frozen = find_orphaned_funding_variants(gmx_dir, set())
+            frozen = find_stale_orphaned_funding_variants(gmx_dir, set())
             if frozen:
                 logger.warning(
                     "export_funding: no exportable funding source found under %s, yet %d "
@@ -616,12 +679,13 @@ class FreqtradeExporter:
                 )
             return results, failed_symbols, failures
 
-        orphans = find_orphaned_funding_variants(gmx_dir, available_variants)
+        orphans = find_stale_orphaned_funding_variants(gmx_dir, available_variants)
         for variant, pairs in sorted(orphans.items()):
             logger.warning(
-                "export_funding: %r is present for %d pair(s) in %s but is no longer "
-                "exported -- those files are stale and nothing refreshes them. "
-                "Consumers should read the canonical '1h' funding export instead.",
+                "export_funding: %r is present for %d pair(s) in %s but is not produced "
+                "by this exporter and has not been refreshed recently. Verify the "
+                "external source before retiring it; consumers should otherwise read "
+                "the canonical '1h' funding export.",
                 variant,
                 pairs,
                 gmx_dir,

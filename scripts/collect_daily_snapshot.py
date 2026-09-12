@@ -785,8 +785,8 @@ def _funding_export_summary(futures_dir: Path) -> dict:
 
     :param futures_dir: Directory holding the exported feathers.
     :returns: Dict with ``canonical_pairs``, ``canonical_latest`` (a
-        :class:`pandas.Timestamp` or ``None``), ``orphans`` (variant -> pair
-        count) and ``unreadable`` (files whose date could not be read).
+        :class:`pandas.Timestamp` or ``None``), ``orphans`` (stale variant ->
+        pair count) and ``unreadable`` (files whose date could not be read).
     """
     summary: dict = {
         "canonical_pairs": 0,
@@ -802,16 +802,19 @@ def _funding_export_summary(futures_dir: Path) -> dict:
     # definition of "what an exported funding file looks like".
     from gmx_historical_data.freqtrade_exporter import (
         _FUNDING_EXPORT_PATTERN,
-        find_orphaned_funding_variants,
+        find_stale_orphaned_funding_variants,
     )
 
-    summary["orphans"] = find_orphaned_funding_variants(futures_dir, {CANONICAL_FUNDING_VARIANT})
+    summary["orphans"] = find_stale_orphaned_funding_variants(
+        futures_dir, {CANONICAL_FUNDING_VARIANT}
+    )
 
     canonical: set[str] = set()
     latest: pd.Timestamp | None = None
 
+    now_utc = pd.Timestamp.now(tz="UTC")
     for path in futures_dir.iterdir():
-        if path.name.startswith("._") or path.suffix != ".feather":
+        if path.name.startswith("._") or path.suffix not in {".feather", ".parquet"}:
             continue
         match = _FUNDING_EXPORT_PATTERN.match(path.name)
         if match is None or match.group("variant") != CANONICAL_FUNDING_VARIANT:
@@ -819,7 +822,10 @@ def _funding_export_summary(futures_dir: Path) -> dict:
 
         canonical.add(match.group("pair"))
         try:
-            dates = pd.read_feather(path, columns=["date"])["date"]
+            if path.suffix == ".feather":
+                dates = pd.read_feather(path, columns=["date"])["date"]
+            else:
+                dates = pd.read_parquet(path, columns=["date"])["date"]
             # Normalise to tz-aware UTC before any comparison. A legacy export
             # written without a timezone would otherwise raise "Cannot compare
             # tz-naive and tz-aware timestamps" -- either against another
@@ -836,6 +842,9 @@ def _funding_export_summary(futures_dir: Path) -> dict:
             # from corrupt as far as coverage is concerned.
             if not dates.empty:
                 summary["unreadable"] += 1
+            continue
+        stamps = stamps[stamps <= now_utc]
+        if stamps.empty:
             continue
         newest = pd.Timestamp(stamps.max())
         if latest is None or newest > latest:

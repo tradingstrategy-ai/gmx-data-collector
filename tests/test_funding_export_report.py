@@ -97,6 +97,27 @@ class TestFundingExportSummary:
         assert summary["canonical_latest"] == pd.Timestamp(last)
         assert summary["unreadable"] == 1
 
+    def test_parquet_exports_are_counted(self, tmp_path):
+        last = datetime(2026, 6, 12, 5, tzinfo=UTC)
+        frame = pd.DataFrame(
+            {"date": pd.date_range(last - timedelta(hours=2), last, freq="h", tz="UTC")}
+        )
+        frame.to_parquet(tmp_path / "BTC_USDC_USDC-1h-funding_rate.parquet")
+
+        summary = _funding_export_summary(tmp_path)
+
+        assert summary["canonical_pairs"] == 1
+        assert summary["canonical_latest"] == pd.Timestamp(last)
+
+    def test_future_dated_export_does_not_certify_freshness(self, tmp_path):
+        future = datetime.now(UTC) + timedelta(days=30)
+        _write_funding_export(tmp_path, "BTC_USDC_USDC", "1h", future)
+
+        summary = _funding_export_summary(tmp_path)
+
+        assert summary["canonical_pairs"] == 1
+        assert summary["canonical_latest"] is None
+
 
 class TestTimezoneRobustness:
     """A legacy export written without a timezone must not take down the

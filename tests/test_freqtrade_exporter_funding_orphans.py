@@ -118,7 +118,33 @@ class TestExportFundingWarnsAboutOrphans:
             exporter.export_funding()
 
         assert "1h_datastore" in caplog.text
-        assert "no longer exported" in caplog.text.lower()
+        assert "not produced by this exporter" in caplog.text.lower()
+
+    def test_recent_external_variant_is_not_called_stale(self, tmp_path, caplog):
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        recent = out_dir / "gmx" / "futures"
+        recent.mkdir(parents=True, exist_ok=True)
+        frame = pl.DataFrame(
+            {
+                "date": pl.datetime_range(
+                    pl.datetime(2026, 9, 11), pl.datetime(2026, 9, 12), "1h", eager=True
+                ).dt.replace_time_zone("UTC"),
+                "open": [0.0] * 25,
+                "high": [0.0] * 25,
+                "low": [0.0] * 25,
+                "close": [0.0] * 25,
+                "volume": [0.0] * 25,
+            }
+        )
+        frame.write_ipc(recent / "BTC_USDC_USDC-8h-funding_rate.feather")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding()
+
+        assert "8h" not in caplog.text
 
     def test_clean_export_warns_about_nothing(self, tmp_path, caplog):
         data_dir = tmp_path / "data"
