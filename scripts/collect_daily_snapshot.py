@@ -77,6 +77,11 @@ from gmx_historical_data.coverage_gate import (
     has_ohlcv_through,
     is_current,
 )
+from gmx_historical_data.data_coverage import (
+    DAILY_STAMPED_TYPES,
+    assess_coverage,
+    format_coverage_report,
+)
 from gmx_historical_data.gmx_trade_ticks import PERP_KIND
 from gmx_historical_data.ohlcv_density import (
     MIN_STALE_DENSITY_SAMPLE,
@@ -128,6 +133,11 @@ _TIMEFRAME_DELTAS = {
 
 # APY periods available from the GMX API.
 APY_PERIODS = ["1d", "7d", "30d", "90d", "180d", "1y", "total"]
+
+# The one funding variant this repo still exports. Everything else in the
+# funding lake is a suffixed companion product deliberately not published as a
+# Freqtrade timeframe -- see `freqtrade_exporter._FUNDING_TIMEFRAME_PATTERN`.
+CANONICAL_FUNDING_VARIANT = "1h"
 
 
 def _merge_feather(
@@ -783,6 +793,90 @@ def _feather_date_stats(filepath: Path) -> dict | None:
     return _date_stats(df["date"])
 
 
+def _funding_export_summary(futures_dir: Path) -> dict:
+    """Summarise the funding-rate exports sitting beside the candle feathers.
+
+    Funding is not collected by this script and is not refreshed by the daily
+    release -- the files ride along inside ``gmx-full.tar.gz`` untouched. That
+    is exactly why they need reporting: without it, a funding export going
+    stale, orphaned or missing is invisible until a downstream backtest fails
+    (issue #47).
+
+    Reports two things: how far the canonical ``1h`` export reaches, and which
+    other variants are present that nothing produces any more.
+
+    :param futures_dir: Directory holding the exported feathers.
+    :returns: Dict with ``canonical_pairs``, ``canonical_latest`` (a
+        :class:`pandas.Timestamp` or ``None``), ``orphans`` (stale variant ->
+        pair count) and ``unreadable`` (files whose date could not be read).
+    """
+    summary: dict = {
+        "canonical_pairs": 0,
+        "canonical_latest": None,
+        "orphans": {},
+        "unreadable": 0,
+    }
+    if not futures_dir.is_dir():
+        return summary
+
+    # Imported at call time: the exporter pulls polars, which this entry point
+    # otherwise has no need of. Reusing its pattern and orphan finder keeps one
+    # definition of "what an exported funding file looks like".
+    from gmx_historical_data.freqtrade_exporter import (
+        _FUNDING_EXPORT_PATTERN,
+        find_stale_orphaned_funding_variants,
+    )
+
+    summary["orphans"] = find_stale_orphaned_funding_variants(
+        futures_dir, {CANONICAL_FUNDING_VARIANT}
+    )
+
+    canonical: set[str] = set()
+    latest: pd.Timestamp | None = None
+
+    now_utc = pd.Timestamp.now(tz="UTC")
+    for path in futures_dir.iterdir():
+        if path.name.startswith("._") or path.suffix not in {".feather", ".parquet"}:
+            continue
+        match = _FUNDING_EXPORT_PATTERN.match(path.name)
+        if match is None or match.group("variant") != CANONICAL_FUNDING_VARIANT:
+            continue
+
+        canonical.add(match.group("pair"))
+        try:
+            if path.suffix == ".feather":
+                dates = pd.read_feather(path, columns=["date"])["date"]
+            else:
+                dates = pd.read_parquet(path, columns=["date"])["date"]
+            # Normalise to tz-aware UTC before any comparison. A legacy export
+            # written without a timezone would otherwise raise "Cannot compare
+            # tz-naive and tz-aware timestamps" -- either against another
+            # file's timestamp here, or against `now` in the report below --
+            # and this runs at the end of an otherwise successful release, so
+            # raising fails a run whose data was already good.
+            stamps = pd.to_datetime(dates, utc=True, errors="coerce").dropna()
+        except Exception:
+            # One corrupt export must not take down that same report.
+            summary["unreadable"] += 1
+            continue
+        if stamps.empty:
+            # Readable, but carries nothing that is a date -- indistinguishable
+            # from corrupt as far as coverage is concerned.
+            if not dates.empty:
+                summary["unreadable"] += 1
+            continue
+        stamps = stamps[stamps <= now_utc]
+        if stamps.empty:
+            continue
+        newest = pd.Timestamp(stamps.max())
+        if latest is None or newest > latest:
+            latest = newest
+
+    summary["canonical_pairs"] = len(canonical)
+    summary["canonical_latest"] = latest
+    return summary
+
+
 def _tail_is_stale_density(filepath: Path, tf: str) -> bool:
     """Check whether the recent tail of an OHLCV feather is stale-flat.
 
@@ -1241,17 +1335,69 @@ def generate_report(
         lines.append("## Missing Days (daily-stamped sources)")
         lines.extend(gap_lines)
 
-    lines.extend([
-        "",
-        "## Data Files",
-        f"- Snapshot parquet files: {len(snapshot_files)} days",
-        f"- Ticker parquet files: {len(ticker_files)} days",
-        f"- APY parquet files: {len(apy_files)} days",
-        f"- Volume parquet files: {len(volume_files)} days",
-        "- OHLCV feather files by timeframe:",
-    ])
+    lines.extend(
+        [
+            "",
+            "## Data Files",
+            f"- Snapshot parquet files: {len(snapshot_files)} days",
+            f"- Ticker parquet files: {len(ticker_files)} days",
+            f"- APY parquet files: {len(apy_files)} days",
+            f"- Volume parquet files: {len(volume_files)} days",
+            "- OHLCV feather files by timeframe:",
+        ]
+    )
     for tf in TIMEFRAMES:
         lines.append(f"    {tf}: {tf_counts[tf]} symbols")
+
+    # ------------------------------------------------------------------
+    # Funding exports — not collected by this script and not refreshed by
+    # the release, so without a line here a stale, orphaned or missing
+    # funding file is invisible until a downstream backtest fails (#47).
+    # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Data-type coverage — so a type quietly falling out is a reported fact
+    # rather than a discovery made weeks later downstream (#47, #48).
+    #
+    # `volumes` is deliberately excluded: it is written by a later workflow
+    # step than this report, so grading it here would always describe the
+    # *previous* bundle -- reporting MISSING for a file the tarball ends up
+    # carrying, or FRESH while today's fetch silently returned nothing. The
+    # release's own coverage gate runs after that step and grades it properly.
+    # ------------------------------------------------------------------
+    report_specs = tuple(s for s in DAILY_STAMPED_TYPES if s.name != "volumes")
+    coverage_entries = assess_coverage(futures_dir.parent, specs=report_specs)
+    lines.append("")
+    lines.append("## Data Type Coverage")
+    lines.append(format_coverage_report(coverage_entries))
+    lines.append("    (volumes is graded by the release's coverage gate, which runs later)")
+
+    funding = _funding_export_summary(futures_dir)
+    lines.append("")
+    lines.append("## Funding Rate Exports")
+    lines.append(
+        "  Not collected by this script — carried forward inside the release "
+        "bundle. Listed so staleness is visible."
+    )
+    lines.append(
+        f"- Canonical '{CANONICAL_FUNDING_VARIANT}' export: {funding['canonical_pairs']} pairs"
+    )
+    if funding["canonical_latest"] is not None:
+        newest = funding["canonical_latest"]
+        age_days = (pd.Timestamp(datetime.now(UTC)) - newest).days
+        lines.append(
+            f"- Newest funding bar: {newest.strftime('%Y-%m-%d %H:%M')} UTC ({age_days}d old)"
+        )
+    else:
+        lines.append("- Newest funding bar: none readable")
+    if funding["unreadable"]:
+        lines.append(f"- Unreadable funding exports: {funding['unreadable']}")
+    if funding["orphans"]:
+        lines.append(
+            "- Variants present that nothing regenerates (stale; consumers "
+            f"should read '{CANONICAL_FUNDING_VARIANT}'):"
+        )
+        for variant, pairs in sorted(funding["orphans"].items(), key=lambda kv: -kv[1]):
+            lines.append(f"    {variant}: {pairs} pairs")
 
     # ------------------------------------------------------------------
     # Suspected seed regressions — surfaces the cases where the historical
@@ -1276,14 +1422,10 @@ def generate_report(
                 api = entry["api_slice"]
                 post = entry["post_merge"]
                 pre_str = (
-                    f"{pre['min_date'].strftime('%Y-%m-%d')} ({pre['rows']} rows)"
-                    if pre
-                    else "n/a"
+                    f"{pre['min_date'].strftime('%Y-%m-%d')} ({pre['rows']} rows)" if pre else "n/a"
                 )
                 api_str = (
-                    f"{api['min_date'].strftime('%Y-%m-%d')} ({api['rows']} rows)"
-                    if api
-                    else "n/a"
+                    f"{api['min_date'].strftime('%Y-%m-%d')} ({api['rows']} rows)" if api else "n/a"
                 )
                 post_str = (
                     f"{post['min_date'].strftime('%Y-%m-%d')} ({post['rows']} rows)"
@@ -1360,8 +1502,7 @@ def generate_report(
         lines.append("")
         lines.append(f"## OHLCV Coverage — {tf} (API slice vs Combined feather)")
         lines.append(
-            f"  {'symbol':<10s}  {'status':<11s}  {'API slice':<32s}  "
-            f"{'Combined':<32s}  hist depth"
+            f"  {'symbol':<10s}  {'status':<11s}  {'API slice':<32s}  {'Combined':<32s}  hist depth"
         )
 
         if ohlcv_coverage:
@@ -1474,11 +1615,12 @@ Examples:
         help="GMX network (default: arbitrum)",
     )
     parser.add_argument(
-        "-q", "--quickstart",
+        "-q",
+        "--quickstart",
         action="store_true",
         help="Seed user_data/ from the data/daily-collection branch before "
-             "running today's snapshot collection. Existing local files are "
-             "never overwritten — only missing ones are copied.",
+        "running today's snapshot collection. Existing local files are "
+        "never overwritten — only missing ones are copied.",
     )
     parser.add_argument(
         "--seed-only",
@@ -1535,8 +1677,7 @@ Examples:
             print_coverage_summary(args.output_dir, console)
         else:
             console.print(
-                "  [yellow]Proceeding without seed — the collector will "
-                "still run.[/yellow]"
+                "  [yellow]Proceeding without seed — the collector will still run.[/yellow]"
             )
         if args.seed_only:
             console.print("\n[green]--seed-only set, exiting.[/green]")
@@ -1581,9 +1722,7 @@ Examples:
     markets_path.parent.mkdir(parents=True, exist_ok=True)
 
     skipped: dict[str, SkipDecision] = {}
-    markets_decision = is_current(
-        markets_path, expected_min_rows=100, force=args.force_refresh
-    )
+    markets_decision = is_current(markets_path, expected_min_rows=100, force=args.force_refresh)
     if markets_decision.skip:
         skipped["markets"] = markets_decision
         markets_df = pd.read_parquet(markets_path)
@@ -1629,9 +1768,7 @@ Examples:
     # --- Phase 4: Tickers (bid/ask prices) ---
     console.print("[bold]Phase 4: Tickers (bid/ask prices)[/bold]")
     ticker_path = tickers_dir / f"{date_str}.parquet"
-    ticker_decision = is_current(
-        ticker_path, expected_min_rows=100, force=args.force_refresh
-    )
+    ticker_decision = is_current(ticker_path, expected_min_rows=100, force=args.force_refresh)
     if ticker_decision.skip:
         skipped["tickers"] = ticker_decision
         ticker_count = _row_count(ticker_path)
@@ -1646,9 +1783,7 @@ Examples:
     # --- Phase 5: APY (all periods) ---
     console.print("[bold]Phase 5: APY (yield data)[/bold]")
     apy_path = apy_dir / f"{date_str}.parquet"
-    apy_decision = is_current(
-        apy_path, expected_min_rows=7 * 100, force=args.force_refresh
-    )
+    apy_decision = is_current(apy_path, expected_min_rows=7 * 100, force=args.force_refresh)
     if apy_decision.skip:
         skipped["apy"] = apy_decision
         apy_count = _row_count(apy_path)

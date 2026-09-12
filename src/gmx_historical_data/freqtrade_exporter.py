@@ -58,6 +58,121 @@ logger = logging.getLogger(__name__)
 # and all of which fail this pattern because of their trailing suffix.
 _FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
 
+#: Matches an exported funding file, e.g.
+#: ``BTC_USDC_USDC-1h_datastore-funding_rate.feather``. The variant token is
+#: whatever sits between the pair and the ``-funding_rate`` suffix, so it
+#: catches retired ones (``1h_datastore``, ``1h_factor``, ``8h``) as readily
+#: as the canonical ``1h``.
+_FUNDING_EXPORT_PATTERN = re.compile(
+    r"^(?P<pair>.+)-(?P<variant>[0-9A-Za-z_.]+)-funding_rate\.(?:feather|parquet)$"
+)
+
+
+def find_orphaned_funding_variants(gmx_dir: Path, produced: set[str]) -> dict[str, int]:
+    """Find funding variants on disk that an export run can no longer produce.
+
+    The output directory is the only record of what was exported before, so
+    comparing it against what the repo can still produce is what makes a
+    retired variant visible. Without it, a consumer reading
+    ``*-1h_datastore-funding_rate.feather`` cannot tell "never existed" from
+    "deliberately retired" from "the export broke" -- the ambiguity behind
+    issue #47.
+
+    ``produced`` must describe *availability*, not one run's selection: a
+    ``--timeframe`` or ``--symbol`` filter narrows what a run writes without
+    retiring anything, so passing a filtered set would report live variants as
+    orphans.
+
+    Counts distinct pairs, not files, so a variant published as both Feather
+    and Parquet is reported once per symbol rather than twice.
+
+    :param gmx_dir: Export directory, e.g. ``{output}/gmx/futures``.
+    :param produced: Variant tokens the repo can still produce, e.g.
+        ``{"1h"}``.
+    :returns: Mapping of orphaned variant to the number of pairs carrying it,
+        empty when the directory is missing or everything on disk is current.
+    """
+    if not gmx_dir.is_dir():
+        return {}
+
+    seen: dict[str, set[str]] = {}
+    for path in gmx_dir.iterdir():
+        if path.name.startswith("._"):
+            continue
+        match = _FUNDING_EXPORT_PATTERN.match(path.name)
+        if match is None:
+            continue
+        variant = match.group("variant")
+        if variant in produced:
+            continue
+        seen.setdefault(variant, set()).add(match.group("pair"))
+
+    return {variant: len(pairs) for variant, pairs in seen.items()}
+
+
+def find_stale_orphaned_funding_variants(
+    gmx_dir: Path,
+    produced: set[str],
+    *,
+    max_age_days: int = 2,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """Find unproduced variants whose files are not being refreshed.
+
+    A timeframe-shaped export such as ``8h`` may be maintained by an
+    external compatibility pipeline even when this exporter cannot produce
+    it.  Do not call that live file an orphan merely because it is absent
+    from this repository's source lake; only report an unproduced variant
+    when its newest readable bar is stale (or every file is unreadable).
+
+    :param gmx_dir: Export directory, e.g. ``{output}/gmx/futures``.
+    :param produced: Variants this exporter can produce.
+    :param max_age_days: Maximum age of a live external export.
+    :param now: UTC reference time, injectable for tests.
+    :returns: Mapping of stale variant to distinct pair count.
+    """
+    candidates = find_orphaned_funding_variants(gmx_dir, produced)
+    if not candidates or not gmx_dir.is_dir():
+        return candidates
+
+    reference = now or datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    cutoff = reference - timedelta(days=max_age_days)
+    stale: dict[str, int] = {}
+    for variant, pair_count in candidates.items():
+        newest: datetime | None = None
+        readable = False
+        for path in gmx_dir.iterdir():
+            match = _FUNDING_EXPORT_PATTERN.match(path.name)
+            if match is None or match.group("variant") != variant:
+                continue
+            try:
+                frame = (
+                    pl.read_ipc(path, columns=["date"])
+                    if path.suffix == ".feather"
+                    else pl.read_parquet(path, columns=["date"])
+                )
+                if frame.is_empty():
+                    continue
+                value = frame.select(pl.col("date").max()).item()
+                if value is None:
+                    continue
+                stamp = value.to_pydatetime() if hasattr(value, "to_pydatetime") else value
+                if stamp.tzinfo is None:
+                    stamp = stamp.replace(tzinfo=UTC)
+                else:
+                    stamp = stamp.astimezone(UTC)
+                readable = True
+                if newest is None or stamp > newest:
+                    newest = stamp
+            except Exception:
+                continue
+        if not readable or newest is None or newest < cutoff:
+            stale[variant] = pair_count
+    return stale
+
+
 #: Filename of the cadence manifest published beside the exported feathers.
 #: It lands inside ``gmx-full.tar.gz`` because the release workflow tars
 #: ``user_data/data/gmx/`` wholesale, so downstream consumers can tell "this
@@ -470,6 +585,16 @@ class FreqtradeExporter:
         results: dict[str, dict] = {}
         failed_symbols: list[str] = []
         failures: list[ExportFailure] = []
+        # Variants the repo can still produce *at all*, taken from the whole
+        # funding lake rather than from this run's selection. A `--timeframe`
+        # or `--symbol` filter narrows what a run writes; it does not retire a
+        # variant, so filtering must not make a live variant look orphaned.
+        # Built from availability rather than from what was written, so a
+        # symbol whose source parquet happens to be empty is also not enough
+        # to retire one.
+        available_variants: set[str] = set()
+        for symbol in sorted(funding_symbols):
+            available_variants.update(self.list_funding_timeframes(symbol))
         for symbol in export_symbols:
             funding_files = 0
             funding_tfs = set(self.list_funding_timeframes(symbol))
@@ -532,6 +657,43 @@ class FreqtradeExporter:
                 }
             if symbol_failed:
                 failed_symbols.append(symbol)
+
+        # A variant sitting in the output directory that this run cannot
+        # produce is not necessarily a defect -- `1h_datastore`, `1h_factor`
+        # and the rest were retired on purpose -- but staying silent about it
+        # is. Nothing regenerates those files, so they are frozen at whenever
+        # they were last written, and a consumer still reading them has no way
+        # to tell that from live data (issue #47).
+        # With an empty `available_variants` every file on disk would look
+        # retired, canonical included, so the per-variant scan is meaningless.
+        # Staying silent is not the answer either -- a lake holding only
+        # companion products means nothing is exportable at all, which is #47
+        # inverted. Say that once, plainly, instead of listing variants.
+        if not available_variants:
+            frozen = find_stale_orphaned_funding_variants(gmx_dir, set())
+            if frozen:
+                logger.warning(
+                    "export_funding: no exportable funding source found under %s, yet %d "
+                    "variant(s) are present in %s covering %d pair(s). Nothing refreshes "
+                    "them -- the funding lake has no canonical '1h' parquet.",
+                    self.funding_dir,
+                    len(frozen),
+                    gmx_dir,
+                    sum(frozen.values()),
+                )
+            return results, failed_symbols, failures
+
+        orphans = find_stale_orphaned_funding_variants(gmx_dir, available_variants)
+        for variant, pairs in sorted(orphans.items()):
+            logger.warning(
+                "export_funding: %r is present for %d pair(s) in %s but is not produced "
+                "by this exporter and has not been refreshed recently. Verify the "
+                "external source before retiring it; consumers should otherwise read "
+                "the canonical '1h' funding export.",
+                variant,
+                pairs,
+                gmx_dir,
+            )
 
         return results, failed_symbols, failures
 

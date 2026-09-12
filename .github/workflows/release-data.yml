@@ -495,6 +495,44 @@ jobs:
           print(f"Saved {len(df)} markets -> {out}")
           EOF
 
+      # Every data type the bundle is supposed to carry, checked before it
+      # ships. The release reports "success" from step exit codes alone, so
+      # without this a phase that produced nothing still publishes a bundle
+      # silently missing that type -- the shape behind both #47 and #48.
+      # Types marked `required=False` (ticks, tick_volume, volumes) are
+      # reported but never block: the trade-tick phase is deliberately
+      # fail-soft and turning its absence into a failed release would undo
+      # the contract #48 restored.
+      - name: Validate data type coverage
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          from gmx_historical_data.data_coverage import (
+              assess_coverage,
+              blocking_entries,
+              failing_entries,
+              format_coverage_report,
+          )
+
+          entries = assess_coverage(Path("user_data/data/gmx"))
+          print(format_coverage_report(entries))
+
+          degraded = [e for e in failing_entries(entries) if not e.required]
+          if degraded:
+              names = ", ".join(e.name for e in degraded)
+              print(f"\n::warning::data types absent or stale (non-blocking): {names}")
+
+          blocking = blocking_entries(entries)
+          if blocking:
+              names = ", ".join(f"{e.name}={e.status.value}" for e in blocking)
+              print(f"\n::error::release is missing required data: {names}", file=sys.stderr)
+              sys.exit(1)
+
+          print("\nEvery required data type is present and current.")
+          PY
+
       - name: Show report in job summary
         if: always()
         run: |
