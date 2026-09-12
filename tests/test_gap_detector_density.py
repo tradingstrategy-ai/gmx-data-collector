@@ -24,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 
 from gmx_historical_data.daemon.gap_detector import AdaptiveGapDetector, GapStatus
+from gmx_historical_data.ohlcv_density import is_stale_density_pandas
 from gmx_historical_data.storage import ParquetStorage
 
 
@@ -178,3 +179,10 @@ def test_api_unavailable_path_is_unaffected(tmp_path):
     result = detector.detect_gap_adaptive("BTC", "1min")
 
     assert result.status == GapStatus.NO_GAP
+
+
+def test_tiny_all_flat_window_is_not_stale_density():
+    """Small listings/quiet windows must not latch the stale-density gate."""
+    frame = pd.DataFrame({"high": [100.0, 100.0], "low": [100.0, 100.0]})
+
+    assert is_stale_density_pandas(frame) is False

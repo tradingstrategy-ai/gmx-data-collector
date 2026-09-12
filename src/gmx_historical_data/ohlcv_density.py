@@ -90,7 +90,7 @@ def merge_ohlcv_preferring_dense(
     _merge_export_frames`), so a store fixed by one path can't be
     regressed back to flat by the other.
 
-    A row with ``high != low`` (real intrabar movement) always wins over a
+    A row with ``high > low`` (real intrabar movement) always wins over a
     flat row for the same timestamp. When both rows are equally dense (or
     equally flat), the *incoming* row wins -- preserving "newer write wins"
     semantics for genuine same-density updates.
@@ -104,13 +104,13 @@ def merge_ohlcv_preferring_dense(
     """
     existing_marked = existing.with_columns(
         [
-            (pl.col("high") != pl.col("low")).alias("__dense"),
+            (pl.col("high") > pl.col("low")).fill_null(False).alias("__dense"),
             pl.lit(0, dtype=pl.Int8).alias("__seq"),
         ]
     )
     incoming_marked = incoming.with_columns(
         [
-            (pl.col("high") != pl.col("low")).alias("__dense"),
+            (pl.col("high") > pl.col("low")).fill_null(False).alias("__dense"),
             pl.lit(1, dtype=pl.Int8).alias("__seq"),
         ]
     )
@@ -139,7 +139,7 @@ def is_stale_density_pandas(
         stale. Defaults to :data:`DEFAULT_STALE_DENSITY_THRESHOLD`.
     :return: ``True`` if the flat fraction exceeds ``threshold``.
     """
-    if df.empty:
+    if len(df) < MIN_STALE_DENSITY_SAMPLE:
         return False
     return flat_fraction_pandas(df) > threshold
 
@@ -174,7 +174,7 @@ def merge_ohlcv_preferring_dense_pandas(
     documents as "the deepest copy" for non-Chainlink tokens, so a
     regression here is not recoverable from a denser alternative.
 
-    A row with ``high != low`` (real intrabar movement) always wins over a
+    A row with ``high > low`` (real intrabar movement) always wins over a
     flat row for the same timestamp. When both rows are equally dense (or
     equally flat), the *incoming* row wins -- preserving "newer write wins"
     semantics for genuine same-density updates.
@@ -191,11 +191,15 @@ def merge_ohlcv_preferring_dense_pandas(
         return existing.copy()
 
     existing_marked = existing.copy()
-    existing_marked["__dense"] = existing_marked["high"] != existing_marked["low"]
+    existing_marked["__dense"] = (
+        existing_marked["high"] > existing_marked["low"]
+    ).fillna(False)
     existing_marked["__seq"] = 0
 
     incoming_marked = incoming.copy()
-    incoming_marked["__dense"] = incoming_marked["high"] != incoming_marked["low"]
+    incoming_marked["__dense"] = (
+        incoming_marked["high"] > incoming_marked["low"]
+    ).fillna(False)
     incoming_marked["__seq"] = 1
 
     combined = pd.concat([existing_marked, incoming_marked], ignore_index=True)

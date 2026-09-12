@@ -17,6 +17,7 @@ from __future__ import annotations
 import pandas as pd
 
 from gmx_historical_data.ohlcv_density import merge_ohlcv_preferring_dense_pandas
+from scripts.collect_daily_snapshot import _merge_feather
 
 
 def _row(ts: str, o: float, h: float, low: float, c: float) -> pd.DataFrame:
@@ -94,3 +95,25 @@ def test_empty_incoming_returns_existing():
     merged = merge_ohlcv_preferring_dense_pandas(existing, pd.DataFrame(), ts_col="date")
     assert len(merged) == 1
     assert merged.iloc[0]["close"] == 100.0
+
+
+def test_nan_rows_are_not_treated_as_dense():
+    """Malformed NaN OHLC must not dislodge a valid dense candle."""
+    existing = _row("2026-01-01T00:00:00Z", 100.0, 101.0, 99.0, 100.0)
+    incoming = _row("2026-01-01T00:00:00Z", 100.0, float("nan"), float("nan"), 100.0)
+
+    merged = merge_ohlcv_preferring_dense_pandas(existing, incoming, ts_col="date")
+
+    assert merged.iloc[0]["high"] == 101.0
+
+
+def test_explicit_merge_can_replace_dense_row(tmp_path):
+    """Repair mode must be able to apply a corrected flat API candle."""
+    path = tmp_path / "candles.feather"
+    existing = _row("2026-01-01T00:00:00Z", 100.0, 101.0, 99.0, 100.0)
+    corrected = _row("2026-01-01T00:00:00Z", 100.0, 100.0, 100.0, 100.0)
+    _merge_feather(existing, path)
+    _merge_feather(corrected, path, prefer_dense=False)
+
+    stored = pd.read_feather(path)
+    assert stored.iloc[0]["high"] == 100.0

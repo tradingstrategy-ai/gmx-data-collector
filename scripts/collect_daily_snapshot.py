@@ -131,11 +131,16 @@ _TIMEFRAME_DELTAS = {
 APY_PERIODS = ["1d", "7d", "30d", "90d", "180d", "1y", "total"]
 
 
-def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
+def _merge_feather(
+    new_df: pd.DataFrame,
+    filepath: Path,
+    *,
+    prefer_dense: bool = True,
+) -> None:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
-    Existing historical data is never deleted. Overlapping timestamps
-    prefer whichever row has real intrabar movement (``high != low``); a
+    Existing historical data is never deleted. By default, overlapping
+    timestamps prefer whichever row has real intrabar movement (``high > low``); a
     flat placeholder never overwrites an already-dense row purely because
     it was fetched more recently (see
     :func:`~gmx_historical_data.ohlcv_density.merge_ohlcv_preferring_dense_pandas`).
@@ -151,6 +156,9 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
 
     :param new_df: New rows with columns ``[date, open, high, low, close, volume]``.
     :param filepath: Path to the feather file (created if missing).
+    :param prefer_dense: Preserve dense existing rows over flat incoming rows.
+        Explicit repair/force-refresh runs disable this so a corrected API row
+        can replace a previously erroneous candle.
     """
     if new_df.empty:
         return
@@ -164,7 +172,12 @@ def _merge_feather(new_df: pd.DataFrame, filepath: Path) -> None:
         if existing["date"].dt.tz is None:
             existing["date"] = existing["date"].dt.tz_localize("UTC")
         existing["date"] = existing["date"].dt.as_unit("ns")
-        combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
+        if prefer_dense:
+            combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
+        else:
+            combined = pd.concat([existing, new_df], ignore_index=True).drop_duplicates(
+                subset=["date"], keep="last"
+            )
         combined = _restore_cleared_volume(combined, existing)
     else:
         combined = new_df
@@ -930,7 +943,11 @@ def collect_and_save_ohlcv(
                     }
                 )
 
-                _merge_feather(new_rows, filepath)
+                _merge_feather(
+                    new_rows,
+                    filepath,
+                    prefer_dense=not (repair or force_refresh),
+                )
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
 
