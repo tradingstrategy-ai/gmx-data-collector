@@ -23,14 +23,20 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Pinned to the same range as the `dev` dependency group in
+      # pyproject.toml. The lint below covers the whole repo, so an
+      # unpinned ruff picking up a new minor release could fail CI on
+      # files the PR never touched.
       - name: Install ruff
-        run: pip install ruff
+        run: pip install 'ruff>=0.14.14,<0.15.0'
 
+      # Whole repo, not just src/ + tests/: scripts/ and notebooks/ were
+      # unlinted for long enough to accumulate a genuine undefined name.
       - name: Lint
-        run: ruff check src/ tests/
+        run: ruff check .
 
       - name: Format check
-        run: ruff format --check src/ tests/
+        run: ruff format --check .
 
   unit-tests:
     runs-on: ubuntu-latest
