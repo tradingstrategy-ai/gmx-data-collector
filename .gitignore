@@ -25,6 +25,14 @@ share/python-wheels/
 *.egg
 MANIFEST
 
+# uv
+# uv.lock is deliberately NOT tracked. uv cannot see `[tool.poetry.dependencies]`
+# without a PEP 621 `[project]` table, so the lock only ever covered the dev
+# group -- it looked like the project's lock while pinning none of the packages
+# the collector actually runs on. poetry.lock is the real one. `uv run` still
+# regenerates this file locally, which is fine; it just must not be committed.
+uv.lock
+
 # Poetry
 # poetry.lock is deliberately tracked: this is an application, not a library,
 # and the daily release installs from requirements-collector.txt, which is
