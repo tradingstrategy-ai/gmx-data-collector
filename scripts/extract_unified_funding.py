@@ -458,10 +458,7 @@ def apply_direction_to_rates(
         rates.join(dir_df, on="timestamp", how="left")
         .sort(sort_keys)
         .with_columns(
-            pl.col("direction_longs_pay")
-            .forward_fill()
-            .over(group_keys)
-            .alias("longs_pay_shorts")
+            pl.col("direction_longs_pay").forward_fill().over(group_keys).alias("longs_pay_shorts")
         )
         .drop("direction_longs_pay")
     )
@@ -539,9 +536,7 @@ def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
         "symbol",
         "market",
     ]
-    merged = merged.with_columns(
-        [pl.col(c).forward_fill() for c in ff_cols if c in merged.columns]
-    )
+    merged = merged.with_columns([pl.col(c).forward_fill() for c in ff_cols if c in merged.columns])
     merged = merged.with_columns(
         pl.col("update_count").fill_null(0).cast(pl.UInt32),
     )

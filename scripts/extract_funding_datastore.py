@@ -157,8 +157,10 @@ def prefetch_block_timestamps(
             except Exception as exc:
                 if attempt == 4:
                     raise
-                delay = min(4 ** attempt, 60)
-                console.print(f"  [yellow]Timestamp batch {i} error (attempt {attempt+1}/5): {exc} — retry in {delay}s[/yellow]")
+                delay = min(4**attempt, 60)
+                console.print(
+                    f"  [yellow]Timestamp batch {i} error (attempt {attempt + 1}/5): {exc} — retry in {delay}s[/yellow]"
+                )
                 time.sleep(delay)
         for item in resp.json():
             result = item.get("result")

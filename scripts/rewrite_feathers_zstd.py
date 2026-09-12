@@ -95,9 +95,7 @@ def rewrite_one(path: Path, *, dry_run: bool) -> tuple[int, int]:
                 f"rewritten={len(check)}"
             )
         if "close" in df.columns and not check["close"].equals(df["close"]):
-            raise RuntimeError(
-                "close column drift after rewrite (values not bit-identical)"
-            )
+            raise RuntimeError("close column drift after rewrite (values not bit-identical)")
 
         # Atomic replace.
         os.replace(tmp_path, path)
@@ -151,9 +149,7 @@ def main() -> int:
 
     # Skip macOS AppleDouble resource forks (``._*``) that appear when an
     # external drive is mounted on macOS.  They are not real feather files.
-    files = sorted(
-        p for p in args.directory.glob(args.pattern) if not p.name.startswith("._")
-    )
+    files = sorted(p for p in args.directory.glob(args.pattern) if not p.name.startswith("._"))
     logger.info("Found %d files matching %s (after ._ filter)", len(files), args.pattern)
 
     total_before = 0
