@@ -19,6 +19,9 @@ honest:
    module scope.
 4. The daily entry point still does not import HyperSync at module scope, so
    a future drift costs the optional volume phase rather than the release.
+5. CI keeps a job that installs that file and imports the entry points under
+   it -- everything above is static analysis, which cannot tell a pinned
+   package from an importable one.
 """
 
 import ast
@@ -26,10 +29,13 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 WORKFLOWS = Path(".github/workflows")
 SRC = Path("src")
 REQUIREMENTS = Path("requirements-collector.txt")
 GENERATOR = Path("scripts/export_requirements.py")
+SMOKE_SCRIPT = Path("scripts/smoke_imports.py")
 FIRST_PARTY = "gmx_historical_data"
 
 #: Workflows that install dependencies and then run a collector entry point.
@@ -220,4 +226,29 @@ def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
         "collect_daily_snapshot imports hypersync at module scope, so a "
         "missing optional dependency fails the whole release instead of "
         "only the volume phase"
+    )
+
+
+def test_ci_smoke_tests_the_production_install() -> None:
+    """Every check in this file is static -- it parses the AST and the
+    requirements text without importing anything.
+
+    That catches a missing pin but not a broken one: a package that resolves
+    yet fails to import, or a transitive dependency dropped upstream. Only
+    installing ``requirements-collector.txt`` and importing under it catches
+    those, which is what the ``collector-smoke`` job exists to do. Without it,
+    the nightly release is once again the first thing to find out."""
+    test_workflow = yaml.safe_load((WORKFLOWS / "test.yml").read_text(encoding="utf-8"))
+
+    job = test_workflow["jobs"].get("collector-smoke")
+    assert job is not None, "test.yml has no collector-smoke job"
+
+    runs = " ".join(step.get("run", "") for step in job["steps"])
+
+    assert REQUIREMENTS.name in runs, (
+        f"collector-smoke does not install {REQUIREMENTS.name}, so it is not "
+        f"testing the environment the daily release actually runs in"
+    )
+    assert SMOKE_SCRIPT.name in runs, (
+        f"collector-smoke does not run {SMOKE_SCRIPT.name}, so nothing imports the entry points"
     )
