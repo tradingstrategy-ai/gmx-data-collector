@@ -20,6 +20,29 @@ Size lives on chain instead. The collector reads three events from the GMX v2
 | `PositionDecrease` | A perp position closed or reduced | same |
 | `SwapInfo` | A GM-pool swap | `amountIn`/`amountOut`, `tokenInPrice`/`tokenOutPrice` |
 
+### HyperSync is optional to the daily collector
+
+Volume is the only part of the daily snapshot that needs HyperSync, an
+`hypersync` install and an Arbitrum RPC. Candles, OI, funding, tickers, APY and
+the 24h volume feed all come from the keyless REST API and are worth publishing
+without it, so every HyperSync failure — missing token, missing RPC, an outage,
+or the package simply not being installed — costs that day's volume and nothing
+else. The checkpoint stays where it was, so the skipped block range is picked up
+on the next run.
+
+Two consequences worth knowing about:
+
+- `scripts/collect_daily_snapshot.py` must not import
+  `gmx_historical_data.trade_tick_collector` (or anything else that reaches
+  `hypersync`) at module scope. It imports them inside `_collect_ticks_sync`
+  instead. A module-level import turns an optional dependency into a hard
+  failure of the whole release — which is exactly what happened on
+  2026-09-11 and 2026-09-12, when the CI install list had no `hypersync` in it.
+  `tests/test_workflow_dependencies.py` guards both halves of that.
+- The release and collect workflows install a hand-written package list rather
+  than `pyproject.toml`, so adding a new third-party import to the collector's
+  module-scope graph means updating those lists too.
+
 ## What `volume` means in the feather
 
 **`volume` is perp base-token volume.** For `BTC_USDC_USDC-1h-futures.feather`

@@ -30,7 +30,7 @@ from hypersync import BlockField, FieldSelection, LogField, LogSelection, Query
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 
-from gmx_historical_data.config import EVENT_EMITTER_ADDRESS
+from gmx_historical_data.config import DEFAULT_MAX_BLOCKS, EVENT_EMITTER_ADDRESS
 from gmx_historical_data.gmx_trade_ticks import (
     PERP_EVENTS,
     SWAP_EVENT,
@@ -54,9 +54,10 @@ TRADE_EVENTS: tuple[str, ...] = (*PERP_EVENTS, SWAP_EVENT)
 #: Arbitrum produces roughly 4 blocks a second; one day is about 345k.
 BLOCKS_PER_DAY = 345_600
 
-#: Default ceiling on a single run's scan, so catching up after an outage
-#: cannot blow the daily job's time budget in one go.
-DEFAULT_MAX_BLOCKS = 500_000
+#: ``DEFAULT_MAX_BLOCKS`` is imported from :mod:`gmx_historical_data.config`
+#: above and stays re-exported here for the call sites that expect it. It lives
+#: in ``config`` because that module is HyperSync-free, so the daily snapshot
+#: can read the default without importing this collector at module scope.
 
 
 def event_topic(name: str) -> str:
