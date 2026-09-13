@@ -1,34 +1,77 @@
-"""The daily cron installs a hand-written package list, not ``pyproject.toml``.
+"""The daily cron installs generated, pinned requirements -- not a hand list.
 
 ``release-data.yml``, ``collect-gmx-data.yml`` and ``collect-volume.yml`` each
-run a repo entry point after a literal ``uv pip install <list>``. That list is
-maintained by hand, so it can drift from what the code actually imports -- and
-it did. The volume feature added a module-level ``import hypersync``, the list
-was never updated, and every scheduled release died at import time for two
-days (runs 34554048666 and 34667231822) while ``test.yml`` stayed green
-because it installs from ``pyproject.toml`` via Poetry.
+run a repo entry point after installing dependencies. That install used to be a
+literal ``uv pip install <list>`` maintained by hand, so it could drift from
+what the code actually imports -- and it did. The volume feature added a
+module-level ``import hypersync``, the list was never updated, and every
+scheduled release died at import time for two days (runs 34554048666 and
+34667231822) while ``test.yml`` stayed green because it installed from
+``pyproject.toml`` via Poetry.
 
-Two invariants keep that from recurring:
+The list is now generated from ``poetry.lock`` by
+``scripts/export_requirements.py``. These tests keep the generated file
+honest:
 
-1. The hand-written list installs what the collector imports.
-2. The daily entry point does not import HyperSync at module scope at all, so
+1. The workflows install from that file rather than naming packages inline.
+2. The committed file matches what the generator produces from the lock.
+3. The file covers every third-party package the entry points import at
+   module scope.
+4. The daily entry point still does not import HyperSync at module scope, so
    a future drift costs the optional volume phase rather than the release.
+5. CI keeps a job that installs that file and imports the entry points under
+   it -- everything above is static analysis, which cannot tell a pinned
+   package from an importable one.
 """
 
 import ast
+import importlib.util
+import subprocess
+import sys
 from pathlib import Path
 
-WORKFLOWS = Path(".github/workflows")
-SRC = Path("src")
-ENTRY_POINT = Path("scripts/collect_daily_snapshot.py")
-FIRST_PARTY = "gmx_historical_data"
+import yaml
 
-#: Workflows that install by hand and then run a collector entry point.
-COLLECTOR_WORKFLOWS = (
-    "release-data.yml",
-    "collect-gmx-data.yml",
-    "collect-volume.yml",
-)
+SRC = Path("src")
+REQUIREMENTS = Path("requirements-collector.txt")
+GENERATOR = Path("scripts/export_requirements.py")
+SMOKE_SCRIPT = Path("scripts/smoke_imports.py")
+
+
+def _load_smoke_module():
+    """Load ``scripts/smoke_imports.py`` as a module.
+
+    ``scripts/`` is not a package, so it cannot simply be imported. Loading it
+    by path is worth the ceremony: the workflow list, the first-party package
+    name and the entry-point discovery all live there, and duplicating them
+    here is the exact silent drift this file exists to catch -- edit one copy
+    and the smoke job would quietly cover less than these tests assert.
+
+    :returns: The imported ``smoke_imports`` module.
+    """
+    spec = importlib.util.spec_from_file_location("smoke_imports", SMOKE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_smoke = _load_smoke_module()
+
+WORKFLOWS = _smoke.WORKFLOWS
+FIRST_PARTY = _smoke.FIRST_PARTY
+COLLECTOR_WORKFLOWS = _smoke.COLLECTOR_WORKFLOWS
+
+#: Import name -> distribution name, for the packages whose two names differ.
+#: Resolving this at runtime via ``importlib.metadata`` would only work when
+#: the package happens to be installed, which is exactly the condition this
+#: test exists to stop depending on.
+IMPORT_TO_DISTRIBUTION = {
+    "eth_defi": "web3-ethereum-defi",
+    "eth_utils": "eth-utils",
+    "eth_abi": "eth-abi",
+    "yaml": "pyyaml",
+    "dateutil": "python-dateutil",
+}
 
 
 def _install_lines(workflow_name: str) -> list[str]:
@@ -39,6 +82,52 @@ def _install_lines(workflow_name: str) -> list[str]:
     """
     text = (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
     return [line for line in text.splitlines() if "uv pip install" in line]
+
+
+def _normalise(name: str) -> str:
+    """Normalise a distribution name for comparison.
+
+    Both sides of the coverage check must normalise identically, or the test
+    silently under-reports -- so they share this one function.
+
+    :param name: Raw distribution or import name.
+    :returns: Lower-cased name with ``_`` replaced by ``-``.
+    """
+    return name.lower().replace("_", "-")
+
+
+def _pinned_distributions() -> set[str]:
+    """Return the normalised distribution names pinned in the requirements file.
+
+    :returns: Names in the comparison form produced by :func:`_normalise`.
+    """
+    names = set()
+    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = line.split(";")[0].split("==")[0].strip()
+        names.add(_normalise(name))
+    return names
+
+
+def _entry_point_files() -> list[tuple[str, Path]]:
+    """Return every entry point the collector workflows execute.
+
+    Derived from the workflows via ``smoke_imports.discover_entry_points()``
+    rather than listed here, so this check and the CI smoke job always cover
+    the same set.
+
+    :returns: ``(label, path)`` pairs for each script and first-party module.
+    """
+    modules, scripts = _smoke.discover_entry_points()
+
+    entries = [(str(path), path) for path in scripts]
+    for dotted in modules:
+        path = _module_file(dotted)
+        if path is not None:
+            entries.append((dotted, path))
+    return entries
 
 
 def _module_file(dotted: str) -> Path | None:
@@ -102,18 +191,66 @@ def _third_party_import_closure(entry: Path) -> set[str]:
     return third_party
 
 
-def test_collector_workflows_install_hypersync() -> None:
-    """HyperSync is a declared ``pyproject.toml`` dependency, but these
-    workflows do not read ``pyproject.toml``. Without it in their literal
-    list, the tick phase can never collect a single fill."""
-    missing = []
+def test_collector_workflows_install_from_generated_requirements() -> None:
+    """The whole point is that no workflow names packages inline again.
+
+    A literal package list is what drifted from the code and killed two
+    releases; the install must come from the generated file instead."""
+    offenders = []
     for name in COLLECTOR_WORKFLOWS:
         lines = _install_lines(name)
         assert lines, f"{name}: no `uv pip install` step to check"
-        if not any("hypersync" in line for line in lines):
-            missing.append(name)
+        if not all(REQUIREMENTS.name in line for line in lines):
+            offenders.append(name)
 
-    assert not missing, f"workflows run the collector without installing hypersync: {missing}"
+    assert not offenders, (
+        f"workflows install a hand-written package list instead of {REQUIREMENTS.name}: {offenders}"
+    )
+
+
+def test_committed_requirements_match_the_lock() -> None:
+    """A stale generated file is a hand-written list with extra steps.
+
+    ``--check`` re-renders from ``poetry.lock`` and compares, so forgetting to
+    regenerate after a dependency change fails a PR instead of a release."""
+    result = subprocess.run(
+        [sys.executable, str(GENERATOR), "--check"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"{REQUIREMENTS.name} is out of sync with poetry.lock.\n{result.stderr}"
+    )
+
+
+def test_requirements_cover_every_module_scope_import() -> None:
+    """The invariant the old hand-written list could not hold.
+
+    Every third-party package an entry point imports at module scope must be
+    pinned, or the entry point cannot start on the runner."""
+    pinned = _pinned_distributions()
+
+    missing: list[str] = []
+    for label, entry in _entry_point_files():
+        for imported in sorted(_third_party_import_closure(entry)):
+            if imported in sys.stdlib_module_names:
+                continue
+            dist = IMPORT_TO_DISTRIBUTION.get(imported, imported)
+            if _normalise(dist) not in pinned:
+                missing.append(f"{label} imports {imported!r} (distribution {dist!r})")
+
+    assert not missing, (
+        f"entry points import packages that {REQUIREMENTS.name} does not pin: {missing}"
+    )
+
+
+def test_hypersync_is_pinned_for_the_optional_volume_phase() -> None:
+    """HyperSync is imported at call time, so the closure check above cannot
+    see it -- but the tick phase can never collect a fill without it."""
+    assert "hypersync" in _pinned_distributions(), (
+        f"{REQUIREMENTS.name} does not pin hypersync, so the trade-tick phase "
+        f"degrades to 'no volume today' on every run"
+    )
 
 
 def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
@@ -123,10 +260,35 @@ def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
     A module-level ``import hypersync`` throws that away: it takes down
     candles, OI, funding, tickers and APY, none of which need HyperSync at
     all. Keep the import inside the phase that uses it."""
-    closure = _third_party_import_closure(ENTRY_POINT)
+    closure = _third_party_import_closure(Path("scripts/collect_daily_snapshot.py"))
 
     assert "hypersync" not in closure, (
         "collect_daily_snapshot imports hypersync at module scope, so a "
         "missing optional dependency fails the whole release instead of "
         "only the volume phase"
+    )
+
+
+def test_ci_smoke_tests_the_production_install() -> None:
+    """Every check in this file is static -- it parses the AST and the
+    requirements text without importing anything.
+
+    That catches a missing pin but not a broken one: a package that resolves
+    yet fails to import, or a transitive dependency dropped upstream. Only
+    installing ``requirements-collector.txt`` and importing under it catches
+    those, which is what the ``collector-smoke`` job exists to do. Without it,
+    the nightly release is once again the first thing to find out."""
+    test_workflow = yaml.safe_load((WORKFLOWS / "test.yml").read_text(encoding="utf-8"))
+
+    job = test_workflow["jobs"].get("collector-smoke")
+    assert job is not None, "test.yml has no collector-smoke job"
+
+    runs = " ".join(step.get("run", "") for step in job["steps"])
+
+    assert REQUIREMENTS.name in runs, (
+        f"collector-smoke does not install {REQUIREMENTS.name}, so it is not "
+        f"testing the environment the daily release actually runs in"
+    )
+    assert SMOKE_SCRIPT.name in runs, (
+        f"collector-smoke does not run {SMOKE_SCRIPT.name}, so nothing imports the entry points"
     )

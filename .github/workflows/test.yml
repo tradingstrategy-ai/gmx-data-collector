@@ -59,6 +59,14 @@ jobs:
       - name: Install dependencies
         run: poetry install
 
+      # requirements-collector.txt is generated from poetry.lock, and a test
+      # checks it matches. Nothing checked that the lock itself still matches
+      # pyproject.toml -- so editing a dependency without re-running
+      # `poetry lock` left the whole chain green while the release installed
+      # something else.
+      - name: Check poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
       - name: Run unit tests
         env:
           JSON_RPC_ARBITRUM: "https://arb1.arbitrum.io/rpc"
@@ -72,6 +80,32 @@ jobs:
             --ignore=tests/test_gmx_token_discovery.py \
             --ignore=tests/test_live_funding.py \
             -x
+
+  # The unit-tests job installs the full dev environment via Poetry, so it
+  # cannot catch a dependency the *release* is missing -- that is exactly how
+  # two scheduled releases died at import time while CI stayed green
+  # (2026-09-11/12). This job installs what the daily collector installs,
+  # byte for byte, and does nothing but import the entry points.
+  collector-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same uv setup and Python version as release-data.yml, so this
+      # reproduces the release environment rather than an approximation.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          cache-dependency-glob: 'requirements-collector.txt'
+
+      - name: Install collector dependencies
+        run: uv pip install -r requirements-collector.txt
+
+      - name: Import every collector entry point
+        run: python scripts/smoke_imports.py
 
   integration-tests:
     runs-on: ubuntu-latest
