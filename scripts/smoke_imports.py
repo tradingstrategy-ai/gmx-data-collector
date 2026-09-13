@@ -49,26 +49,21 @@ FROM_IMPORT = re.compile(rf"from\s+({FIRST_PARTY}[.\w]*)\s+import")
 SCRIPT_RUN = re.compile(r"python\s+((?:[\w./-]+/)?scripts/[\w.-]+\.py)")
 
 
-def _workflow_text() -> str:
-    """Return every collector workflow concatenated.
+def _targets_in(workflow_name: str) -> tuple[set[str], set[Path]]:
+    """Find the modules and scripts one workflow executes.
 
-    :returns: The combined YAML source, searched as plain text -- these appear
-        inside ``run:`` blocks and heredocs, which a YAML parser would hand
-        back as opaque strings anyway.
-    """
-    return "\n".join((WORKFLOWS / name).read_text(encoding="utf-8") for name in COLLECTOR_WORKFLOWS)
-
-
-def discover() -> tuple[set[str], set[Path]]:
-    """Find the modules and scripts the collector workflows execute.
+    The file is searched as plain text: these invocations live inside ``run:``
+    blocks and heredocs, which a YAML parser would hand back as opaque strings
+    anyway.
 
     Workflow paths are written relative to a checkout that some workflows put
     under ``code/``; that prefix is stripped so the path resolves from the
     repository root either way.
 
+    :param workflow_name: File name under ``.github/workflows``.
     :returns: Tuple of (dotted module names, entry-point script paths).
     """
-    text = _workflow_text()
+    text = (WORKFLOWS / workflow_name).read_text(encoding="utf-8")
 
     modules = set(MODULE_RUN.findall(text)) | set(FROM_IMPORT.findall(text))
 
@@ -78,6 +73,39 @@ def discover() -> tuple[set[str], set[Path]]:
         if path.parts and path.parts[0] == "code":
             path = Path(*path.parts[1:])
         scripts.add(path)
+
+    return modules, scripts
+
+
+def discover_entry_points() -> tuple[set[str], set[Path]]:
+    """Find everything the collector workflows execute.
+
+    Each workflow must yield at least one target. Matching per workflow rather
+    than against all three concatenated is what makes that check possible: a
+    workflow that stops matching -- switching to ``python3 -m``, or invoking
+    through a shell variable -- would otherwise drop out of the smoke test
+    while the other two kept the job green, which is the silent coverage loss
+    this script exists to prevent.
+
+    :returns: Tuple of (dotted module names, entry-point script paths).
+    :raises ValueError: If any collector workflow yields no targets at all.
+    """
+    modules: set[str] = set()
+    scripts: set[Path] = set()
+    barren = []
+
+    for name in COLLECTOR_WORKFLOWS:
+        found_modules, found_scripts = _targets_in(name)
+        if not found_modules and not found_scripts:
+            barren.append(name)
+        modules |= found_modules
+        scripts |= found_scripts
+
+    if barren:
+        raise ValueError(
+            f"no entry points found in {barren} -- the smoke test is no longer "
+            f"covering them. Check how those workflows invoke Python."
+        )
 
     return modules, scripts
 
@@ -105,9 +133,10 @@ def main() -> int:
     """
     sys.path.insert(0, "src")
 
-    modules, scripts = discover()
-    if not modules and not scripts:
-        print("ERROR: no entry points discovered in the collector workflows", file=sys.stderr)
+    try:
+        modules, scripts = discover_entry_points()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
     failures: list[str] = []

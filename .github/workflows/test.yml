@@ -59,6 +59,14 @@ jobs:
       - name: Install dependencies
         run: poetry install
 
+      # requirements-collector.txt is generated from poetry.lock, and a test
+      # checks it matches. Nothing checked that the lock itself still matches
+      # pyproject.toml -- so editing a dependency without re-running
+      # `poetry lock` left the whole chain green while the release installed
+      # something else.
+      - name: Check poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
       - name: Run unit tests
         env:
           JSON_RPC_ARBITRUM: "https://arb1.arbitrum.io/rpc"

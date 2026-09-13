@@ -25,31 +25,41 @@ honest:
 """
 
 import ast
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
 import yaml
 
-WORKFLOWS = Path(".github/workflows")
 SRC = Path("src")
 REQUIREMENTS = Path("requirements-collector.txt")
 GENERATOR = Path("scripts/export_requirements.py")
 SMOKE_SCRIPT = Path("scripts/smoke_imports.py")
-FIRST_PARTY = "gmx_historical_data"
 
-#: Workflows that install dependencies and then run a collector entry point.
-COLLECTOR_WORKFLOWS = (
-    "release-data.yml",
-    "collect-gmx-data.yml",
-    "collect-volume.yml",
-)
 
-#: Entry points those workflows execute, as (label, path) pairs.
-ENTRY_POINTS = (
-    ("collect_daily_snapshot", Path("scripts/collect_daily_snapshot.py")),
-    ("subsquid_volume", SRC / FIRST_PARTY / "subsquid_volume.py"),
-)
+def _load_smoke_module():
+    """Load ``scripts/smoke_imports.py`` as a module.
+
+    ``scripts/`` is not a package, so it cannot simply be imported. Loading it
+    by path is worth the ceremony: the workflow list, the first-party package
+    name and the entry-point discovery all live there, and duplicating them
+    here is the exact silent drift this file exists to catch -- edit one copy
+    and the smoke job would quietly cover less than these tests assert.
+
+    :returns: The imported ``smoke_imports`` module.
+    """
+    spec = importlib.util.spec_from_file_location("smoke_imports", SMOKE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_smoke = _load_smoke_module()
+
+WORKFLOWS = _smoke.WORKFLOWS
+FIRST_PARTY = _smoke.FIRST_PARTY
+COLLECTOR_WORKFLOWS = _smoke.COLLECTOR_WORKFLOWS
 
 #: Import name -> distribution name, for the packages whose two names differ.
 #: Resolving this at runtime via ``importlib.metadata`` would only work when
@@ -74,11 +84,22 @@ def _install_lines(workflow_name: str) -> list[str]:
     return [line for line in text.splitlines() if "uv pip install" in line]
 
 
+def _normalise(name: str) -> str:
+    """Normalise a distribution name for comparison.
+
+    Both sides of the coverage check must normalise identically, or the test
+    silently under-reports -- so they share this one function.
+
+    :param name: Raw distribution or import name.
+    :returns: Lower-cased name with ``_`` replaced by ``-``.
+    """
+    return name.lower().replace("_", "-")
+
+
 def _pinned_distributions() -> set[str]:
     """Return the normalised distribution names pinned in the requirements file.
 
-    :returns: Lower-cased names with ``_`` normalised to ``-``, matching the
-        comparison form used against import names.
+    :returns: Names in the comparison form produced by :func:`_normalise`.
     """
     names = set()
     for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
@@ -86,8 +107,27 @@ def _pinned_distributions() -> set[str]:
         if not line or line.startswith("#"):
             continue
         name = line.split(";")[0].split("==")[0].strip()
-        names.add(name.lower().replace("_", "-"))
+        names.add(_normalise(name))
     return names
+
+
+def _entry_point_files() -> list[tuple[str, Path]]:
+    """Return every entry point the collector workflows execute.
+
+    Derived from the workflows via ``smoke_imports.discover_entry_points()``
+    rather than listed here, so this check and the CI smoke job always cover
+    the same set.
+
+    :returns: ``(label, path)`` pairs for each script and first-party module.
+    """
+    modules, scripts = _smoke.discover_entry_points()
+
+    entries = [(str(path), path) for path in scripts]
+    for dotted in modules:
+        path = _module_file(dotted)
+        if path is not None:
+            entries.append((dotted, path))
+    return entries
 
 
 def _module_file(dotted: str) -> Path | None:
@@ -191,12 +231,12 @@ def test_requirements_cover_every_module_scope_import() -> None:
     pinned = _pinned_distributions()
 
     missing: list[str] = []
-    for label, entry in ENTRY_POINTS:
+    for label, entry in _entry_point_files():
         for imported in sorted(_third_party_import_closure(entry)):
             if imported in sys.stdlib_module_names:
                 continue
             dist = IMPORT_TO_DISTRIBUTION.get(imported, imported)
-            if dist.lower().replace("_", "-") not in pinned:
+            if _normalise(dist) not in pinned:
                 missing.append(f"{label} imports {imported!r} (distribution {dist!r})")
 
     assert not missing, (
@@ -220,7 +260,7 @@ def test_daily_entry_point_does_not_import_hypersync_at_module_scope() -> None:
     A module-level ``import hypersync`` throws that away: it takes down
     candles, OI, funding, tickers and APY, none of which need HyperSync at
     all. Keep the import inside the phase that uses it."""
-    closure = _third_party_import_closure(ENTRY_POINTS[0][1])
+    closure = _third_party_import_closure(Path("scripts/collect_daily_snapshot.py"))
 
     assert "hypersync" not in closure, (
         "collect_daily_snapshot imports hypersync at module scope, so a "

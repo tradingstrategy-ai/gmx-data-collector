@@ -46,10 +46,18 @@ def _marker_for(package: dict, group: str) -> str | None:
     disagree (``colorama`` is ``platform_system == "Windows"`` for ``main``
     but ``sys_platform == "win32"`` for ``dev``).
 
+    A table that omits ``group`` means the package is unconditional *for that
+    group*, and the marker constrains only the other groups -- not that the
+    marker is missing. ``typing-extensions`` is the live example: it carries
+    ``{"dev": 'python_version < "3.13"'}`` while being an unconditional
+    ``main`` dependency. Raising on the missing key instead (tempting, since
+    emitting a Windows-only package unconditionally would break the Linux
+    install) rejects that valid lock outright -- verified by trying it.
+
     :param package: One ``[[package]]`` entry from the lock.
     :param group: Dependency group being exported.
     :returns: The marker expression, or ``None`` if the package is
-        unconditional.
+        unconditional for ``group``.
     """
     markers = package.get("markers")
     if markers is None:
@@ -71,6 +79,7 @@ def render(lock_path: Path, group: str) -> str:
     :param lock_path: Path to ``poetry.lock``.
     :param group: Dependency group to export, e.g. ``main``.
     :returns: Full file contents, including the generated-file header.
+    :raises ValueError: If the lock has no packages in ``group``.
     """
     lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
 
@@ -85,7 +94,7 @@ def render(lock_path: Path, group: str) -> str:
         lines.append(entry)
 
     if not lines:
-        raise SystemExit(f"no packages found in lock group {group!r}")
+        raise ValueError(f"no packages found in lock group {group!r}")
 
     return HEADER.format(group=group) + "\n" + "\n".join(sorted(lines)) + "\n"
 
@@ -107,7 +116,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    rendered = render(args.lock, args.group)
+    # Exit codes are decided here, not in `render()` -- a render failure is a
+    # bad lock, which the caller should see as a message rather than a
+    # traceback.
+    try:
+        rendered = render(args.lock, args.group)
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
