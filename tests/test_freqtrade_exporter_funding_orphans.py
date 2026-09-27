@@ -13,6 +13,7 @@ sitting in the output directory that this run can no longer produce.
 """
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 import polars as pl
 import pytest
@@ -53,6 +54,34 @@ def _touch_export(gmx_dir, pair: str, variant: str) -> None:
     """
     gmx_dir.mkdir(parents=True, exist_ok=True)
     (gmx_dir / f"{pair}-{variant}-funding_rate.feather").write_bytes(b"")
+
+
+def _write_external_variant_export(gmx_dir, pair: str, variant: str, newest: datetime) -> None:
+    """Write a live external export with a readable ``date`` column.
+
+    Unlike :func:`_touch_export`, this produces a real feather so the
+    staleness check in ``find_stale_orphaned_funding_variants`` can read a
+    newest-bar timestamp off it rather than treating it as unreadable.
+
+    :param gmx_dir: ``{output}/gmx/futures`` directory.
+    :param pair: Freqtrade pair stem, e.g. ``BTC_USDC_USDC``.
+    :param variant: Variant token, e.g. ``8h``.
+    :param newest: Timestamp of the export's final bar.
+    """
+    gmx_dir.mkdir(parents=True, exist_ok=True)
+    frame = pl.DataFrame(
+        {
+            "date": pl.datetime_range(
+                newest - timedelta(hours=24), newest, "1h", eager=True
+            ).dt.replace_time_zone("UTC"),
+            "open": [0.0] * 25,
+            "high": [0.0] * 25,
+            "low": [0.0] * 25,
+            "close": [0.0] * 25,
+            "volume": [0.0] * 25,
+        }
+    )
+    frame.write_ipc(gmx_dir / f"{pair}-{variant}-funding_rate.feather")
 
 
 class TestFindOrphanedFundingVariants:
@@ -124,27 +153,33 @@ class TestExportFundingWarnsAboutOrphans:
         data_dir = tmp_path / "data"
         out_dir = tmp_path / "out"
         _write_funding_source(data_dir, "BTC", "1h")
-        recent = out_dir / "gmx" / "futures"
-        recent.mkdir(parents=True, exist_ok=True)
-        frame = pl.DataFrame(
-            {
-                "date": pl.datetime_range(
-                    pl.datetime(2026, 9, 11), pl.datetime(2026, 9, 12), "1h", eager=True
-                ).dt.replace_time_zone("UTC"),
-                "open": [0.0] * 25,
-                "high": [0.0] * 25,
-                "low": [0.0] * 25,
-                "close": [0.0] * 25,
-                "volume": [0.0] * 25,
-            }
+        _write_external_variant_export(
+            out_dir / "gmx" / "futures", "BTC_USDC_USDC", "8h", datetime.now(UTC)
         )
-        frame.write_ipc(recent / "BTC_USDC_USDC-8h-funding_rate.feather")
 
         exporter = FreqtradeExporter(data_dir, out_dir)
         with caplog.at_level(logging.WARNING):
             exporter.export_funding()
 
         assert "8h" not in caplog.text
+
+    def test_old_external_variant_is_called_stale(self, tmp_path, caplog):
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        _write_external_variant_export(
+            out_dir / "gmx" / "futures",
+            "BTC_USDC_USDC",
+            "8h",
+            datetime.now(UTC) - timedelta(days=30),
+        )
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding()
+
+        assert "8h" in caplog.text
+        assert "not produced by this exporter" in caplog.text.lower()
 
     def test_clean_export_warns_about_nothing(self, tmp_path, caplog):
         data_dir = tmp_path / "data"
