@@ -947,6 +947,16 @@ class FreqtradeExporter:
         OHLCV columns set to 0.  Uses ``funding_rate_hourly`` as the
         rate value (falls back to ``funding_rate`` if hourly is missing).
 
+        The rate is exported signed.  The rates parquet stores a magnitude
+        and keeps the direction in ``longs_pay_shorts``, while Freqtrade
+        reads a positive rate as longs paying shorts (it charges longs and
+        credits shorts).  So a row with a known direction exports
+        ``+|rate|`` when longs pay and ``-|rate|`` when shorts pay, the same
+        convention as ``funding_fee_long``.  A row whose direction is
+        ``null`` (before the first direction observation) keeps its value,
+        and a frame without a ``longs_pay_shorts`` column (an already-signed
+        source) passes through unchanged.
+
         The output is restricted to the canonical Freqtrade schema
         (``date, open, high, low, close, volume``).  Earlier versions of
         this method passed source columns through, which caused width
@@ -959,6 +969,17 @@ class FreqtradeExporter:
             six columns: ``date, open, high, low, close, volume``.
         """
         col = "funding_rate_hourly" if "funding_rate_hourly" in df.columns else "funding_rate"
+        if "longs_pay_shorts" in df.columns:
+            rate = pl.col(col).cast(pl.Float64)
+            longs_pay = pl.col("longs_pay_shorts").cast(pl.Boolean)
+            df = df.with_columns(
+                pl.when(longs_pay.is_null())
+                .then(rate)
+                .when(longs_pay)
+                .then(rate.abs())
+                .otherwise(-rate.abs())
+                .alias(col)
+            )
         df = df.rename({"timestamp": "date", col: "open"})
         df = df.with_columns(
             [
