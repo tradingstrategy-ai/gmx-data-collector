@@ -21,6 +21,7 @@ import pytest
 from gmx_historical_data.freqtrade_exporter import (
     FreqtradeExporter,
     find_orphaned_funding_variants,
+    find_stale_orphaned_funding_variants,
 )
 
 
@@ -57,7 +58,7 @@ def _touch_export(gmx_dir, pair: str, variant: str) -> None:
 
 
 def _write_external_variant_export(gmx_dir, pair: str, variant: str, newest: datetime) -> None:
-    """Write a live external export with a readable ``date`` column.
+    """Write an external export with a readable ``date`` column.
 
     Unlike :func:`_touch_export`, this produces a real feather so the
     staleness check in ``find_stale_orphaned_funding_variants`` can read a
@@ -69,16 +70,15 @@ def _write_external_variant_export(gmx_dir, pair: str, variant: str, newest: dat
     :param newest: Timestamp of the export's final bar.
     """
     gmx_dir.mkdir(parents=True, exist_ok=True)
+    ts = pl.datetime_range(newest - timedelta(hours=24), newest, "1h", eager=True)
     frame = pl.DataFrame(
         {
-            "date": pl.datetime_range(
-                newest - timedelta(hours=24), newest, "1h", eager=True
-            ).dt.replace_time_zone("UTC"),
-            "open": [0.0] * 25,
-            "high": [0.0] * 25,
-            "low": [0.0] * 25,
-            "close": [0.0] * 25,
-            "volume": [0.0] * 25,
+            "date": ts.dt.replace_time_zone("UTC"),
+            "open": [0.0] * len(ts),
+            "high": [0.0] * len(ts),
+            "low": [0.0] * len(ts),
+            "close": [0.0] * len(ts),
+            "volume": [0.0] * len(ts),
         }
     )
     frame.write_ipc(gmx_dir / f"{pair}-{variant}-funding_rate.feather")
@@ -191,6 +191,56 @@ class TestExportFundingWarnsAboutOrphans:
             exporter.export_funding()
 
         assert "no longer exported" not in caplog.text.lower()
+
+
+class TestFindStaleOrphanedFundingVariants:
+    """Direct unit tests of the staleness check itself, pinned to an injected
+    ``now`` rather than :func:`datetime.now`. The end-to-end tests above warn
+    identically whether a variant is stale from age or unreadable outright,
+    so only a direct call with hardcoded dates can pin the age comparison on
+    its own and keep it deterministic forever."""
+
+    def test_variant_within_max_age_is_not_stale(self, tmp_path):
+        now = datetime(2026, 1, 15, tzinfo=UTC)
+        gmx_dir = tmp_path / "gmx" / "futures"
+        _write_external_variant_export(gmx_dir, "BTC_USDC_USDC", "8h", now - timedelta(days=1))
+
+        assert find_stale_orphaned_funding_variants(gmx_dir, {"1h"}, max_age_days=2, now=now) == {}
+
+    def test_variant_older_than_max_age_is_stale(self, tmp_path):
+        now = datetime(2026, 1, 15, tzinfo=UTC)
+        gmx_dir = tmp_path / "gmx" / "futures"
+        _write_external_variant_export(gmx_dir, "BTC_USDC_USDC", "8h", now - timedelta(days=5))
+
+        assert find_stale_orphaned_funding_variants(gmx_dir, {"1h"}, max_age_days=2, now=now) == {
+            "8h": 1
+        }
+
+    def test_boundary_one_second_inside_the_window_is_not_stale(self, tmp_path):
+        now = datetime(2026, 1, 15, tzinfo=UTC)
+        gmx_dir = tmp_path / "gmx" / "futures"
+        _write_external_variant_export(
+            gmx_dir,
+            "BTC_USDC_USDC",
+            "8h",
+            now - timedelta(days=2) + timedelta(seconds=1),
+        )
+
+        assert find_stale_orphaned_funding_variants(gmx_dir, {"1h"}, max_age_days=2, now=now) == {}
+
+    def test_boundary_one_second_past_the_window_is_stale(self, tmp_path):
+        now = datetime(2026, 1, 15, tzinfo=UTC)
+        gmx_dir = tmp_path / "gmx" / "futures"
+        _write_external_variant_export(
+            gmx_dir,
+            "BTC_USDC_USDC",
+            "8h",
+            now - timedelta(days=2) - timedelta(seconds=1),
+        )
+
+        assert find_stale_orphaned_funding_variants(gmx_dir, {"1h"}, max_age_days=2, now=now) == {
+            "8h": 1
+        }
 
 
 @pytest.mark.parametrize(
