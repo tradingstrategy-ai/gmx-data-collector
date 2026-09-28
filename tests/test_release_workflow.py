@@ -258,3 +258,50 @@ def test_collect_step_has_the_credentials_the_tick_phase_needs() -> None:
 
     assert "HYPERSYNC_API_TOKEN" in collect["env"]
     assert "JSON_RPC_ARBITRUM" in collect["env"]
+
+
+def test_registry_unreachable_surfaces_as_a_github_actions_warning() -> None:
+    """A plain ``print("WARNING: ...")`` never shows up in the Actions UI --
+    only the ``::warning::`` prefix does, and this failure mode (registry
+    flakiness reusing the previous roster) is exactly the kind of thing that
+    should be visible without opening the raw step log."""
+    text = WORKFLOW.read_text()
+
+    assert "::warning::registry unreachable" in text
+    assert 'print(f"WARNING: registry unreachable' not in text
+
+
+def test_report_is_refreshed_with_real_volume_data_before_it_ships() -> None:
+    """`generate_report` (inside "Collect daily snapshot") runs before this
+    job's own volume fetch, so data_report.txt always ships with a
+    placeholder "Volume entries: 0 markets" unless something patches it
+    afterwards with what "Collect 24h volume snapshot" just saved."""
+    text = WORKFLOW.read_text()
+
+    assert "Refresh report with 24h volume data" in text
+    assert "refresh_volume_report_section" in text
+    assert text.index("Collect 24h volume snapshot") < text.index(
+        "Refresh report with 24h volume data"
+    )
+    assert text.index("Refresh report with 24h volume data") < text.index(
+        "Show report in job summary"
+    )
+    assert text.index("Refresh report with 24h volume data") < text.index("Package tarballs")
+
+
+def test_volume_refresh_step_runs_even_if_volume_collection_fails() -> None:
+    """ "Collect 24h volume snapshot" can raise (network error, bad response)
+    rather than exiting 0 with no rows. Without `if: always()`, GitHub's
+    default `success()` condition would skip the refresh step entirely and
+    the report would still ship the original fabricated "0 markets / N/A"
+    placeholder -- exactly the bug this whole fix exists to close."""
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    refresh = next(
+        s
+        for s in workflow["jobs"]["release"]["steps"]
+        if s.get("name") == "Refresh report with 24h volume data"
+    )
+
+    assert refresh.get("if") == "always()"
