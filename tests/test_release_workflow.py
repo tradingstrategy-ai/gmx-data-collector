@@ -287,3 +287,21 @@ def test_report_is_refreshed_with_real_volume_data_before_it_ships() -> None:
         "Show report in job summary"
     )
     assert text.index("Refresh report with 24h volume data") < text.index("Package tarballs")
+
+
+def test_volume_refresh_step_runs_even_if_volume_collection_fails() -> None:
+    """ "Collect 24h volume snapshot" can raise (network error, bad response)
+    rather than exiting 0 with no rows. Without `if: always()`, GitHub's
+    default `success()` condition would skip the refresh step entirely and
+    the report would still ship the original fabricated "0 markets / N/A"
+    placeholder -- exactly the bug this whole fix exists to close."""
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    refresh = next(
+        s
+        for s in workflow["jobs"]["release"]["steps"]
+        if s.get("name") == "Refresh report with 24h volume data"
+    )
+
+    assert refresh.get("if") == "always()"

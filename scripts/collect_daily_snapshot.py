@@ -1039,10 +1039,12 @@ def _append_depth_inversion_section(lines: list[str], futures_dir: Path) -> None
         lines.append(
             f"  Largest cohort of pairs sharing one earliest candle date, per "
             f"timeframe. A shared date alone is normal (many GMX V2 markets "
-            f"launched together); truncation is flagged separately below "
-            f"when a coarser timeframe also lags its own finer sibling by "
-            f"more than {DEPTH_INVERSION_MIN_LAG_DAYS}d for "
-            f"{DEPTH_INVERSION_MIN_COHORT}+ pairs."
+            f"launched together); truncation is flagged separately below for "
+            f"every pair whose coarser timeframe lags its own finer sibling by "
+            f"more than {DEPTH_INVERSION_MIN_LAG_DAYS}d, regardless of how many "
+            f"other pairs share it -- a shared cutoff of "
+            f"{DEPTH_INVERSION_MIN_COHORT}+ pairs is called out as 'systemic' "
+            f"but a smaller one is just as real a finding."
         )
         for tf in DEPTH_TIMEFRAME_ORDER:
             cohort = largest_shared_earliest_cohort(earliest_by_tf.get(tf, {}))
@@ -1054,23 +1056,29 @@ def _append_depth_inversion_section(lines: list[str], futures_dir: Path) -> None
                 f"earliest date {cohort.date.isoformat()}"
             )
 
+        # Every transition `detect_depth_inversions` returns already has at
+        # least one genuinely lagging pair -- all of them are reported and
+        # warned on, never filtered by cohort size (that would silently drop
+        # a real truncation just because it hit only a handful of pairs).
         inversions = detect_depth_inversions(earliest_by_tf)
-        signatures = [inv for inv in inversions if inv.is_truncation_signature]
-        if signatures:
+        if inversions:
             lines.append("")
             lines.append("  Suspected truncation (coarser lags its own finer sibling):")
-            for inv in signatures:
+            for inv in inversions:
+                label = "systemic — " if inv.is_systemic else ""
                 lines.append(
-                    f"    {inv.finer_tf} -> {inv.coarser_tf}: {inv.cohort.cohort_size}/"
-                    f"{inv.compared_pairs} pairs start {inv.coarser_tf} at "
-                    f"{inv.cohort.date.isoformat()}, well after their {inv.finer_tf} history"
+                    f"    {inv.finer_tf} -> {inv.coarser_tf}: {label}{inv.inverted_pairs}/"
+                    f"{inv.compared_pairs} pairs lag by >{DEPTH_INVERSION_MIN_LAG_DAYS}d "
+                    f"(largest shared cutoff: {inv.cohort.cohort_size} pairs at "
+                    f"{inv.cohort.date.isoformat()})"
                 )
                 if os.environ.get("GITHUB_ACTIONS") == "true":
                     print(
-                        f"::warning::depth inversion suspected: {inv.cohort.cohort_size} pairs' "
-                        f"{inv.coarser_tf} candles start {inv.cohort.date.isoformat()}, "
-                        f">{DEPTH_INVERSION_MIN_LAG_DAYS}d after their {inv.finer_tf} history "
-                        f"-- looks like a truncated {inv.coarser_tf} fetch"
+                        f"::warning::depth inversion: {inv.inverted_pairs}/{inv.compared_pairs} "
+                        f"pairs' {inv.coarser_tf} candles lag their {inv.finer_tf} history by "
+                        f">{DEPTH_INVERSION_MIN_LAG_DAYS}d -- looks like a truncated "
+                        f"{inv.coarser_tf} fetch (largest shared cutoff: "
+                        f"{inv.cohort.cohort_size} pairs at {inv.cohort.date.isoformat()})"
                     )
     except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report check
         console.print(f"  [yellow]WARNING: depth-inversion check failed: {exc}[/yellow]")
@@ -1227,14 +1235,21 @@ def _row_count(path: Path) -> int:
 class VolumeSnapshot:
     """24h volume data read from ``volumes/{date}.parquet``.
 
-    :param found: Whether the file exists and was readable.
+    :param found: Whether the file existed on disk and was read successfully.
     :param count: Number of markets with a volume entry (``0`` if not found).
     :param by_market: Market address (lower-cased) -> 24h volume in USD.
+    :param error: Set only when the file *exists* but could not be read
+        (corrupt/unparseable) -- ``None`` both when ``found`` is ``True``
+        and when the file is simply absent. Kept distinct from a plain
+        "missing" file: an unreadable file on disk is a different, real
+        operational defect (a truncated write, a schema change) and must
+        not be reported the same way as "nothing was ever written here".
     """
 
     found: bool
     count: int
     by_market: dict[str, Decimal]
+    error: str | None = None
 
 
 def load_volume_snapshot(volumes_dir: Path, date_str: str) -> VolumeSnapshot:
@@ -1250,11 +1265,11 @@ def load_volume_snapshot(volumes_dir: Path, date_str: str) -> VolumeSnapshot:
     """
     path = volumes_dir / f"{date_str}.parquet"
     if not path.exists():
-        return VolumeSnapshot(found=False, count=0, by_market={})
+        return VolumeSnapshot(found=False, count=0, by_market={}, error=None)
     try:
         df = pd.read_parquet(path)
-    except Exception:
-        return VolumeSnapshot(found=False, count=0, by_market={})
+    except Exception as exc:
+        return VolumeSnapshot(found=False, count=0, by_market={}, error=str(exc))
 
     by_market: dict[str, Decimal] = {}
     for _, row in df.iterrows():
@@ -1271,13 +1286,16 @@ def load_volume_snapshot(volumes_dir: Path, date_str: str) -> VolumeSnapshot:
 def _volume_summary_lines(date_str: str, snapshot: VolumeSnapshot) -> tuple[str, str]:
     """Build the two Collection-Summary lines describing 24h volume.
 
-    :param date_str: ISO date, used in the "missing" explanation.
+    :param date_str: ISO date, used in the "missing"/"unreadable" explanation.
     :param snapshot: Output of :func:`load_volume_snapshot`.
     :returns: ``(volume entries line, total 24h volume line)``.
     """
     if not snapshot.found:
-        missing = f"not collected (volumes/{date_str}.parquet missing)"
-        return f"- Volume entries: {missing}", f"- Total 24h Volume: {missing}"
+        if snapshot.error is not None:
+            reason = f"not collected (volumes/{date_str}.parquet unreadable: {snapshot.error})"
+        else:
+            reason = f"not collected (volumes/{date_str}.parquet missing)"
+        return f"- Volume entries: {reason}", f"- Total 24h Volume: {reason}"
     total = sum(snapshot.by_market.values())
     return (
         f"- Volume entries: {snapshot.count} markets",
@@ -1325,23 +1343,31 @@ def _replace_line_by_prefix(
     header: str,
     prefix: str,
     new_line: str,
-) -> list[tuple[str | None, list[str]]]:
+) -> tuple[list[tuple[str | None, list[str]]], bool]:
     """Replace one line, identified by its prefix, inside a named section.
 
     Scoping by section header avoids ambiguity between lines that share a
     prefix in different sections (e.g. "## Date Range Summary" and
     "## Missing Days" both have a line starting with the same label).
 
+    Never appends: if ``header`` is missing, or it is present but no line
+    there starts with ``prefix``, the sections are returned byte-for-byte
+    unchanged. Appending next to a target that could not be found would
+    leave the original, un-replaced line sitting right next to the new
+    one -- a silently contradictory pair of lines is worse than a report
+    that stayed unpatched and visibly said so (the caller surfaces
+    ``replaced=False`` as a drift warning instead).
+
     :param sections: Output of :func:`_split_report_sections`.
     :param header: The exact section header to look inside, e.g.
         ``"## Collection Summary"``.
     :param prefix: The line prefix to find within that section's body.
-    :param new_line: Replacement text for the matched line. Appended to the
-        section body instead when no line with ``prefix`` is found there --
-        fail-soft against a report whose format has since shifted.
-    :returns: A new sections list with the match replaced (or appended).
+    :param new_line: Replacement text for the matched line.
+    :returns: ``(sections, replaced)`` -- ``replaced`` is ``True`` only when
+        an existing line was actually found and replaced in place.
     """
     updated: list[tuple[str | None, list[str]]] = []
+    replaced = False
     for sec_header, body in sections:
         if sec_header != header:
             updated.append((sec_header, body))
@@ -1350,10 +1376,29 @@ def _replace_line_by_prefix(
         for i, line in enumerate(new_body):
             if line.startswith(prefix):
                 new_body[i] = new_line
+                replaced = True
                 break
-        else:
-            new_body.append(new_line)
         updated.append((sec_header, new_body))
+    return updated, replaced
+
+
+def _add_report_note(
+    sections: list[tuple[str | None, list[str]]], note_lines: list[str]
+) -> list[tuple[str | None, list[str]]]:
+    """Append lines to the report preamble, right after the "Generated:" line.
+
+    Used to surface a patch-drift warning inside the shipped report itself
+    (not just the workflow log), so anyone reading ``data_report.txt``
+    directly can see some of its fields may be stale.
+
+    :param sections: Output of :func:`_split_report_sections`. The first
+        entry (``header is None``) is always the preamble.
+    :param note_lines: Lines to append to the preamble body.
+    :returns: A new sections list with the note appended to the preamble.
+    """
+    updated = list(sections)
+    preamble_header, preamble_body = updated[0]
+    updated[0] = (preamble_header, [*preamble_body, *note_lines])
     return updated
 
 
@@ -1473,14 +1518,17 @@ def refresh_volume_report_section(
 
         snapshot = load_volume_snapshot(volumes_dir, date_str)
         sections = _split_report_sections(report_path.read_text(encoding="utf-8"))
+        drifted: list[str] = []
+
+        def _patch(header: str, prefix: str, new_line: str) -> None:
+            nonlocal sections
+            sections, ok = _replace_line_by_prefix(sections, header, prefix, new_line)
+            if not ok:
+                drifted.append(f"{header.removeprefix('## ')}: {prefix}")
 
         entries_line, total_line = _volume_summary_lines(date_str, snapshot)
-        sections = _replace_line_by_prefix(
-            sections, "## Collection Summary", "- Volume entries:", entries_line
-        )
-        sections = _replace_line_by_prefix(
-            sections, "## Collection Summary", "- Total 24h Volume:", total_line
-        )
+        _patch("## Collection Summary", "- Volume entries:", entries_line)
+        _patch("## Collection Summary", "- Total 24h Volume:", total_line)
 
         volume_info = _summarise_daily_files(volumes_dir)
         if volume_info["count"] == 0:
@@ -1493,13 +1541,10 @@ def refresh_volume_report_section(
                 f"- Volumes: {volume_info['first']} to {volume_info['last']} "
                 f"({volume_info['count']} days{gap_note})"
             )
-        sections = _replace_line_by_prefix(
-            sections, "## Date Range Summary", "- Volumes:", range_line
-        )
+        _patch("## Date Range Summary", "- Volumes:", range_line)
 
         volume_files = list(volumes_dir.glob("*.parquet")) if volumes_dir.exists() else []
-        sections = _replace_line_by_prefix(
-            sections,
+        _patch(
             "## Data Files",
             "- Volume parquet files:",
             f"- Volume parquet files: {len(volume_files)} days",
@@ -1508,6 +1553,22 @@ def refresh_volume_report_section(
         if snapshot.found and snapshot.by_market:
             markets_df = _load_markets_snapshot(snapshots_dir, date_str)
             sections = _upsert_top_volume_section(sections, snapshot, markets_df)
+
+        if drifted:
+            targets = ", ".join(drifted)
+            console.print(
+                f"  [yellow]WARNING: volume report patch could not find: {targets} "
+                f"-- report format may have drifted; those fields were left as-is.[/yellow]"
+            )
+            sections = _add_report_note(
+                sections,
+                [
+                    "",
+                    f"NOTE: volume refresh could not update: {targets} -- report "
+                    "format may have drifted since this section was written; "
+                    "treat those fields as possibly stale.",
+                ],
+            )
 
         report_path.write_text(_join_report_sections(sections), encoding="utf-8")
         reported = snapshot.count if snapshot.found else 0

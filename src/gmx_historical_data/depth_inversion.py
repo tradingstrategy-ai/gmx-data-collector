@@ -13,8 +13,15 @@ day, at every timeframe, so a large shared-date cohort is normal by itself
 (e.g. the Chainlink-oracle cohort that launched together on 2023-07-20).
 What actually distinguishes truncation from a shared launch date is a *lag*
 between a pair's own finer and coarser timeframes -- a coarser series should
-never start later than its own finer sibling by more than a trading gap, so
-a large cohort that also lags its finer neighbour is the real signature.
+never start later than its own finer sibling by more than a trading gap.
+
+That lag check is per-pair and is the actual finding: a pair's own coarser
+timeframe lagging its own finer one is truncation whether it happens to one
+market or a hundred. Cohort size (how many *inverted* pairs also share the
+exact same lagging date) is only used to describe a finding as "systemic"
+versus "isolated" -- it must never gate whether a lagging pair is reported,
+or a real defect affecting a handful of pairs would go unreported simply
+because it wasn't widespread enough.
 
 This module is pure: it takes already-read earliest-candle dates and never
 touches the filesystem, so the detection logic can be tested without
@@ -44,8 +51,12 @@ TIMEFRAME_ORDER: tuple[str, ...] = ("1m", "5m", "15m", "1h", "4h", "1d")
 DEPTH_INVERSION_MIN_LAG_DAYS = 7
 
 #: How many pairs must share the exact same lagging (coarser) earliest date
-#: before it is reported as a systemic truncation rather than a handful of
-#: unrelated per-symbol issues (e.g. one market genuinely relisted late).
+#: before a transition is *labeled* systemic in the report. This is
+#: informational grouping only -- see :attr:`DepthInversion.is_systemic` --
+#: and must never be used to decide whether a transition is reported at
+#: all: every pair with a genuine per-pair lag is a real finding on its
+#: own, cohort or not (a market that individually relisted late is exactly
+#: as truncated as one of a hundred that all did).
 DEPTH_INVERSION_MIN_COHORT = 20
 
 
@@ -101,10 +112,19 @@ class DepthInversion:
     compared_pairs: int
 
     @property
-    def is_truncation_signature(self) -> bool:
-        """Whether this looks like a systemic truncation, not a one-off.
+    def is_systemic(self) -> bool:
+        """Whether a large cohort shares the exact same lagging cutoff.
 
-        :returns: ``True`` when the inverted-pairs cohort meets
+        Informational only -- every :class:`DepthInversion` returned by
+        :func:`detect_depth_inversions` already represents at least one
+        pair with a genuine per-pair lag and must be reported. This just
+        distinguishes "108 pairs cut off on the same day" (worth calling
+        out explicitly) from "a handful of pairs, no shared date" (still a
+        real finding, just not a single coordinated cutoff) -- callers may
+        use it to word the message, never to decide whether to report or
+        warn.
+
+        :returns: ``True`` when the shared-cutoff cohort meets
             :data:`DEPTH_INVERSION_MIN_COHORT`.
         """
         return self.cohort.cohort_size >= DEPTH_INVERSION_MIN_COHORT
@@ -128,7 +148,9 @@ def detect_depth_inversions(
     :param min_lag_days: Days the coarser start must trail the finer one by,
         for one pair, to count as inverted.
     :returns: One :class:`DepthInversion` per adjacent transition that has
-        at least one inverted pair, in ``timeframe_order``.
+        at least one inverted pair, in ``timeframe_order``. Every entry
+        here is a real finding -- callers must report all of them, not
+        just the ones whose :attr:`DepthInversion.is_systemic` is true.
     """
     results: list[DepthInversion] = []
     for finer_tf, coarser_tf in zip(timeframe_order, timeframe_order[1:], strict=False):

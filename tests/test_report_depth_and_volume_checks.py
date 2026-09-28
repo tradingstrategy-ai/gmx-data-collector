@@ -219,6 +219,26 @@ class TestReportDepthAndVolumeSections:
         assert "::warning::" in out
         assert "depth inversion" in out.lower() or "1d" in out
 
+    def test_small_number_of_lagging_pairs_still_warns(self, tmp_path, capsys, monkeypatch):
+        """Regression guard: a handful of pairs (fewer than
+        DEPTH_INVERSION_MIN_COHORT) each individually truncated must still
+        be reported and warned on -- the cohort-size constant labels a
+        finding "systemic", it must never gate whether it is reported."""
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        futures_dir = tmp_path / "gmx" / "futures"
+        pairs = [f"SYM{i}_USDC_USDC" for i in range(3)]
+        for pair in pairs:
+            _write_candles(futures_dir, pair, "4h", [datetime(2023, 7, 20, tzinfo=UTC)])
+            _write_candles(futures_dir, pair, "1d", [datetime(2026, 3, 8, tzinfo=UTC)])
+
+        markets_df = self._base_markets_df({})
+        content = self._generate(tmp_path, markets_df, futures_dir, tmp_path / "gmx")
+
+        assert "3/3 pairs lag" in content
+        out = capsys.readouterr().out
+        assert "::warning::depth inversion" in out
+        assert "3/3" in out
+
     def test_v2_launch_cohort_alone_does_not_warn(self, tmp_path, capsys, monkeypatch):
         """Many pairs legitimately sharing one earliest date at every
         timeframe (no lag between finer/coarser siblings) must not warn."""

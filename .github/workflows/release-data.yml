@@ -502,7 +502,15 @@ jobs:
       # patches the already-written report with what the step above just
       # saved to volumes/{date}.parquet, so the *shipped* report never says
       # "Volume entries: 0 markets" on a day volume was actually collected.
+      #
+      # `if: always()`: if "Collect 24h volume snapshot" itself raises
+      # (rather than exiting 0 with no rows, which it already handles), the
+      # default `success()` condition would skip this step entirely and the
+      # report would still ship the fabricated placeholder. With no
+      # volumes/{date}.parquet on disk either way, refresh_volume_report_section
+      # reports "not collected" -- an honest fail-soft answer, not another zero.
       - name: Refresh report with 24h volume data
+        if: always()
         run: |
           PYTHONPATH=src:scripts python - <<'EOF'
           from datetime import datetime, UTC

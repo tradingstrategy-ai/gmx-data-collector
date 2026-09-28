@@ -103,12 +103,15 @@ class TestDetectDepthInversions:
         assert inv.compared_pairs == 99
         assert inv.cohort.date == date(2026, 3, 8)
         assert inv.cohort.cohort_size == 99
-        assert inv.is_truncation_signature is True
+        assert inv.is_systemic is True
 
-    def test_small_cohort_of_inverted_pairs_is_not_a_truncation_signature(self):
-        """A handful of pairs individually lagging is not the systemic bug
-        this check exists to catch -- it needs a shared cohort."""
-        pairs = self._pairs(DEPTH_INVERSION_MIN_COHORT - 1)
+    def test_a_small_number_of_lagging_pairs_is_still_reported(self):
+        """A handful of pairs individually lagging is still a genuine,
+        real finding -- cohort size only labels a finding "systemic" or
+        not, it must never decide whether the finding is reported at all.
+        Three pairs each individually truncated is exactly as real a bug
+        as a hundred pairs truncated together."""
+        pairs = self._pairs(3)
         earliest_by_tf = {
             "4h": {p: date(2023, 7, 20) for p in pairs},
             "1d": {p: date(2026, 3, 8) for p in pairs},
@@ -117,7 +120,37 @@ class TestDetectDepthInversions:
         inversions = detect_depth_inversions(earliest_by_tf)
 
         assert len(inversions) == 1
-        assert inversions[0].is_truncation_signature is False
+        inv = inversions[0]
+        assert inv.inverted_pairs == 3
+        assert inv.compared_pairs == 3
+        # Below the systemic-cohort label, but still a returned finding.
+        assert inv.is_systemic is False
+
+    def test_lagging_pairs_with_no_shared_cutoff_date_are_still_reported(self):
+        """Each pair lags its own finer sibling by a different amount, so
+        there is no shared exact-date cohort at all (cohort_size == 1) --
+        the per-pair lag is still what matters, and all three must still
+        be counted as inverted."""
+        earliest_by_tf = {
+            "4h": {
+                "AAA_USDC_USDC": date(2023, 1, 1),
+                "BBB_USDC_USDC": date(2023, 2, 1),
+                "CCC_USDC_USDC": date(2023, 3, 1),
+            },
+            "1d": {
+                "AAA_USDC_USDC": date(2026, 1, 1),
+                "BBB_USDC_USDC": date(2026, 2, 1),
+                "CCC_USDC_USDC": date(2026, 3, 1),
+            },
+        }
+
+        inversions = detect_depth_inversions(earliest_by_tf)
+
+        assert len(inversions) == 1
+        inv = inversions[0]
+        assert inv.inverted_pairs == 3
+        assert inv.cohort.cohort_size == 1
+        assert inv.is_systemic is False
 
     def test_v2_launch_cohort_alone_does_not_trigger(self):
         """Many Chainlink-oracle V2 markets legitimately launched together
