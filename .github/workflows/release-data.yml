@@ -158,7 +158,7 @@ jobs:
               for symbol in sorted(previous & live):
                   print(f"relisted, resuming validation: {symbol}")
           except Exception as exc:  # noqa: BLE001 - never block a release on registry flakiness
-              print(f"WARNING: registry unreachable ({exc}); reusing previous roster.")
+              print(f"::warning::registry unreachable ({exc}); reusing previous roster.")
               roster = sorted(previous)
 
           # The roster below is rewritten *before* collection, and a market
@@ -493,6 +493,29 @@ jobs:
           out = volumes_dir / f"{date_str}.parquet"
           df.to_parquet(out, index=False)
           print(f"Saved {len(df)} markets -> {out}")
+          EOF
+
+      # `generate_report` (the "Collect daily snapshot" step above) runs
+      # before this job's own volume fetch, so it always writes placeholder
+      # volume fields into data_report.txt (see the `volume_count,
+      # volume_data = 0, {}` comment in collect_daily_snapshot.main). This
+      # patches the already-written report with what the step above just
+      # saved to volumes/{date}.parquet, so the *shipped* report never says
+      # "Volume entries: 0 markets" on a day volume was actually collected.
+      - name: Refresh report with 24h volume data
+        run: |
+          PYTHONPATH=src:scripts python - <<'EOF'
+          from datetime import datetime, UTC
+          from pathlib import Path
+          from collect_daily_snapshot import refresh_volume_report_section
+
+          date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+          refresh_volume_report_section(
+              report_path=Path("data_report.txt"),
+              volumes_dir=Path("./user_data/data/gmx/volumes"),
+              snapshots_dir=Path("./user_data/data/gmx/snapshots"),
+              date_str=date_str,
+          )
           EOF
 
       # Every data type the bundle is supposed to carry, checked before it
