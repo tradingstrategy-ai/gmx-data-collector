@@ -106,12 +106,6 @@ DEFAULT_MAX_RETRIES = 5
 DEFAULT_BASE_DELAY = 1.0  # seconds
 DEFAULT_MAX_DELAY = 30.0  # seconds
 
-# Rotating immediately with zero delay turns a small key pool into a
-# self-inflicted rate-limit storm: every key gets hit again within one cycle,
-# before its rate-limit window has any chance to clear. A short pause after
-# each rotation gives the just-rotated-away-from key room to recover.
-ROTATION_DELAY_SECONDS = 2.0
-
 
 async def retry_with_backoff(
     coro_func,
@@ -125,7 +119,8 @@ async def retry_with_backoff(
     """Execute async function with progressive backoff retry and key rotation.
 
     Progressive delays: 2s, 5s, 10s, 30s, 60s (with 10% jitter).
-    Detects rate limit errors and rotates API keys without counting as retry.
+    Detects rate limit errors, rotates API keys, and progressively delays
+    retries without counting rate limits against the ordinary retry limit.
 
     :param coro_func: Async function to call (will be awaited)
     :param max_retries: Maximum number of retry attempts
@@ -142,6 +137,7 @@ async def retry_with_backoff(
     progressive_delays = [2.0, 5.0, 10.0, 30.0, 60.0]
     last_exception = None
     attempt = 0
+    rate_limit_attempt = 0
 
     while attempt <= max_retries:
         try:
@@ -175,11 +171,20 @@ async def retry_with_backoff(
                     logger.info(f"Rotated to API key: {key_rotator.current_key[:8]}...")
                     if on_key_rotated is not None:
                         on_key_rotated()
-                    # Don't count as retry attempt, but pause before retrying so
-                    # the key(s) just cycled away from get a chance to recover
-                    # instead of being hit again within the same rotation cycle.
-                    jitter = random.uniform(0, ROTATION_DELAY_SECONDS * 0.1)
-                    await asyncio.sleep(ROTATION_DELAY_SECONDS + jitter)
+                    # A 429 does not consume the ordinary retry budget, but each
+                    # rate-limit retry waits progressively longer so a small key
+                    # pool is not hit again before its rate-limit window clears.
+                    if is_rate_limit:
+                        delay_index = min(rate_limit_attempt, len(progressive_delays) - 1)
+                        delay = progressive_delays[delay_index]
+                        jitter = random.uniform(0, delay * 0.1)
+                        delay += jitter
+                        rate_limit_attempt += 1
+                        logger.warning(
+                            f"{operation_name} rate-limited; retrying in {delay:.1f}s "
+                            f"(rate-limit retry {rate_limit_attempt})..."
+                        )
+                        await asyncio.sleep(delay)
                     continue
                 except RuntimeError as rotate_error:
                     logger.error(f"All API keys exhausted: {rotate_error}")
