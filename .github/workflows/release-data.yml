@@ -24,6 +24,10 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+concurrency:
+  group: gmx-daily-data-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -600,10 +604,13 @@ jobs:
               user_data/data/gmx/volumes/ \
               user_data/data/gmx/tick_volume/
 
+          PYTHONPATH=src python -m gmx_historical_data.tick_release build \
+              --root user_data/data/gmx --output /tmp
+
           ls -lh /tmp/gmx-*.tar.gz
 
           # Asset size guardrails
-          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz; do
+          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz /tmp/gmx-ticks.tar.gz; do
             size=$(stat -c %s "$tarball")
             limit=$((2 * 1024 * 1024 * 1024))  # 2 GB
             if [ "$size" -ge "$limit" ]; then
@@ -621,9 +628,15 @@ jobs:
           TAG="data-${DATE}"
           COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
 
-          # Idempotent: if today's release already exists (re-run), delete it first
-          gh release delete "${TAG}" --repo ${{ github.repository }} --yes 2>/dev/null || true
-          git push origin --delete "${TAG}" 2>/dev/null || true
+          # Preserve immutable existing assets on same-date reruns. The new tick
+          # revision may be newer than full/light; its own manifest is authoritative.
+          if gh release view "${TAG}" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "Preserving existing ${TAG} full/light/report assets; publishing additive ticks only."
+            PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
+                --repo ${{ github.repository }} --release "${TAG}" \
+                --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
+            exit 0
+          fi
 
           NOTES_FILE=$(mktemp)
           cat > "$NOTES_FILE" <<NOTES
@@ -634,6 +647,7 @@ jobs:
           Contents (${COUNT} files total):
           - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, futures/
           - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/ (no futures/)
+          - \`gmx-ticks[.rN].tar.gz\` + matching manifest — Arbitrum execution tape, volume and coverage/checksums; same-date tick revisions may be newer than full/light
           - \`data_report.txt\` — collection summary
 
           Consume with \`scripts/download_gmx_data.sh\` (see repo README).
@@ -658,6 +672,10 @@ jobs:
               --notes-file "$NOTES_FILE" \
               --latest \
               "${ASSETS[@]}"
+
+          PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
+              --repo ${{ github.repository }} --release "${TAG}" \
+              --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
 
           rm -f "$NOTES_FILE"
 

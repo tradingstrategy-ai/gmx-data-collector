@@ -347,3 +347,31 @@ class TestSwapSideLabelling:
         df = ticks_to_frame(ticks)
 
         assert set(df["side"]) == {"in", "out"}
+
+
+@pytest.mark.parametrize(
+    "impact_fields,expected",
+    [
+        ({"pendingPriceImpactUsd": -2 * 10**30}, -2.0),
+        ({"pendingPriceImpactUsd": 3 * 10**30, "priceImpactUsd": 1}, 3.0),
+        ({"priceImpactUsd": 4 * 10**30}, 4.0),
+        ({}, None),
+    ],
+)
+def test_increase_impact_field_versions(impact_fields, expected):
+    event = _position_event("PositionIncrease", size_usd=10**30, size_tokens=10**8, is_long=True)
+    event.int_items.clear()
+    event.int_items.update(impact_fields)
+    result = ticks_from_event_data(
+        event,
+        timestamp=1,
+        block_number=1,
+        tx_hash="0xabc",
+        log_index=0,
+        markets=MARKETS,
+        tokens=TOKENS,
+    )[0]
+    if expected is None:
+        assert pd.isna(result.price_impact_usd)
+    else:
+        assert result.price_impact_usd == expected
