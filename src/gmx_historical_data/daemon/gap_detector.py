@@ -18,7 +18,11 @@ class GapStatus(Enum):
     """Status of gap detection result.
 
     :cvar NO_GAP: Data is current, no fetch needed.
-    :cvar NORMAL_GAP: Standard incremental fetch from our_latest to now.
+    :cvar NORMAL_GAP: Standard incremental fetch. Starts from ``our_latest``
+        itself (not ``our_latest + interval``), so the most recently stored
+        bar is always re-fetched and allowed to overwrite a value that was
+        captured before that bar had actually closed. See
+        :attr:`AdaptiveGapDetector.refetch_overlap_bars`.
     :cvar DATA_LOSS_GAP: Our data is older than API earliest - permanent data loss.
     :cvar NO_EXISTING_DATA: Fresh start, no existing data in storage.
     :cvar API_UNAVAILABLE: Could not query API, fallback mode.
@@ -248,6 +252,16 @@ class AdaptiveGapDetector:
 
     :param storage: ParquetStorage instance for reading existing data.
     :param gmx_fetcher: GMXDataFetcher instance for querying API.
+
+    :cvar TIMEFRAME_DELTAS: see also :attr:`refetch_overlap_bars` below --
+        a ``NORMAL_GAP`` result always re-fetches at least the most recently
+        stored bar, because the GMX API call in
+        :meth:`gmx_historical_data.cli.DataCollector._fetch_gmx_candles_for_timeframes`
+        always returns the exchange's full available window regardless of
+        the requested start, and only the LOCAL filter
+        (``df["timestamp"] >= bounds.gmx_api_start``) decides what gets kept
+        -- so widening that local filter by one bar costs nothing extra over
+        the wire.
     """
 
     # Timeframe intervals
@@ -265,6 +279,7 @@ class AdaptiveGapDetector:
         storage: ParquetStorage,
         gmx_fetcher,
         stale_density_threshold: float = DEFAULT_STALE_DENSITY_THRESHOLD,
+        refetch_overlap_bars: int = 1,
     ):
         """Initialize adaptive gap detector.
 
@@ -275,10 +290,24 @@ class AdaptiveGapDetector:
             :attr:`GapStatus.STALE_DENSITY` instead of :attr:`GapStatus.NO_GAP`,
             forcing a refetch even though no timestamps are missing. See
             :mod:`gmx_historical_data.ohlcv_density`.
+        :param refetch_overlap_bars: Number of most-recently-stored bars a
+            ``NORMAL_GAP`` result re-fetches on every incremental run, so a
+            bar that was collected before it actually closed (its OHLC
+            snapshot still a narrow, in-progress range -- not caught by the
+            ``STALE_DENSITY`` check above, which only flags fully flat
+            ``high == low`` rows) gets superseded once the API has the
+            genuine closed value. ``1`` re-fetches just ``our_latest``
+            itself. :func:`gmx_historical_data.ohlcv_density.
+            merge_ohlcv_preferring_dense` already prefers the incoming row
+            on an equal-density tie, so the corrected refetch safely
+            overwrites the stale one; a value below 1 is invalid.
         """
+        if refetch_overlap_bars < 1:
+            raise ValueError(f"refetch_overlap_bars must be >= 1, got {refetch_overlap_bars}")
         self.storage = storage
         self.gmx_fetcher = gmx_fetcher
         self.stale_density_threshold = stale_density_threshold
+        self.refetch_overlap_bars = refetch_overlap_bars
 
     def _format_timespan(self, delta: timedelta) -> str:
         """Format a timedelta as a human-readable string.
@@ -312,6 +341,8 @@ class AdaptiveGapDetector:
         1. If our_latest is None -> NO_EXISTING_DATA, fetch all available
         2. If our_latest + interval >= now -> NO_GAP, skip
         3. If our_latest >= api_earliest -> NORMAL_GAP, fetch incrementally
+           from our_latest (re-fetching the last refetch_overlap_bars bars,
+           1 by default) so a bar stored before it closed gets corrected
         4. If our_latest < api_earliest -> DATA_LOSS_GAP, log warning, fetch available
 
         :param symbol: Token symbol (e.g., 'ETH').
@@ -392,8 +423,12 @@ class AdaptiveGapDetector:
         # denser API data for this symbol/timeframe. Check the recent window
         # GMX's API can actually cover (api_earliest..api_latest) for flat
         # dominance before trusting timestamp continuity.
-        fetch_start = our_latest + interval_delta
-        if fetch_start >= now:
+        #
+        # This is purely a "has a new bar had time to exist yet" check, not
+        # the start boundary actually used for fetching -- see Case 4 below,
+        # which re-fetches our_latest itself rather than our_latest + interval.
+        next_expected_start = our_latest + interval_delta
+        if next_expected_start >= now:
             recent_window = existing_df[existing_df["timestamp"] >= api_earliest]
             if is_stale_density_pandas(recent_window, self.stale_density_threshold):
                 flat_pct = recent_window["high"].eq(recent_window["low"]).mean() * 100
@@ -454,10 +489,17 @@ class AdaptiveGapDetector:
                 lost_timespan=lost_timespan,
             )
 
-        # Case 4: Normal gap - incremental fetch
+        # Case 4: Normal gap - incremental fetch. Start from our_latest minus
+        # (refetch_overlap_bars - 1) bars -- i.e. our_latest itself by
+        # default -- instead of our_latest + interval_delta. A bar collected
+        # before it actually closed is otherwise never revisited: the next
+        # run's fetch window would start strictly after it, so a narrow,
+        # in-progress OHLC snapshot stays wrong in storage forever even once
+        # the real candle has long since closed. See refetch_overlap_bars.
+        overlap_fetch_start = our_latest - (self.refetch_overlap_bars - 1) * interval_delta
         return GapDetectionResult(
             status=GapStatus.NORMAL_GAP,
-            fetch_start=fetch_start,
+            fetch_start=overlap_fetch_start,
             fetch_end=now,
             our_latest=our_latest,
             api_earliest=api_earliest,
