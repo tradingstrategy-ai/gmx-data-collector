@@ -51,8 +51,14 @@ available union tape is rejected rather than overwritten or summed twice.
 
 Intake takes an exclusive lock, stages all outputs, saves backups and a
 rollback journal on the canonical filesystem, then replaces files atomically.
+JSON metadata is published through a sibling temporary file, flush/file fsync,
+atomic rename and directory fsync before any canonical replacement. Interrupted
+temporary journal files are ignored; failed writes remove their temporary file.
 The intake checkpoint commits last. Exceptions roll back; process interruption
-is recovered under the lock by the next intake or status command. This is
+is recovered under the lock by the next intake or status command. A malformed
+legacy active journal is preserved with its transaction backups and an explicit
+manual-recovery error: automatic discard cannot prove the canonical commit state.
+This is
 recoverable across process termination, not a multi-file atomic snapshot for
 unlocked readers or a power-loss durability guarantee. Failed validation does
 not change existing tape. Do not run other independent writers against these

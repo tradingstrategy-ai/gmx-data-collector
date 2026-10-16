@@ -52,3 +52,49 @@ The runbook provides exact build/publish/staged seed/canonical/status commands
 and a 03:15 UTC marked cron update. Its crontab read/backup/merge/write/read-back
 verification runs under `/home/avik/.local/state/data-collector-crontab.lock`,
 preserving Apex, GRVT and unrelated markers. No deployment command was executed.
+
+## Fix round 1: atomic journal publication
+
+Review finding P2 addressed on top of `2e56f6ba975ef1a0fee0f84c5fb4a411d20d8a4e`.
+The exact focused fix commit is recorded in the epic implementation artifact.
+The shared JSON writer now stages a complete sibling file, rejects short
+writes, flushes/fsyncs it, atomically replaces the destination, and fsyncs its
+parent directory before returning. Canonical replacement only begins after
+journal publication returns. Metadata remains group-readable (0640).
+
+Real subprocess exits now test interruption during a partial journal write and
+immediately after its atomic rename. Both permit repeated status and intake
+recovery; pre-rename orphan temporaries are ignored. Existing midcommit crash
+and exception tests still exercise the second canonical replacement, excluding
+the new metadata renames from their counters. New tests cover write exceptions,
+short write counts, file-sync/rename/directory-sync ordering and malformed
+legacy journals. An invalid legacy active journal and transaction backups are
+preserved with an explicit manual-recovery error; automatic deletion or
+quarantine cannot safely establish whether canonical replacement already began.
+
+Exact red evidence (current new regression tests against the committed old
+module, exported without changing any checkout):
+
+```bash
+mkdir -p /tmp/gmx-ticks-fixround1-base
+git archive 2e56f6ba975ef1a0fee0f84c5fb4a411d20d8a4e src | tar -x -C /tmp/gmx-ticks-fixround1-base
+PYTHONPATH=/tmp/gmx-ticks-fixround1-base/src /home/avik/freqtrade-multistrategy-orchestrator/gmx-data-collector/.venv/bin/python -m pytest tests/test_tick_release.py -k 'journal_publication or legacy_partial_journal' -q -p no:cacheprovider
+```
+
+Result: **3 failed**, as expected. Partial-write child exited 91, leaving an
+active malformed journal; the pre-rename invariant failed. The old writer had
+no journal rename boundary, and its legacy error lacked recovery guidance.
+
+Exact green/check commands from `/home/avik/gmx-ticks-intake`:
+
+```bash
+PYTHONPATH=src /home/avik/freqtrade-multistrategy-orchestrator/gmx-data-collector/.venv/bin/python -m pytest tests/test_tick_release.py tests/test_gmx_trade_ticks.py tests/test_trade_tick_collector.py tests/test_candle_volume.py tests/test_release_workflow.py -q -p no:cacheprovider
+/home/avik/freqtrade-multistrategy-orchestrator/gmx-data-collector/.venv/bin/ruff check .
+/home/avik/freqtrade-multistrategy-orchestrator/gmx-data-collector/.venv/bin/ruff format --check .
+git diff --check
+```
+
+Result: **100 passed**, one existing dependency deprecation warning; lint,
+format (166 files) and diff checks passed. No unrelated date-fixture changes,
+external actions or subagents. Reviewer-owned `.review/` remains untracked and
+untouched. Production acceptance still awaits the fresh review verdict.

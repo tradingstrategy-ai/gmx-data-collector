@@ -148,8 +148,9 @@ def test_mid_commit_failure_rolls_back_and_reruns(tmp_path, monkeypatch):
     calls = []
 
     def fail_second(src, dest):
-        calls.append(dest)
-        if len(calls) == 2:
+        if "/ready/" in str(src):
+            calls.append(dest)
+        if "/ready/" in str(src) and len(calls) == 2:
             raise OSError("simulated disk failure")
         return replace(src, dest)
 
@@ -303,8 +304,9 @@ replace = os.replace
 calls = 0
 def crash(src, target):
     global calls
-    calls += 1
-    if calls == 2:
+    if "/ready/" in str(src):
+        calls += 1
+    if "/ready/" in str(src) and calls == 2:
         os._exit(91)
     return replace(src, target)
 r.os.replace = crash
@@ -373,3 +375,163 @@ def test_duplicate_archive_member_rejected(tmp_path):
         target.addfile(member, io.BytesIO(content))
     with pytest.raises(ValueError, match="Duplicate archive"):
         release.intake(tmp_path / "canonical", dup, release.digest(dup))
+
+
+@pytest.mark.parametrize("boundary", ["partial_write", "journal_replace"])
+def test_journal_publication_process_exit_is_recoverable(tmp_path, boundary):
+    import subprocess
+    import sys
+
+    archive, manifest = bundle(tmp_path)
+    root = tmp_path / "canonical"
+    write_tick_tapes([tick(2)], root / "ticks")
+    original = (root / "ticks/2026-10-15.parquet").read_bytes()
+    code = """
+import os, sys
+from pathlib import Path
+from gmx_historical_data import tick_release as r
+root = Path(sys.argv[1])
+boundary = sys.argv[4]
+original_open = Path.open
+original_temp = r.tempfile.NamedTemporaryFile
+original_replace = os.replace
+class PartialWriter:
+    def __init__(self, stream): self.stream = stream
+    def __getattr__(self, name): return getattr(self.stream, name)
+    def __enter__(self): return self
+    def __exit__(self, *args): return self.stream.__exit__(*args)
+    def write(self, text):
+        self.stream.write(text[:8])
+        self.stream.flush()
+        os._exit(91)
+def crash_open(path, *args, **kwargs):
+    stream = original_open(path, *args, **kwargs)
+    if boundary == 'partial_write' and path == root / '.tick-intake-journal.json' and 'w' in (args[0] if args else kwargs.get('mode', 'r')):
+        return PartialWriter(stream)
+    return stream
+def crash_temp(*args, **kwargs):
+    stream = original_temp(*args, **kwargs)
+    if boundary == 'partial_write' and str(kwargs.get('prefix', '')).startswith('.tick-intake-journal.json'):
+        return PartialWriter(stream)
+    return stream
+def crash_replace(src, dest):
+    result = original_replace(src, dest)
+    if boundary == 'journal_replace' and Path(dest) == root / '.tick-intake-journal.json':
+        os._exit(91)
+    return result
+Path.open = crash_open
+r.tempfile.NamedTemporaryFile = crash_temp
+r.os.replace = crash_replace
+r.intake(root, Path(sys.argv[2]), sys.argv[3])
+"""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            code,
+            str(root),
+            str(archive),
+            manifest["archive"]["sha256"],
+            boundary,
+        ]
+    )
+    assert proc.returncode == 91
+    assert (root / "ticks/2026-10-15.parquet").read_bytes() == original
+    assert not (root / "checkpoints/tick_intake.json").exists()
+    journal = root / ".tick-intake-journal.json"
+    if boundary == "partial_write":
+        assert not journal.exists()
+    else:
+        assert json.loads(journal.read_text())["targets"]
+    for _ in range(2):
+        with release.locked(root):
+            assert release.status_unlocked(root)["files"]["ticks/2026-10-15.parquet"]["rows"] == 1
+    release.intake(root, archive, release.digest(archive), manifest)
+    assert len(pd.read_parquet(root / "ticks/2026-10-15.parquet")) == 2
+
+
+def test_legacy_partial_journal_is_preserved_with_explicit_recovery_error(tmp_path):
+    root = tmp_path / "canonical"
+    root.mkdir()
+    journal = root / ".tick-intake-journal.json"
+    journal.write_text('{"targets":')
+    transaction = root / ".tick-intake-transaction"
+    transaction.mkdir()
+    (transaction / "evidence").write_text("possibly needed for rollback")
+    for _ in range(2):
+        with pytest.raises(ValueError, match="manual recovery required"):
+            with release.locked(root):
+                pass
+        assert journal.read_text() == '{"targets":'
+        assert (transaction / "evidence").read_text() == "possibly needed for rollback"
+
+
+@pytest.mark.parametrize("failure", ["raises", "short_count"])
+def test_failed_journal_write_leaves_no_active_journal_or_canonical_change(
+    tmp_path, monkeypatch, failure
+):
+    archive, manifest = bundle(tmp_path)
+    root = tmp_path / "canonical"
+    write_tick_tapes([tick(2)], root / "ticks")
+    original = (root / "ticks/2026-10-15.parquet").read_bytes()
+    original_temp = release.tempfile.NamedTemporaryFile
+
+    class FailingWriter:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, text):
+            self.stream.write(text[:8])
+            self.stream.flush()
+            if failure == "raises":
+                raise OSError("simulated short write")
+            return 8
+
+    def fail_journal(*args, **kwargs):
+        stream = original_temp(*args, **kwargs)
+        return (
+            FailingWriter(stream)
+            if kwargs.get("prefix") == ".tick-intake-journal.json."
+            else stream
+        )
+
+    monkeypatch.setattr(release.tempfile, "NamedTemporaryFile", fail_journal)
+    with pytest.raises(OSError, match="short write"):
+        release.intake(root, archive, release.digest(archive), manifest)
+    assert (root / "ticks/2026-10-15.parquet").read_bytes() == original
+    assert not (root / ".tick-intake-journal.json").exists()
+    assert not list(root.glob(".tick-intake-journal.json.*.tmp"))
+    monkeypatch.setattr(release.tempfile, "NamedTemporaryFile", original_temp)
+    release.intake(root, archive, release.digest(archive), manifest)
+    assert len(pd.read_parquet(root / "ticks/2026-10-15.parquet")) == 2
+
+
+def test_dump_flushes_and_syncs_file_before_replace_then_syncs_directory(tmp_path, monkeypatch):
+    import stat
+
+    events = []
+    fsync = os.fsync
+    replace = os.replace
+
+    def sync(fd):
+        events.append("directory_sync" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file_sync")
+        return fsync(fd)
+
+    def rename(src, dest):
+        assert json.loads(Path(src).read_text()) == {"complete": True}
+        events.append("replace")
+        return replace(src, dest)
+
+    monkeypatch.setattr(release.os, "fsync", sync)
+    monkeypatch.setattr(release.os, "replace", rename)
+    release.dump(tmp_path / "state.json", {"complete": True})
+    assert events == ["file_sync", "replace", "directory_sync"]

@@ -54,7 +54,33 @@ def digest(path: Path) -> str:
 
 def dump(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    payload = json.dumps(value, indent=2, sort_keys=True) + "\n"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=path.name + ".",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            temporary = Path(stream.name)
+            # NamedTemporaryFile starts at 0600; metadata must remain group-readable.
+            os.fchmod(stream.fileno(), 0o640)
+            if stream.write(payload) != len(payload):
+                raise OSError("short write while publishing JSON")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def selected(name: str) -> bool:
@@ -307,7 +333,16 @@ def recover(root: Path) -> None:
     journal = root / ".tick-intake-journal.json"
     if not journal.exists():
         return
-    state = json.loads(journal.read_text())
+    try:
+        state = json.loads(journal.read_text())
+    except json.JSONDecodeError as exc:
+        # Old versions wrote directly to the active journal. A partial legacy
+        # journal cannot prove whether canonical replacements already began.
+        # Preserve both it and backups rather than discard possible recovery data.
+        raise ValueError(
+            f"Invalid rollback journal {journal}; manual recovery required. "
+            "Journal and transaction backups preserved: canonical commit state is unknown."
+        ) from exc
     transaction = root / ".tick-intake-transaction"
     for name, existed in state["targets"].items():
         if not selected(name) and name != "checkpoints/tick_intake.json":
