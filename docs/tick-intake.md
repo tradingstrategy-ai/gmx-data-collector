@@ -1,5 +1,9 @@
 # Arbitrum execution tick intake
 
+Live host deployment is recorded in [the deployment report](tick-intake-deployment.md).
+It uses the approved isolated checkout and a working legacy fallback/publication
+job while the upstream workflow changes await merge.
+
 Ticks already run in the 02:00 UTC daily snapshot. This adds a small dedicated
 release asset and a separate consumer; it does not enable another collector.
 No native matched L2 book is provided. Perps use execution prices; swap rows

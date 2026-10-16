@@ -98,3 +98,21 @@ Result: **100 passed**, one existing dependency deprecation warning; lint,
 format (166 files) and diff checks passed. No unrelated date-fixture changes,
 external actions or subagents. Reviewer-owned `.review/` remains untracked and
 untouched. Production acceptance still awaits the fresh review verdict.
+
+## Live deployment acceptance completed
+
+After independent approval of 9efa8af, the authorized deployment completed on
+2026-10-16 at 20:59 UTC. See [the measured deployment report](docs/tick-intake-deployment.md)
+for exact asset IDs, hashes, sizes, chain/date/row coverage, existing-data
+preservation and the installed 03:15 UTC job. Both monitored phases exited zero.
+The 1.186 GB legacy seed was downloaded once and reused. Independent public
+dedicated download/schema/key/hash roundtrip passed; running the identical
+cron wrapper preserved all 333,257 rows and every canonical tick/volume hash.
+All 5,056 prior OHLCV/funding/OI/pool/futures/checkpoint hashes stayed unchanged,
+as did the old release ID/body/assets and public visibility. The cron update
+used the shared crontab lock, fresh backup and exact read-back verification,
+preserving unrelated markers. Runtime source remains the reviewed 9efa8af;
+subsequent commits only document deployment. Upstream workflow changes are
+still pending merge; the installed host job composes reviewed intake/build/
+publish and works with legacy full releases immediately. History/finality/
+decode limitations stay explicit. No extra backfill or source-code changes.
