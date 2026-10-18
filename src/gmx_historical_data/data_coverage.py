@@ -22,10 +22,10 @@ discovery made weeks later by whoever consumes it.
 
 Scope note: this covers the **daily-stamped** types the release itself
 produces -- one ``{date}.parquet`` per run. The per-symbol stores under
-``futures/`` are graded by the cadence manifest and, for funding, by
-``scripts/collect_daily_snapshot._funding_export_summary``, which answer a
-different question (is each series continuous?) than this one (did this type
-get produced at all?).
+``futures/`` are graded by the cadence manifest and, for the hourly funding and
+mark companions, per pair by :mod:`gmx_historical_data.series_coverage`, which
+answer a different question (is each series continuous and current?) than this
+one (did this type get produced at all?).
 """
 
 from __future__ import annotations

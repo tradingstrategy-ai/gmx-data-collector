@@ -46,7 +46,7 @@ Daily data collection now ships as **GitHub Releases** instead of the `data/dail
 | Consumer download | `git clone --depth 1 --branch data/daily-collection` | `scripts/download_gmx_data.sh` or `gh release download` |
 | Quickstart (`-q` flag) | `seed_from_branch()` — shallow git clone | `seed_from_release()` — `gh release download` + tar extract |
 | CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
-| Release assets | — | `gmx-full.tar.gz` (~100 MB), `gmx-light.tar.gz` (no futures/), `data_report.txt` |
+| Release assets | — | `gmx-full.tar.gz`, `gmx-light.tar.gz` (no OHLCV; 1h funding only), `gmx-funding-state-<timestamp>.tar.gz`, `data_report.txt` |
 
 **`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. New consumers should use the Releases path (see [Downloading GMX historical data](#downloading-gmx-historical-data) below).
 
@@ -556,6 +556,39 @@ The DataStore phase uses fully-batched JSON-RPC — all network I/O completes be
 0 2 * * * cd /path/to/gmx_historical_data && \
   make funding-unified-resume >> logs/unified_funding.log 2>&1
 ```
+
+### Funding and mark in the daily release
+
+The daily `data-YYYY-MM-DD` release ships hourly `futures/{PAIR}-1h-funding_rate.feather`
+and `futures/{PAIR}-1h-mark.feather` (#56). Set freqtrade's `funding_fee_timeframe` and
+`mark_ohlcv_timeframe` to `1h` -- its default is `8h`, for which no file exists.
+
+| Asset | Funding / mark content |
+|---|---|
+| `gmx-full.tar.gz` | OHLCV + `1h` funding_rate + `1h` mark + `funding_coverage.json`. The backtest bundle. |
+| `gmx-light.tar.gz` | `1h` funding_rate + `funding_coverage.json` only (no OHLCV, no mark -- mark is derived from the candles). |
+| `gmx-funding-state-<timestamp>.tar.gz` | The raw funding state the daily run resumes from. Not a consumer artifact. |
+
+How it runs (`release-data.yml`): restore the state asset, `extract_unified_funding.py
+--resume` (HyperSync only), export through the shared signed exporter into a **staging
+directory**, grade every pair (`gmx_historical_data.series_coverage`), and copy the
+staged files over `futures/` only if the gate passes. If it does not, `futures/` keeps
+the previous release's companions unchanged, `funding_coverage.json` says `WITHHELD`
+with the last good bar per pair, the release notes say funding was **not refreshed**, and
+the job ends red -- the rest of the release still publishes. The first-ever run with
+nothing previous ships no companions.
+
+* **Coverage record.** `funding_coverage.json` (also in the release notes and
+  `data_report.txt`) lists every `LAGGING` (>6h) and `STALE` (>48h) market with its last
+  bar and age. Tails are never forward-filled; a quiet market's tail is reported, not
+  blocking (`--stale-tail-blocks` flips that).
+* **History starts 2025-08-19.** Earlier funding needs archive-RPC DataStore reads (#47)
+  and is not in the daily release.
+* **One-off rollout.** After merging, dispatch `release-data.yml` once with
+  `seed_funding_from=data/full-history`. It copies the branch's raw funding sources,
+  derives the checkpoints the branch never stored, catches up to now (step timeout 30
+  min) and publishes the state asset. It never replaces an existing state. Without a
+  seed every run withholds the companions.
 
 ## Borrowing Rate Extraction
 

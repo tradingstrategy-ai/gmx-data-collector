@@ -753,6 +753,82 @@ class FreqtradeExporter:
 
         return results, failed_symbols, failures
 
+    def export_mark_from_futures(
+        self,
+        futures_dir: Path,
+        symbols: list[str] | None = None,
+        timeframes: tuple[str, ...] | list[str] = ("1h",),
+        *,
+        out_dir: Path | None = None,
+        quote_currency: str = "USDC",
+    ) -> tuple[dict[str, int], list[ExportFailure]]:
+        """Write ``-mark`` feathers derived from already-shipped ``-futures`` feathers.
+
+        The daily release writes final ``-futures.feather`` files directly, so
+        there is no ``candles/arbitrum`` parquet for :meth:`export_candles` to
+        read.  This is the same proxy ``export_candles`` produces
+        (:meth:`_transform_mark_price`: the candle OHLC with ``volume`` 0, since
+        GMX has no separate mark feed), taken from the futures feather instead.
+        It never touches the futures files.
+
+        :param futures_dir: Directory holding ``{SYMBOL}_{Q}_{Q}-{tf}-futures.feather``.
+        :param symbols: Symbols to write (default: every futures file found).
+        :param timeframes: Timeframes to write.
+        :param out_dir: Destination (default ``futures_dir``).  Existing mark
+            files there are merged with, never shrunk.
+        :param quote_currency: Quote/settlement currency of the filenames.
+        :returns: ``(symbol -> files written, failures)``.  A defective futures
+            file is reported as an :class:`ExportFailure`, not raised.
+        :raises OSError: On a fatal environment condition -- see :meth:`export_candles`.
+        """
+        futures_dir = Path(futures_dir)
+        out_dir = Path(out_dir) if out_dir is not None else futures_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        written: dict[str, int] = {}
+        failures: list[ExportFailure] = []
+
+        for tf in timeframes:
+            suffix = f"_{quote_currency}_{quote_currency}-{tf}-futures.feather"
+            found = {
+                p.name[: -len(suffix)]: p
+                for p in futures_dir.glob(f"*{suffix}")
+                if not p.name.startswith("._")
+            }
+            wanted = sorted(set(symbols) & found.keys()) if symbols else sorted(found)
+            for symbol in wanted:
+                try:
+                    source = pl.read_ipc(found[symbol], memory_map=False)
+                    if source["date"].dtype.time_zone is None:
+                        source = source.with_columns(pl.col("date").dt.replace_time_zone("UTC"))
+                    mark_df = validate_ohlcv(
+                        self._transform_mark_price(source.rename({"date": "timestamp"})),
+                        timestamp_column="date",
+                        location=f"export_mark_from_futures({symbol}/{tf})",
+                    )
+                    self._write(
+                        mark_df,
+                        out_dir
+                        / self._get_freqtrade_filename(
+                            symbol, tf, "feather", "futures", quote_currency, candle_type="mark"
+                        ),
+                        "feather",
+                        prefer_dense=True,
+                    )
+                except DATA_DEFECT_ERRORS as e:
+                    if is_fatal_environment_error(e):
+                        raise
+                    logger.error(
+                        "export_mark_from_futures(%s/%s): skipping after read/write failure: %s",
+                        symbol,
+                        tf,
+                        e,
+                    )
+                    failures.append(_classify_export_failure(symbol, tf, e))
+                    continue
+                written[symbol] = written.get(symbol, 0) + 1
+
+        return written, failures
+
     def export_funding_frame(
         self,
         symbol: str,
