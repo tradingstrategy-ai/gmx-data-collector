@@ -386,8 +386,11 @@ def test_repair_timeframes_empty_adds_no_flag(tmp_path) -> None:
     assert "ARG:--repair-ohlcv" in proc.stdout
 
 
-def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, baseline_max):
-    """Run the "Validate candle history integrity" script on a one-file fixture."""
+def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, pruned: list):
+    """Run the "Validate candle history integrity" script on a one-file fixture.
+
+    ``pruned`` is the prune evidence the collector recorded for the file.
+    """
     import json
     import subprocess
     import sys
@@ -396,9 +399,8 @@ def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, basel
 
     futures = tmp_path / "user_data" / "data" / "gmx" / "futures"
     futures.mkdir(parents=True, exist_ok=True)
-    name = "ETH_USDC_USDC-1d-futures.feather"
-    today = pd.Timestamp.now(tz="UTC").normalize()
-    dates = pd.date_range(end=today - pd.Timedelta(days=1), periods=after_rows, freq="D")
+    name = "ETH_USDC_USDC-4h-futures.feather"
+    dates = pd.date_range("2026-10-01", periods=after_rows, freq="4h", tz="UTC")
     pd.DataFrame({"date": dates}).to_feather(futures / name)
     baseline_path = tmp_path / "restore.json"
     baseline_path.write_text(
@@ -407,14 +409,18 @@ def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, basel
                 name: {
                     "rows": baseline_rows,
                     "min_date": dates.min().isoformat(),
-                    "max_date": baseline_max(today).isoformat(),
+                    "max_date": dates.max().isoformat(),
                 }
             }
         )
     )
+    prune_path = tmp_path / "prune.json"
+    if pruned:
+        prune_path.write_text(json.dumps({name: pruned}))
     code = _step("Validate candle history integrity")["run"]
     code = code.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
     code = code.replace("/tmp/gmx-restore-manifest.json", str(baseline_path))
+    code = code.replace("/tmp/gmx-prune-report.json", str(prune_path))
     src = str(Path(__file__).resolve().parents[1] / "src")
     return subprocess.run(
         [sys.executable, "-c", code],
@@ -425,18 +431,23 @@ def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, basel
     )
 
 
-def test_history_guard_tolerates_pruning_one_trailing_open_bar(tmp_path) -> None:
-    # Baseline's newest 1d bar is today's (still open); the collector prunes it.
-    proc = _run_history_validation(tmp_path, 10, 9, lambda today: today)
+def test_history_guard_tolerates_exactly_the_recorded_prunes(tmp_path) -> None:
+    # A 03:59 repair pruned the 00:00 4h bar; validation at 04:01 must still pass
+    # because the collector recorded it, whatever the wall clock says.
+    proc = _run_history_validation(tmp_path, 10, 9, ["2026-10-02T00:00:00+00:00"])
     assert proc.returncode == 0, proc.stderr
 
 
-def test_history_guard_still_fails_on_other_shrinkage(tmp_path) -> None:
-    import pandas as pd
+def test_history_guard_rejects_shrinkage_without_or_beyond_prune_evidence(tmp_path) -> None:
+    assert _run_history_validation(tmp_path, 10, 9, []).returncode != 0
+    one = ["2026-10-02T00:00:00+00:00"]
+    assert _run_history_validation(tmp_path, 10, 8, one).returncode != 0
 
-    # Two rows lost: more than the one open bar the collector may prune.
-    proc = _run_history_validation(tmp_path, 10, 8, lambda today: today)
-    assert proc.returncode != 0
-    # Baseline's newest bar was already closed: any shrinkage is a regression.
-    proc = _run_history_validation(tmp_path, 10, 9, lambda today: today - pd.Timedelta(days=1))
-    assert proc.returncode != 0
+
+def test_collect_step_writes_the_prune_report_outside_the_packaged_tree(tmp_path) -> None:
+    proc = _run_collect_step(tmp_path, "")
+    args = [line[4:] for line in proc.stdout.splitlines() if line.startswith("ARG:")]
+    report = args[args.index("--prune-report") + 1]
+    assert report == "/tmp/gmx-prune-report.json"
+    assert "user_data" not in report  # the release tarballs pack user_data/data/gmx/
+    assert report in _step("Validate candle history integrity")["run"]

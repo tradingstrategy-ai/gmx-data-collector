@@ -240,7 +240,7 @@ jobs:
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
           REPAIR_TIMEFRAMES: ${{ github.event.inputs.repair_timeframes }}
         run: |
-          ARGS=(--output-dir ./user_data)
+          ARGS=(--output-dir ./user_data --prune-report /tmp/gmx-prune-report.json)
           if [ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]; then
             ARGS+=(--repair-ohlcv)
             echo "repair_ohlcv=true: filling interior holes with MAX_CANDLE_LIMIT"
@@ -267,21 +267,16 @@ jobs:
 
           import pandas as pd
 
-          TF_INTERVAL = {
-              "1m": pd.Timedelta(minutes=1),
-              "5m": pd.Timedelta(minutes=5),
-              "15m": pd.Timedelta(minutes=15),
-              "1h": pd.Timedelta(hours=1),
-              "4h": pd.Timedelta(hours=4),
-              "1d": pd.Timedelta(days=1),
-          }
-
           baseline_path = Path("/tmp/gmx-restore-manifest.json")
           if not baseline_path.exists():
               print("ERROR: missing restore manifest; cannot validate candle history.", file=sys.stderr)
               sys.exit(1)
 
           baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          prune_path = Path("/tmp/gmx-prune-report.json")
+          pruned = (
+              json.loads(prune_path.read_text(encoding="utf-8")) if prune_path.exists() else {}
+          )
           futures_dir = Path("./user_data/data/gmx/futures")
           current = {}
 
@@ -309,15 +304,9 @@ jobs:
               after = current.get(name)
               if not after:
                   continue
-              # The collector never stores a bar that has not closed yet, so it may
-              # prune the one trailing bar that was still open when the baseline
-              # was cut (a same-day rerun/repair of a pre-fix release).
-              interval = TF_INTERVAL.get(name.split("-")[1] if "-" in name else "")
-              tolerated = 0
-              if interval is not None and (
-                  pd.Timestamp(before["max_date"]) + interval > pd.Timestamp.now(tz="UTC")
-              ):
-                  tolerated = 1
+              # The collector never stores a bar that has not closed yet and records
+              # every open row it prunes; tolerate exactly those rows, nothing else.
+              tolerated = len(pruned.get(name, []))
               if after["rows"] < before["rows"] - tolerated:
                   regressions.append(
                       f"{name} row count shrank from {before['rows']} to {after['rows']}"

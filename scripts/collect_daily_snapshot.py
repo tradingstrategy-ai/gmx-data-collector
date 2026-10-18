@@ -44,6 +44,7 @@ Usage::
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
@@ -165,7 +166,7 @@ def _merge_feather(
     prefer_dense: bool = True,
     closed_before: pd.Timestamp | None = None,
     interval: pd.Timedelta | None = None,
-) -> None:
+) -> list[pd.Timestamp]:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
     Existing historical data is never deleted. By default, overlapping
@@ -193,10 +194,12 @@ def _merge_feather(
         persisted result too -- including ones already on disk, e.g. restored
         from a release cut before open bars stopped being stored.
     :param interval: Bar length used with ``closed_before``.
+    :returns: Timestamps of the open rows pruned from what was on disk (empty
+        when nothing was pruned). The release guard uses this as evidence.
     """
     prune_open = closed_before is not None and interval is not None
     if new_df.empty and not (prune_open and filepath.exists()):
-        return
+        return []
 
     if not new_df.empty:
         if new_df["date"].dt.tz is None:
@@ -224,12 +227,15 @@ def _merge_feather(
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
+    pruned: list[pd.Timestamp] = []
     if prune_open:
         closed = combined["date"] + interval <= closed_before
+        pruned = list(combined.loc[~closed, "date"])
         if new_df.empty and closed.all():
-            return  # nothing new and nothing to prune: leave the file untouched
+            return []  # nothing new and nothing to prune: leave the file untouched
         combined = combined[closed].reset_index(drop=True)
     atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
+    return pruned
 
 
 def incremental_candle_limit(
@@ -1712,6 +1718,15 @@ def collect_and_save_ohlcv(
                 gate = has_ohlcv_through(
                     filepath, expected_last + _TIMEFRAME_DELTAS[tf], force=force_refresh
                 )
+                if (
+                    gate.skip
+                    and pre_stats is not None
+                    and pre_stats["max_date"] <= now < pre_stats["max_date"] + _TIMEFRAME_DELTAS[tf]
+                ):
+                    # Newest stored bar has started but not closed (a pre-fix
+                    # release, or a mid-bar run): never retain it -- collect so
+                    # it is pruned.
+                    gate = SkipDecision(False, "open_tail", gate.existing_rows, 0)
                 if gate.skip and _tail_is_stale_density(filepath, tf):
                     console.print(
                         f"    [yellow]STALE DENSITY: {symbol}/{tf} — timestamps are "
@@ -1762,13 +1777,14 @@ def collect_and_save_ohlcv(
                     }
                 )
 
-                _merge_feather(
+                pruned = _merge_feather(
                     new_rows,
                     filepath,
                     prefer_dense=not (repair_tf or force_refresh),
                     closed_before=now,
                     interval=_TIMEFRAME_DELTAS[tf],
                 )
+                entry["pruned_open"] = [pd.Timestamp(t).isoformat() for t in pruned]
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
 
@@ -1805,6 +1821,24 @@ def collect_and_save_ohlcv(
         )
     )
     return saved, failed, coverage
+
+
+def write_prune_report(coverage: dict[tuple[str, str], dict], path: Path) -> None:
+    """Record which feather files had an open bar pruned, and at which timestamps.
+
+    The release workflow's candle-history guard tolerates exactly these rows
+    shrinking a file and nothing else. Written outside the packaged data tree.
+
+    :param coverage: Coverage map from :func:`collect_and_save_ohlcv`.
+    :param path: Destination JSON file ``{feather name: [ISO timestamps]}``.
+    """
+    report = {
+        f"{sym}_USDC_USDC-{tf}-futures.feather": entry["pruned_open"]
+        for (sym, tf), entry in sorted(coverage.items())
+        if entry.get("pruned_open")
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
 def _summarise_daily_files(dir_path: Path) -> dict:
@@ -2381,6 +2415,15 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--prune-report",
+        type=Path,
+        default=None,
+        help=(
+            "Write a JSON map of feather files that had a not-yet-closed bar pruned "
+            "(and its timestamps) to this path. Used by the release integrity guard."
+        ),
+    )
+    parser.add_argument(
         "--repair-timeframes",
         type=parse_repair_timeframes,
         default=None,
@@ -2487,6 +2530,8 @@ Examples:
         repair=args.repair_ohlcv,
         repair_timeframes=args.repair_timeframes,
     )
+    if args.prune_report is not None:
+        write_prune_report(ohlcv_coverage, args.prune_report)
     console.print()
 
     # Phase 3: 24h per-market volume runs in a separate workflow (collect-volume.yml)

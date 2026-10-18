@@ -974,6 +974,85 @@ class TestOhlcvIncrementalLookback:
             written = pd.to_datetime(pd.read_feather(filepath)["date"], utc=True)
             assert written.max() == pd.Timestamp("2026-10-17", tz="UTC")
 
+    def test_same_day_run_does_not_skip_a_file_whose_tail_bar_is_still_open(
+        self, tmp_path, monkeypatch
+    ):
+        """Legacy state: Oct-18 07:28, a stored Oct-18 1d row (written by a pre-fix
+        release) is still open. The gate must not wave the file through, and the
+        open row must not be retained."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-04-01", "2026-10-18", freq="D", tz="UTC")
+        frame = _make_ohlcv(stored, [1.0] * len(stored))
+        frame["high"] = 2.0
+        feather.write_feather(frame, filepath)
+
+        class Api:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                dates = pd.date_range("2026-10-16", "2026-10-18", freq="D", tz="UTC")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}
+                )
+
+        _saved, failed, coverage = cds.collect_and_save_ohlcv(
+            Api(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d"],
+            target_date="2026-10-18",
+            now=pd.Timestamp("2026-10-18 07:28", tz="UTC"),
+        )
+        assert failed == []
+        assert coverage[("ETH", "1d")]["status"] != "SKIPPED"
+        assert coverage[("ETH", "1d")]["pruned_open"] == ["2026-10-18T00:00:00+00:00"]
+        written = pd.to_datetime(pd.read_feather(filepath)["date"], utc=True)
+        assert written.max() == pd.Timestamp("2026-10-17", tz="UTC")
+
+    def test_selective_repair_still_prunes_open_tails_of_unselected_timeframes(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-10-18 07:28", tz="UTC")
+        for tf, freq, end in (("1d", "D", "2026-10-18"), ("4h", "4h", "2026-10-18 04:00")):
+            dates = pd.date_range(end=pd.Timestamp(end, tz="UTC"), periods=60, freq=freq)
+            frame = _make_ohlcv(dates, [1.0] * len(dates))
+            frame["high"] = 2.0
+            feather.write_feather(frame, tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather")
+
+        class Api:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                end = "2026-10-18" if period == "1d" else "2026-10-18 04:00"
+                freq = "D" if period == "1d" else "4h"
+                dates = pd.date_range(end=pd.Timestamp(end, tz="UTC"), periods=5, freq=freq)
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}
+                )
+
+        cds.collect_and_save_ohlcv(
+            Api(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d", "4h"],
+            target_date="2026-10-18",
+            repair=True,
+            repair_timeframes=["4h"],
+            now=now,
+        )
+        last_1d = pd.to_datetime(
+            pd.read_feather(tmp_path / "ETH_USDC_USDC-1d-futures.feather")["date"], utc=True
+        ).max()
+        last_4h = pd.to_datetime(
+            pd.read_feather(tmp_path / "ETH_USDC_USDC-4h-futures.feather")["date"], utc=True
+        ).max()
+        assert last_1d == pd.Timestamp("2026-10-17", tz="UTC")
+        assert last_4h == pd.Timestamp("2026-10-18 00:00", tz="UTC")
+
     def test_repair_timeframes_limits_the_deep_refetch(self, tmp_path, monkeypatch):
         """``repair_timeframes`` restricts the MAX_CANDLE_LIMIT re-fetch (#58).
 
@@ -1063,6 +1142,24 @@ class TestOhlcvIncrementalLookback:
             now=now,
         )
         assert requested == {"1d": cds.MAX_CANDLE_LIMIT, "4h": cds.MAX_CANDLE_LIMIT}
+
+
+class TestPruneReport:
+    def test_writes_only_files_with_pruned_open_bars(self, tmp_path):
+        import json
+
+        from scripts.collect_daily_snapshot import write_prune_report
+
+        coverage = {
+            ("ETH", "1d"): {"pruned_open": ["2026-10-18T00:00:00+00:00"]},
+            ("ETH", "1h"): {"pruned_open": []},
+            ("BTC", "4h"): {"status": "SKIPPED"},
+        }
+        out = tmp_path / "prune.json"
+        write_prune_report(coverage, out)
+        assert json.loads(out.read_text()) == {
+            "ETH_USDC_USDC-1d-futures.feather": ["2026-10-18T00:00:00+00:00"]
+        }
 
 
 class TestParseRepairTimeframes:
