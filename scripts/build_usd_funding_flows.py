@@ -254,6 +254,25 @@ def compute_annual_rates(
     return df.filter(pl.col("delta_usd").is_not_null())
 
 
+def count_eligible_unpriced_events(df: pl.DataFrame) -> int:
+    """Count missing prices only for events eligible for annual-rate output."""
+    if df.is_empty():
+        return 0
+    eligible = df.sort(["market", "collateral_token", "is_long", "block_timestamp"])
+    eligible = eligible.with_columns(
+        pl.col("block_timestamp")
+        .shift(1)
+        .over(["market", "collateral_token", "is_long"])
+        .alias("prev_timestamp")
+    ).with_columns((pl.col("block_timestamp") - pl.col("prev_timestamp")).alias("seconds_diff"))
+    eligible = eligible.filter(
+        pl.col("prev_timestamp").is_not_null()
+        & (pl.col("block_timestamp") >= GMX_V2_GENESIS_TIMESTAMP)
+        & (pl.col("seconds_diff") > 0)
+    )
+    return int(eligible["delta_usd"].is_null().sum())
+
+
 # =============================================================================
 # JOIN PAYING + RECEIVING & AGGREGATE
 # =============================================================================
@@ -332,12 +351,28 @@ def build_usd_flows(
 
 
 def count_unmatched_events(left: pl.DataFrame, right: pl.DataFrame, keys: list[str]) -> int:
-    """Count event rows on the left with no matching key on the right."""
+    """Count eligible event rows on the left absent from the opposite side."""
     if left.is_empty():
         return 0
     if right.is_empty():
         return len(left)
     return len(left.join(right.select(keys).unique(), on=keys, how="anti"))
+
+
+def flow_completeness(
+    paying: pl.DataFrame,
+    receiving: pl.DataFrame,
+    unmatched_paying: int,
+    unmatched_receiving: int,
+    unmatched_prices: int,
+) -> float:
+    """Return the retained fraction of eligible paying and receiving events."""
+    eligible = len(paying) + len(receiving) + unmatched_prices
+    if eligible == 0:
+        return 0.0
+    matched_paying = len(paying) - unmatched_paying
+    matched_receiving = len(receiving) - unmatched_receiving
+    return (matched_paying + matched_receiving) / eligible
 
 
 # =============================================================================
@@ -464,6 +499,9 @@ Examples:
         console.print("  Run extract_oracle_prices_raw.py first.")
         sys.exit(1)
     oracle_raw = pl.read_parquet(oracle_path)
+    if oracle_raw.is_empty():
+        console.print("  [red]Oracle price data is empty; no flows can be priced.[/red]")
+        sys.exit(1)
     console.print(f"  Loaded {len(oracle_raw):,} oracle price events")
 
     if ff_raw.is_empty() or cf_raw.is_empty():
@@ -474,21 +512,34 @@ Examples:
     console.print("\n[bold]Joining oracle prices...[/bold]")
     ff_priced = join_oracle_prices(ff_raw, oracle_raw)
     cf_priced = join_oracle_prices(cf_raw, oracle_raw)
-    unmatched_prices = int(ff_priced["oracle_max_price"].is_null().sum()) + int(
-        cf_priced["oracle_max_price"].is_null().sum()
-    )
-    console.print(f"  Rejected for missing oracle price: {unmatched_prices:,} events")
-
     # Compute annual rates
     console.print("\n[bold]Computing annualised rates...[/bold]")
+    unmatched_prices = count_eligible_unpriced_events(ff_priced) + count_eligible_unpriced_events(
+        cf_priced
+    )
     ff_annual = compute_annual_rates(ff_priced, single_token_mkts, multiplier=2)
     cf_annual = compute_annual_rates(cf_priced, single_token_mkts, multiplier=4)
+
+    # A requested market scopes both the flow build and its completeness gate.
+    if args.market:
+        filter_sym = args.market.split("/")[0].strip()
+        ff_annual = ff_annual.filter(pl.col("symbol") == filter_sym)
+        cf_annual = cf_annual.filter(pl.col("symbol") == filter_sym)
+        # Unpriced counts use the same scope as the output.
+        ff_priced = ff_priced.filter(pl.col("symbol") == filter_sym)
+        cf_priced = cf_priced.filter(pl.col("symbol") == filter_sym)
+        unmatched_prices = count_eligible_unpriced_events(
+            ff_priced
+        ) + count_eligible_unpriced_events(cf_priced)
+    console.print(
+        f"  Rejected for missing oracle price among eligible events: {unmatched_prices:,}"
+    )
 
     event_keys = ["transaction_hash", "market", "collateral_token"]
     unmatched_paying = count_unmatched_events(ff_annual, cf_annual, event_keys)
     unmatched_receiving = count_unmatched_events(cf_annual, ff_annual, event_keys)
     console.print(
-        "  Rejected by paying/receiving join: "
+        "  Unmatched eligible events at paying/receiving join: "
         f"{unmatched_paying:,} paying events, {unmatched_receiving:,} receiving events"
     )
 
@@ -497,24 +548,19 @@ Examples:
     flows = build_usd_flows(ff_annual, cf_annual)
 
     if flows.is_empty():
+        if args.market:
+            console.print(f"\n[yellow]No flows for market {args.market}[/yellow]")
+            sys.exit(0)
         console.print("\n[red]No USD flows survived; existing outputs were not changed.[/red]")
         sys.exit(1)
 
-    # Apply market filter if specified
-    if args.market:
-        filter_sym = args.market.split("/")[0].strip()
-        flows = flows.filter(pl.col("symbol") == filter_sym)
-        if flows.is_empty():
-            console.print(
-                f"\n[red]No flows for market {args.market}; existing outputs were not changed.[/red]"
-            )
-            sys.exit(1)
-
-    matched_rows = len(
-        ff_annual.join(cf_annual.select(event_keys).unique(), on=event_keys, how="inner")
+    completeness = flow_completeness(
+        ff_annual,
+        cf_annual,
+        unmatched_paying,
+        unmatched_receiving,
+        unmatched_prices,
     )
-    eligible_events = len(ff_annual) + len(cf_annual) + unmatched_prices
-    completeness = (2 * matched_rows / eligible_events) if eligible_events else 0.0
     console.print(f"  Completeness: {completeness:.2%} (minimum {args.min_completeness:.2%})")
     if completeness < args.min_completeness:
         console.print(
