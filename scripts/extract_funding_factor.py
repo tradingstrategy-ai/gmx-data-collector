@@ -58,11 +58,8 @@ EXAMPLES
     # Quick test on small block range
     poetry run python scripts/extract_funding_factor.py --from-block 290000000 --to-block 290100000 --output json
 
-    # Incremental cronjob
+    # Incremental update; also rebuild missing/legacy companions from persisted raw history
     poetry run python scripts/extract_funding_factor.py --resume
-
-    # Rebuild factor companions from the full raw history
-    poetry run python scripts/extract_funding_factor.py --from-block 120000000
 
     # Background mode
     poetry run python scripts/extract_funding_factor.py --resume --background
@@ -315,6 +312,11 @@ def save_checkpoint(
         "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
+    previous = load_checkpoint(path)
+    if previous and all(
+        previous.get(key) == value for key, value in checkpoint.items() if key != "last_updated"
+    ):
+        return
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
     console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
@@ -615,7 +617,11 @@ async def extract_funding_events(
 
                 block_num = log.block_number or 0
                 ts = block_timestamps.get(block_num, 0)
-                dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat() if ts else ""
+                if ts <= 0:
+                    raise ValueError(
+                        f"Funding event at block {block_num} has no valid block timestamp"
+                    )
+                dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
 
                 rate = factor_raw / FUNDING_FACTOR_PRECISION
 
@@ -701,6 +707,8 @@ def aggregate_hourly_rates(
     """
     if not records:
         return {}
+    if any(record.block_timestamp <= 0 for record in records):
+        raise ValueError("Funding event timestamp must be a positive Unix timestamp")
 
     rows_by_market: dict[tuple[str, str], list[FundingFactorRecord]] = defaultdict(list)
     for record in records:
@@ -799,8 +807,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
     """
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    if filepath.exists():
-        existing = pl.read_parquet(filepath)
+    existing = pl.read_parquet(filepath) if filepath.exists() else None
+    if existing is not None:
         for col in existing.columns:
             if col in df.columns and existing[col].dtype != df[col].dtype:
                 df = df.with_columns(pl.col(col).cast(existing[col].dtype))
@@ -816,7 +824,7 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=["timestamp"], keep="last")
         combined = combined.sort("timestamp")
 
-    if filepath.exists() and pl.read_parquet(filepath).equals(combined):
+    if existing is not None and existing.equals(combined):
         return
     atomic_write_parquet(combined, filepath)
 
@@ -855,7 +863,12 @@ def save_rates_per_symbol(hourly_by_symbol: dict[str, "pl.DataFrame"], output_di
         console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
 
 
-def rebuild_rates_from_raw(output_dir: Path, market_filter: str | None = None) -> None:
+def rebuild_rates_from_raw(
+    output_dir: Path,
+    market_filter: str | None = None,
+    symbols: set[str] | None = None,
+    repair_only: bool = False,
+) -> None:
     """Rebuild factor companions from persisted raw events.
 
     This also repairs old runs that appended factor aggregates into canonical
@@ -867,8 +880,16 @@ def rebuild_rates_from_raw(output_dir: Path, market_filter: str | None = None) -
     symbol_filter = market_filter.split("/")[0].strip() if market_filter else None
     records = []
     for raw_path in sorted(raw_dir.glob("*/partition=0/data.parquet")):
-        if symbol_filter and raw_path.parts[-3] != symbol_filter:
+        symbol = raw_path.parts[-3]
+        if symbol_filter and symbol != symbol_filter:
             continue
+        if symbols is not None and symbol not in symbols:
+            continue
+        factor_path = output_dir / "rates" / symbol / "1h_factor.parquet"
+        if repair_only and factor_path.exists():
+            schema = pl.read_parquet_schema(factor_path)
+            if "source" not in schema and "is_gap_filled" in schema:
+                continue
         records.extend(FundingFactorRecord(**row) for row in pl.read_parquet(raw_path).to_dicts())
     if records:
         save_rates_per_symbol(aggregate_hourly_rates(records), output_dir)
@@ -1011,7 +1032,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
     if from_block >= to_block:
         if args.output == "parquet":
-            rebuild_rates_from_raw(output_dir, args.market)
+            rebuild_rates_from_raw(output_dir, args.market, repair_only=True)
         console.print(
             f"\n[yellow]Already up to date "
             f"(from_block {from_block:,} >= to_block {to_block:,})[/yellow]"
@@ -1023,19 +1044,48 @@ async def async_main(args: argparse.Namespace) -> None:
         previous = load_checkpoint(checkpoint_path)
         resume_base_total = previous["total_events"] if previous else 0
     persisted_events = 0
+    pending_records: list[FundingFactorRecord] = []
+    pending_processed_block = from_block
+    last_processed_block = from_block
+
+    def flush_pending() -> None:
+        nonlocal persisted_events, pending_processed_block
+        if not pending_records:
+            return
+        save_raw_per_symbol(pending_records, output_dir)
+        persisted_events += len(pending_records)
+        batch_timestamp = max(record.block_timestamp for record in pending_records)
+        if args.resume:
+            save_checkpoint(
+                checkpoint_path,
+                last_block=pending_processed_block,
+                last_timestamp=batch_timestamp,
+                total_events=resume_base_total + persisted_events,
+                markets_seen=len({record.symbol for record in pending_records}),
+            )
+        pending_records.clear()
 
     def persist_batch(batch: list[FundingFactorRecord], processed_block: int) -> None:
-        nonlocal persisted_events
+        nonlocal pending_processed_block, last_processed_block
+        last_processed_block = max(last_processed_block, processed_block)
         if batch:
-            save_raw_per_symbol(batch, output_dir)
-            persisted_events += len(batch)
-        save_checkpoint(
-            checkpoint_path,
-            last_block=processed_block,
-            last_timestamp=max((r.block_timestamp for r in batch), default=int(time.time())),
-            total_events=resume_base_total + persisted_events,
-            markets_seen=len({r.symbol for r in batch}),
-        )
+            pending_records.extend(batch)
+        if pending_records:
+            pending_processed_block = max(pending_processed_block, processed_block)
+        if len(pending_records) >= FLUSH_EVERY:
+            flush_pending()
+        elif args.resume and not pending_records:
+            previous = load_checkpoint(checkpoint_path)
+            if previous is None or processed_block > previous["last_block"]:
+                save_checkpoint(
+                    checkpoint_path,
+                    last_block=processed_block,
+                    last_timestamp=previous["last_timestamp"] if previous else int(time.time()),
+                    total_events=resume_base_total + persisted_events,
+                    markets_seen=(
+                        previous.get("metadata", {}).get("markets_seen", 0) if previous else 0
+                    ),
+                )
 
     console.print()
     records = await extract_funding_events(
@@ -1045,32 +1095,54 @@ async def async_main(args: argparse.Namespace) -> None:
         to_block=to_block,
         market_filter=args.market,
         markets=markets,
-        on_batch=persist_batch if args.resume and args.output == "parquet" else None,
+        on_batch=persist_batch if args.output == "parquet" else None,
     )
+
+    if args.output == "parquet":
+        flush_pending()
+        if args.resume:
+            previous = load_checkpoint(checkpoint_path)
+            if previous is None or last_processed_block > previous["last_block"]:
+                save_checkpoint(
+                    checkpoint_path,
+                    last_block=last_processed_block,
+                    last_timestamp=previous["last_timestamp"] if previous else int(time.time()),
+                    total_events=resume_base_total + persisted_events,
+                    markets_seen=(
+                        previous.get("metadata", {}).get("markets_seen", 0) if previous else 0
+                    ),
+                )
 
     if not records:
         console.print("\n[yellow]No Funding events found.[/yellow]")
         if args.output == "parquet":
-            rebuild_rates_from_raw(output_dir, args.market)
+            rebuild_rates_from_raw(output_dir, args.market, repair_only=True)
         if args.resume:
             prior_checkpoint = load_checkpoint(checkpoint_path)
             save_checkpoint(
                 checkpoint_path,
                 last_block=max(to_block, prior_checkpoint["last_block"] if prior_checkpoint else 0),
-                last_timestamp=int(time.time()),
+                last_timestamp=(
+                    prior_checkpoint["last_timestamp"] if prior_checkpoint else int(time.time())
+                ),
                 total_events=resume_base_total,
-                markets_seen=prior_checkpoint["markets_seen"] if prior_checkpoint else 0,
+                markets_seen=(
+                    prior_checkpoint.get("metadata", {}).get("markets_seen", 0)
+                    if prior_checkpoint
+                    else 0
+                ),
             )
         return
 
     # Save outputs
     console.print()
     if args.output == "parquet":
-        if not args.resume:
-            save_raw_per_symbol(records, output_dir)
-
         with console.status("Aggregating hourly rates..."):
-            rebuild_rates_from_raw(output_dir, args.market)
+            rebuild_rates_from_raw(
+                output_dir,
+                args.market,
+                symbols={record.symbol for record in records},
+            )
     elif args.output == "json":
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"gmx_v2_funding_factor_{args.network}_{from_block}_{to_block}_{ts}"

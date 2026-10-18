@@ -162,6 +162,46 @@ def test_datastore_only_merge_adds_missing_provenance_columns(tmp_path):
     assert out["is_gap_filled"].to_list() == [False]
 
 
+def test_merge_ignores_legacy_factor_companion_without_raw_backing(tmp_path):
+    rates_dir = tmp_path / "rates"
+    direction_dir = tmp_path / "direction"
+    sym_dir = rates_dir / "LTC"
+    sym_dir.mkdir(parents=True)
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "funding_rate": [-1e-9],
+            "funding_rate_hourly": [-3.6e-6],
+            "funding_fee_long": [0.01],
+            "funding_fee_short": [-0.01],
+            "longs_pay_shorts": [False],
+            "symbol": ["LTC"],
+            "market": ["0xltc"],
+        },
+        schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+    ).write_parquet(sym_dir / "1h_datastore.parquet")
+    pl.DataFrame(
+        {
+            "timestamp": [timestamp],
+            "funding_rate": [2e-9],
+            "funding_rate_hourly": [7.2e-6],
+            "funding_fee_long": [None],
+            "source": ["hypersync"],
+            "symbol": ["LTC"],
+            "market": ["0xltc"],
+        },
+        schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+    ).write_parquet(sym_dir / "1h_factor.parquet")
+
+    _unified.merge_symbol("LTC", rates_dir, direction_dir)
+    out = pl.read_parquet(sym_dir / "1h.parquet")
+
+    assert out["source"].to_list() == ["datastore"]
+    assert out["funding_fee_long"].to_list() == [0.01]
+    assert out["funding_fee_short"].to_list() == [-0.01]
+
+
 def test_merge_cli_accepts_makefile_block_range_flags():
     args = _unified.build_parser().parse_args(["--from-block", "10", "--to-block", "20"])
     assert args.from_block == 10
@@ -216,9 +256,11 @@ def test_direction_flush_recomputes_touched_hour_from_all_persisted_events(tmp_p
         )
 
     fee.save_raw_per_symbol([record(1, True, 100)], tmp_path)
-    fee.rebuild_direction_from_raw(tmp_path)
-    fee.save_raw_per_symbol([record(2, False, 1)], tmp_path)
-    fee.rebuild_direction_from_raw(tmp_path)
+    first = [record(1, True, 100)]
+    fee.rebuild_direction_from_raw(tmp_path, touched_records=first)
+    second = [record(2, False, 1)]
+    fee.save_raw_per_symbol(second, tmp_path)
+    fee.rebuild_direction_from_raw(tmp_path, touched_records=second)
 
     out = pl.read_parquet(tmp_path / "direction" / "ETH" / "1h.parquet")
     assert out["longs_pay_shorts"].to_list() == [True]

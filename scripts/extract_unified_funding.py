@@ -377,15 +377,6 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
 # =============================================================================
 
 
-def rename_factor_outputs(network_dir: Path) -> None:
-    """Compatibility no-op: factor extraction writes its own companion file.
-
-    Never infer that canonical ``1h.parquet`` is factor input. Old polluted
-    companions are rebuilt from raw events by ``extract_funding_factor.py``.
-    """
-    del network_dir
-
-
 # =============================================================================
 # MERGE LOGIC
 # =============================================================================
@@ -568,17 +559,21 @@ def merge_symbol(
 
     # --- Source 2: HyperSync Funding Factor (V2.2+, unsigned) ---
     factor_path = rates_dir / symbol / "1h_factor.parquet"
-    if factor_path.exists():
+    raw_factor_path = rates_dir.parent / "raw" / "funding" / symbol / "partition=0" / "data.parquet"
+    if factor_path.exists() and raw_factor_path.exists():
         hs_df = pl.read_parquet(factor_path)
-        hs_df = forward_fill_hourly_grid(hs_df)
+        # Legacy unified companions carry a source label and can contain
+        # DataStore rows. Never reinterpret them as unsigned factor input.
+        if "source" not in hs_df.columns:
+            hs_df = forward_fill_hourly_grid(hs_df)
 
-        # --- Source 3: Direction correction (forward-filled, see helper) ---
-        direction_path = direction_dir / symbol / "1h.parquet"
-        dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
-        hs_df = apply_direction_to_rates(hs_df, dir_df)
+            # --- Source 3: Direction correction (forward-filled, see helper) ---
+            direction_path = direction_dir / symbol / "1h.parquet"
+            dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
+            hs_df = apply_direction_to_rates(hs_df, dir_df)
 
-        hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
-        frames.append(hs_df)
+            hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
+            frames.append(hs_df)
 
     if not frames:
         return None

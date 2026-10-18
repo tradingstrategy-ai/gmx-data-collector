@@ -150,3 +150,24 @@ def test_factor_rebuild_uses_raw_history_and_never_touches_canonical(tmp_path):
 
 def test_aggregate_empty_records():
     assert aggregate_hourly_rates([]) == {}
+
+
+def test_aggregate_rejects_missing_block_timestamps():
+    with pytest.raises(ValueError, match="positive Unix timestamp"):
+        aggregate_hourly_rates([_rec(1, datetime.fromtimestamp(0, tz=UTC), 1.0)])
+
+
+def test_unchanged_checkpoint_is_not_rewritten(tmp_path):
+    checkpoint = tmp_path / "funding_factor_checkpoint.json"
+    values = {
+        "last_block": 123,
+        "last_timestamp": 1_700_000_000,
+        "total_events": 5,
+        "markets_seen": 2,
+    }
+    _factor.save_checkpoint(checkpoint, **values)
+    before = hashlib.sha256(checkpoint.read_bytes()).digest()
+
+    _factor.save_checkpoint(checkpoint, **values)
+
+    assert hashlib.sha256(checkpoint.read_bytes()).digest() == before
