@@ -167,7 +167,7 @@ Daily snapshots are published as **GitHub Releases**. Use the helper script:
 ./scripts/download_gmx_data.sh --release data-2026-04-27
 ```
 
-Requires `gh` CLI authenticated (`gh auth login`). Releases are kept for 14 days.
+Requires `gh` CLI authenticated (`gh auth login`). Releases are kept for 14 days, except that the newest release carrying a funding-state asset is retained beyond that until a newer one replaces it.
 
 > **Note (2026-04-27):** The previous `data/daily-collection` branch is deprecated.
 > It will not receive further updates. New consumers should use the Releases path above.
@@ -194,14 +194,14 @@ missing ones are copied, so `-q` is safe to re-run and easy to undo
 
 Each `data-YYYY-MM-DD` release carries `gmx-full.tar.gz`, `gmx-light.tar.gz` and
 `data_report.txt` (the report is the authority for current symbol counts, per-timeframe
-date ranges and freshness), plus `gmx-funding-state.tar.gz` when funding state exists.
+date ranges and freshness), plus `gmx-funding-state-<YYYYMMDDTHHMMSSZ>.tar.gz` when funding state exists.
 Candles ship as **feather only** — there are no `.parquet` candle files in the release.
 
 | Asset | Contents |
 |---|---|
 | `gmx-full.tar.gz` | Everything under `user_data/data/gmx/` except the raw funding state: `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, `ticks/`, `checkpoints/`, `futures/` (OHLCV `-futures` feathers for 1m/5m/15m/1h/4h/1d, plus `1h` `-funding_rate` and `1h` `-mark` feathers and `_cadence_manifest.json`), `funding_coverage.json` and `delisted_markets.json`. The backtest bundle. |
 | `gmx-light.tar.gz` | `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, the `futures/*-1h-funding_rate.feather` files and `funding_coverage.json`. **No OHLCV candles and no mark** (mark is derived from the candles). |
-| `gmx-funding-state.tar.gz` | Raw funding state the next daily run resumes from. Shipped only when funding state exists on the runner. Not a consumer artifact. |
+| `gmx-funding-state-<YYYYMMDDTHHMMSSZ>.tar.gz` | Raw funding state the next daily run resumes from. Stamped name, never replaced in place; the newest stamp in the newest release that carries one is restored. Shipped only when funding state exists on the runner. Not a consumer artifact. |
 | `gmx-ticks.tar.gz`, `gmx-ticks.manifest.json` | Trade-tick intake assets; present only when the tick intake publishes them. |
 
 The release notes list a per-asset/timeframe **Coverage** table inside a collapsed
@@ -620,7 +620,7 @@ and `futures/{PAIR}-1h-mark.feather` (#56). Which bundle carries what is in
 [What the daily release contains](#what-the-daily-release-contains); the freqtrade settings
 and the exported-value semantics are in [Funding data contract](#funding-data-contract).
 
-How it runs (`release-data.yml`): restore the state asset, `extract_unified_funding.py
+How it runs (`release-data.yml`): restore the newest stamped state asset (from the newest retained release that has one), `extract_unified_funding.py
 --resume` (HyperSync only), export through the shared signed exporter into a **staging
 directory**, grade every pair (`gmx_historical_data.series_coverage`), and copy the
 staged files over `futures/` only if the gate passes. If it does not, `futures/` keeps
