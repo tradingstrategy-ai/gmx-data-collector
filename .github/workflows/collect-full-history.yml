@@ -248,7 +248,7 @@ jobs:
             --network arbitrum \
             --output-dir "../data/$DATA_ROOT/data/gmx/open_interest" \
             --output parquet \
-            --from-block 120000000
+            --resume
 
       - name: Commit open interest
         working-directory: data

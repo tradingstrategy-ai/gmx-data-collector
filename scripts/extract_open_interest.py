@@ -529,12 +529,30 @@ def load_checkpoint(path: Path) -> dict | None:
         return None
 
 
+def checkpoint_last_values(checkpoint: dict | None) -> dict[tuple[str, str, str, bool], int]:
+    """Restore combo-level OI state from a checkpoint, tolerating old formats."""
+    values = {}
+    for item in (checkpoint or {}).get("last_values", []):
+        try:
+            key = (
+                str(item["symbol"]),
+                str(item["market"]).lower(),
+                str(item["collateral"]).lower(),
+                bool(item["is_long"]),
+            )
+            values[key] = int(item["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return values
+
+
 def save_checkpoint(
     path: Path,
     last_block: int,
     last_timestamp: int,
     total_events: int,
     markets_seen: int,
+    last_values: dict[tuple[str, str, str, bool], int] | None = None,
 ) -> None:
     """Save checkpoint to JSON file.
 
@@ -552,6 +570,18 @@ def save_checkpoint(
         "total_events": total_events,
         "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
+        # Store combo-level state: aggregate snapshots alone cannot restore a
+        # silent market/collateral/side when an incremental run resumes.
+        "last_values": [
+            {
+                "symbol": symbol,
+                "market": market,
+                "collateral": collateral,
+                "is_long": is_long,
+                "value": value,
+            }
+            for (symbol, market, collateral, is_long), value in sorted((last_values or {}).items())
+        ],
     }
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
@@ -1002,7 +1032,10 @@ async def extract_oi_events(
 # =============================================================================
 
 
-def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISnapshot]:
+def compute_daily_snapshots(
+    records: list[OpenInterestRecord],
+    last_values: dict[tuple[str, str, str, bool], int] | None = None,
+) -> list[DailyOISnapshot]:
     """Compute end-of-day OI snapshots per market.
 
     For each (symbol, date), takes the last ``nextValueUsd`` per
@@ -1010,10 +1043,15 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
     collateral tokens for long/short totals.
 
     :param records: List of OpenInterestRecord objects
+    :param last_values: Mutable combo state carried across batches/runs, keyed by
+        (symbol, market, collateralToken, isLong). Updated in place.
     :return: List of DailyOISnapshot objects sorted by (symbol, date)
     """
     if not records:
         return []
+
+    if last_values is None:
+        last_values = {}
 
     # Group by (symbol, date_utc)
     by_symbol_date: dict[tuple[str, str], list[OpenInterestRecord]] = defaultdict(list)
@@ -1030,12 +1068,11 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
         day_records.sort(key=lambda r: (r.blockNumber, r.logIndex))
 
         # Find last nextValueUsd per (market, collateralToken, isLong)
-        last_values: dict[tuple[str, str, bool], int] = {}
         for r in day_records:
             # Only use USD records (eventType == OpenInterestUpdated)
             if r.eventType != "OpenInterestUpdated":
                 continue
-            key = (r.market.lower(), r.collateralToken.lower(), r.isLong)
+            key = (symbol, r.market.lower(), r.collateralToken.lower(), r.isLong)
             try:
                 last_values[key] = int(r.nextValueUsd)
             except (ValueError, TypeError):
@@ -1044,7 +1081,9 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
         # Sum long and short across all (market, collateralToken) combinations
         long_total_raw = 0
         short_total_raw = 0
-        for (market, collateral, is_long), value in last_values.items():
+        for (state_symbol, market, collateral, is_long), value in last_values.items():
+            if state_symbol != symbol:
+                continue
             if is_long:
                 long_total_raw += value
             else:
@@ -1361,9 +1400,11 @@ async def async_main(args: argparse.Namespace) -> None:
         return
 
     _resume_base_total = 0
+    last_values = {}
     if args.resume:
         _prior = load_checkpoint(checkpoint_path)
         _resume_base_total = _prior["total_events"] if _prior else 0
+        last_values = checkpoint_last_values(_prior)
 
     flush_state: dict = {
         "total_events": 0,
@@ -1382,7 +1423,7 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         save_raw_per_symbol(batch, output_dir)
         with console.status("Computing daily snapshots..."):
-            batch_snapshots = compute_daily_snapshots(batch)
+            batch_snapshots = compute_daily_snapshots(batch, last_values)
         save_snapshots_per_symbol(batch_snapshots, output_dir)
 
         flush_state["total_events"] += len(batch)
@@ -1399,6 +1440,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=flush_state["last_timestamp"],
                 total_events=_resume_base_total + flush_state["total_events"],
                 markets_seen=len({r.symbol for r in batch}),
+                last_values=last_values,
             )
 
     use_flush = args.output in STREAMABLE_OUTPUTS
@@ -1426,13 +1468,14 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=int(time.time()),
                 total_events=0,
                 markets_seen=0,
+                last_values=last_values,
             )
         return
 
     if records:
         # Aggregate and save any remaining in-memory records
         with console.status("Computing daily snapshots..."):
-            snapshots = compute_daily_snapshots(records)
+            snapshots = compute_daily_snapshots(records, last_values)
 
         console.print()
         if args.output == "parquet":
@@ -1459,6 +1502,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=last_timestamp,
                 total_events=_resume_base_total + flush_state["total_events"] + len(records),
                 markets_seen=unique_markets,
+                last_values=last_values,
             )
 
         print_summary(records, snapshots)
