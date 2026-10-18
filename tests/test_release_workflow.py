@@ -121,6 +121,32 @@ def test_release_workflow_can_opt_in_to_ohlcv_repair() -> None:
     assert '[ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]' in collect
 
 
+def test_release_workflow_can_limit_repair_to_timeframes() -> None:
+    """#58: the 1d/4h backfill must not re-fetch 10000 bars of every timeframe.
+
+    ``repair_timeframes`` (default empty = all) is passed as
+    ``--repair-timeframes`` only on a repair dispatch.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["repair_timeframes"]["default"] == ""
+    assert inputs["repair_timeframes"]["required"] is False
+
+    step = next(
+        s for s in workflow["jobs"]["release"]["steps"] if s.get("name") == "Collect daily snapshot"
+    )
+    collect = step["run"]
+    assert "--repair-timeframes" in collect
+    # Free-text input goes through env, never interpolated into the script.
+    assert step["env"]["REPAIR_TIMEFRAMES"] == "${{ github.event.inputs.repair_timeframes }}"
+    assert "github.event.inputs.repair_timeframes" not in collect
+    # Only meaningful together with a repair: appended after --repair-ohlcv is set.
+    assert collect.index("--repair-ohlcv") < collect.index("--repair-timeframes")
+    assert collect.index("--repair-timeframes") < collect.index("collect_daily_snapshot.py")
+
+
 def test_cadence_regression_files_a_deduped_issue() -> None:
     text = WORKFLOW.read_text()
 

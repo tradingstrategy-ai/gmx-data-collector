@@ -17,6 +17,10 @@ on:
         description: 'Re-fetch MAX_CANDLE_LIMIT candles and merge to fill interior 1m holes (2026-09-08 02:17). Off on the daily cron.'
         required: false
         default: 'false'
+      repair_timeframes:
+        description: 'With repair_ohlcv=true: comma-separated timeframes to re-fetch (e.g. 1d,4h). Empty = all timeframes.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -234,11 +238,16 @@ jobs:
         env:
           JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+          REPAIR_TIMEFRAMES: ${{ github.event.inputs.repair_timeframes }}
         run: |
           REPAIR_FLAG=""
           if [ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]; then
             REPAIR_FLAG="--repair-ohlcv"
             echo "repair_ohlcv=true: filling interior holes with MAX_CANDLE_LIMIT"
+            if [ -n "$REPAIR_TIMEFRAMES" ]; then
+              REPAIR_FLAG="$REPAIR_FLAG --repair-timeframes $REPAIR_TIMEFRAMES"
+              echo "repair_timeframes=$REPAIR_TIMEFRAMES"
+            fi
           fi
           PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data $REPAIR_FLAG
 
