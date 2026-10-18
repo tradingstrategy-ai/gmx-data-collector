@@ -226,6 +226,24 @@ def test_reverted_datastore_read_is_a_failure_not_zero(monkeypatch):
         _extract(rpc, monkeypatch, [1000, 1001])
 
 
+@pytest.mark.parametrize(
+    ("values", "statuses"),
+    [([1, 2], [0]), ([1, 2], [0, 3]), ([1], [0, 0])],
+)
+def test_read_all_markets_bytecode_validates_reader_output(values, statuses):
+    """Short, mismatched or unknown-status reader output must raise, not drop markets."""
+
+    class _Eth:
+        def call(self, tx, block_identifier):
+            return abi_encode(["int256[]", "uint8[]"], [values, statuses])
+
+    class _W3:
+        eth = _Eth()
+
+    with pytest.raises(mod.FundingExtractionError):
+        mod.read_all_markets_bytecode(_W3(), [ETH, BTC], 1000)
+
+
 def test_reader_source_has_no_catch_to_zero():
     src = (
         Path(__file__).resolve().parents[1] / "contracts" / "GMXFundingRateBatch.sol"

@@ -227,6 +227,31 @@ def prefetch_block_timestamps(
     return timestamps
 
 
+def _decode_funding_row(
+    data: bytes, market_addresses: list[str], label: str
+) -> dict[str, int | None]:
+    """Decode one batch-reader result into ``{market: value}``.
+
+    The value is ``None`` for a market with no code at that block.
+
+    :raises ValueError: On a length mismatch, an unknown status or a failed read.
+    """
+    values, statuses = abi_decode(["int256[]", "uint8[]"], data)
+    if len(values) != len(market_addresses) or len(statuses) != len(market_addresses):
+        raise ValueError(
+            f"{label}: expected {len(market_addresses)} values, got {len(values)}/{len(statuses)}"
+        )
+    row: dict[str, int | None] = {}
+    for addr, value, status in zip(market_addresses, values, statuses):
+        if status == READ_OK:
+            row[addr] = value
+        elif status == READ_NOT_DEPLOYED:
+            row[addr] = None
+        else:
+            raise ValueError(f"{label}: DataStore read failed for {addr} (status {status})")
+    return row
+
+
 def batch_fetch_funding_rates(
     rpc_config: str,
     market_addresses: list[str],
@@ -291,21 +316,7 @@ def batch_fetch_funding_rates(
                 raw = item.get("result")
                 if not isinstance(raw, str) or raw in ("", "0x"):
                     raise ValueError(f"block {bn}: empty result")
-                values, statuses = abi_decode(["int256[]", "uint8[]"], bytes.fromhex(raw[2:]))
-                if len(values) != len(market_addresses) or len(statuses) != len(market_addresses):
-                    raise ValueError(
-                        f"block {bn}: expected {len(market_addresses)} values, got {len(values)}"
-                    )
-                row: dict[str, int | None] = {}
-                for addr, value, status in zip(market_addresses, values, statuses):
-                    if status == READ_OK:
-                        row[addr] = value
-                    elif status == READ_NOT_DEPLOYED:
-                        row[addr] = None  # market did not exist at this block
-                    else:
-                        raise ValueError(
-                            f"block {bn}: DataStore read failed for {addr} (status {status})"
-                        )
+                row = _decode_funding_row(bytes.fromhex(raw[2:]), market_addresses, f"block {bn}")
                 parsed[bn] = row
             return parsed
 
@@ -347,16 +358,11 @@ def read_all_markets_bytecode(
         [[Web3.to_checksum_address(a) for a in market_addresses]],
     )
     result = w3.eth.call({"data": calldata}, block_identifier=block_number)
-    values, statuses = abi_decode(["int256[]", "uint8[]"], result)
-    out: dict[str, int] = {}
-    for addr, value, status in zip(market_addresses, values, statuses):
-        if status == READ_FAILED:
-            raise FundingExtractionError(
-                f"DataStore read failed for {addr} at block {block_number}"
-            )
-        if status == READ_OK:
-            out[addr] = value
-    return out
+    try:
+        row = _decode_funding_row(result, market_addresses, f"block {block_number}")
+    except ValueError as exc:
+        raise FundingExtractionError(str(exc)) from exc
+    return {addr: value for addr, value in row.items() if value is not None}
 
 
 @dataclass
