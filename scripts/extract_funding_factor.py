@@ -294,6 +294,7 @@ def save_checkpoint(
     last_timestamp: int,
     total_events: int,
     markets_seen: int,
+    previous_checkpoint: dict | None = None,
 ) -> None:
     """Save checkpoint to JSON file.
 
@@ -312,7 +313,7 @@ def save_checkpoint(
         "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
-    previous = load_checkpoint(path)
+    previous = previous_checkpoint if previous_checkpoint is not None else load_checkpoint(path)
     if previous and all(
         previous.get(key) == value for key, value in checkpoint.items() if key != "last_updated"
     ):
@@ -895,6 +896,27 @@ def rebuild_rates_from_raw(
         save_rates_per_symbol(aggregate_hourly_rates(records), output_dir)
 
 
+def rebuild_rates_for_records(
+    output_dir: Path,
+    market_filter: str | None,
+    records: list[FundingFactorRecord],
+) -> None:
+    """Rebuild changed symbols and cheaply repair legacy companions elsewhere.
+
+    A records-bearing run only updates symbols present in its event batch.
+    Other symbols can still have polluted companions from an older extractor
+    version, so run the schema-based repair scan across the selected market
+    scope as well.
+    """
+    if records:
+        rebuild_rates_from_raw(
+            output_dir,
+            market_filter,
+            symbols={record.symbol for record in records},
+        )
+    rebuild_rates_from_raw(output_dir, market_filter, repair_only=True)
+
+
 def save_json(data: list, filename: str) -> None:
     """Save to JSON.
 
@@ -1039,10 +1061,19 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         return
 
-    resume_base_total = 0
-    if args.resume:
-        previous = load_checkpoint(checkpoint_path)
-        resume_base_total = previous["total_events"] if previous else 0
+    checkpoint_state = load_checkpoint(checkpoint_path) if args.resume else None
+    resume_base_total = checkpoint_state["total_events"] if checkpoint_state else 0
+
+    def persist_checkpoint(**values: int) -> None:
+        nonlocal checkpoint_state
+        save_checkpoint(checkpoint_path, **values, previous_checkpoint=checkpoint_state)
+        checkpoint_state = {
+            "last_block": values["last_block"],
+            "last_timestamp": values["last_timestamp"],
+            "total_events": values["total_events"],
+            "metadata": {"markets_seen": values["markets_seen"]},
+        }
+
     persisted_events = 0
     pending_records: list[FundingFactorRecord] = []
     pending_processed_block = from_block
@@ -1056,8 +1087,7 @@ async def async_main(args: argparse.Namespace) -> None:
         persisted_events += len(pending_records)
         batch_timestamp = max(record.block_timestamp for record in pending_records)
         if args.resume:
-            save_checkpoint(
-                checkpoint_path,
+            persist_checkpoint(
                 last_block=pending_processed_block,
                 last_timestamp=batch_timestamp,
                 total_events=resume_base_total + persisted_events,
@@ -1075,10 +1105,9 @@ async def async_main(args: argparse.Namespace) -> None:
         if len(pending_records) >= FLUSH_EVERY:
             flush_pending()
         elif args.resume and not pending_records:
-            previous = load_checkpoint(checkpoint_path)
+            previous = checkpoint_state
             if previous is None or processed_block > previous["last_block"]:
-                save_checkpoint(
-                    checkpoint_path,
+                persist_checkpoint(
                     last_block=processed_block,
                     last_timestamp=previous["last_timestamp"] if previous else int(time.time()),
                     total_events=resume_base_total + persisted_events,
@@ -1101,10 +1130,9 @@ async def async_main(args: argparse.Namespace) -> None:
     if args.output == "parquet":
         flush_pending()
         if args.resume:
-            previous = load_checkpoint(checkpoint_path)
+            previous = checkpoint_state
             if previous is None or last_processed_block > previous["last_block"]:
-                save_checkpoint(
-                    checkpoint_path,
+                persist_checkpoint(
                     last_block=last_processed_block,
                     last_timestamp=previous["last_timestamp"] if previous else int(time.time()),
                     total_events=resume_base_total + persisted_events,
@@ -1118,9 +1146,8 @@ async def async_main(args: argparse.Namespace) -> None:
         if args.output == "parquet":
             rebuild_rates_from_raw(output_dir, args.market, repair_only=True)
         if args.resume:
-            prior_checkpoint = load_checkpoint(checkpoint_path)
-            save_checkpoint(
-                checkpoint_path,
+            prior_checkpoint = checkpoint_state
+            persist_checkpoint(
                 last_block=max(to_block, prior_checkpoint["last_block"] if prior_checkpoint else 0),
                 last_timestamp=(
                     prior_checkpoint["last_timestamp"] if prior_checkpoint else int(time.time())
@@ -1138,11 +1165,7 @@ async def async_main(args: argparse.Namespace) -> None:
     console.print()
     if args.output == "parquet":
         with console.status("Aggregating hourly rates..."):
-            rebuild_rates_from_raw(
-                output_dir,
-                args.market,
-                symbols={record.symbol for record in records},
-            )
+            rebuild_rates_for_records(output_dir, args.market, records)
     elif args.output == "json":
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"gmx_v2_funding_factor_{args.network}_{from_block}_{to_block}_{ts}"
@@ -1154,7 +1177,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
     # Save checkpoint
     if args.resume:
-        prior_checkpoint = load_checkpoint(checkpoint_path)
+        prior_checkpoint = checkpoint_state
         last_block = max(
             max(r.block_number for r in records),
             prior_checkpoint["last_block"] if prior_checkpoint else 0,
@@ -1164,8 +1187,7 @@ async def async_main(args: argparse.Namespace) -> None:
 
         prev_total = resume_base_total if not persisted_events else 0
 
-        save_checkpoint(
-            checkpoint_path,
+        persist_checkpoint(
             last_block=last_block,
             last_timestamp=last_timestamp,
             total_events=(resume_base_total + persisted_events)

@@ -148,6 +148,31 @@ def test_factor_rebuild_uses_raw_history_and_never_touches_canonical(tmp_path):
     assert pl.read_parquet(canonical_path).equals(canonical)
 
 
+def test_records_rebuild_repairs_quiet_polluted_symbols(tmp_path):
+    """A new event for ETH must also repair a quiet market's polluted companion."""
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    eth = _rec(1, base, 1.0, symbol="ETH")
+    quiet = _rec(2, base + timedelta(hours=2), 2.0, symbol="X")
+
+    _factor.save_raw_per_symbol([eth, quiet], tmp_path)
+    for symbol in ("ETH", "X"):
+        factor_path = tmp_path / "rates" / symbol / "1h_factor.parquet"
+        factor_path.parent.mkdir(parents=True, exist_ok=True)
+        pl.DataFrame(
+            {
+                "timestamp": [base],
+                "funding_rate": [999.0],
+                "source": ["hypersync"],
+            }
+        ).write_parquet(factor_path)
+
+    _factor.rebuild_rates_for_records(tmp_path, market_filter=None, records=[eth])
+
+    repaired = pl.read_parquet(tmp_path / "rates" / "X" / "1h_factor.parquet")
+    assert repaired["funding_rate"].to_list() == [2.0]
+    assert "source" not in repaired.columns
+
+
 def test_aggregate_empty_records():
     assert aggregate_hourly_rates([]) == {}
 
