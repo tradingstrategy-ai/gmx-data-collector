@@ -299,6 +299,10 @@ def build_datastore_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.refresh_markets:
@@ -324,6 +328,10 @@ def build_factor_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.checkpoint_dir:
@@ -351,6 +359,10 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.checkpoint_dir:
@@ -363,35 +375,6 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
 # =============================================================================
 # POST-PHASE RENAME
 # =============================================================================
-
-
-def rename_factor_outputs(network_dir: Path) -> None:
-    """Rename 1h.parquet -> 1h_factor.parquet to avoid collision with merge output.
-
-    The ``extract_funding_factor.py`` script writes to ``rates/{SYM}/1h.parquet``.
-    The merge step also writes to ``rates/{SYM}/1h.parquet`` as the canonical
-    unified output. This function renames the factor output to a distinct
-    filename before the merge.
-
-    :param network_dir: Network-specific directory (e.g., ``data/funding/arbitrum``).
-    """
-    rates_dir = network_dir / "rates"
-    if not rates_dir.exists():
-        return
-    renamed = 0
-    for sym_dir in rates_dir.iterdir():
-        if not sym_dir.is_dir():
-            continue
-        src = sym_dir / "1h.parquet"
-        dst = sym_dir / "1h_factor.parquet"
-        if src.exists():
-            # Always overwrite: the factor script may have appended new data
-            if dst.exists():
-                dst.unlink()
-            src.rename(dst)
-            renamed += 1
-    if renamed:
-        console.print(f"  Renamed {renamed} factor output(s) to 1h_factor.parquet")
 
 
 # =============================================================================
@@ -521,9 +504,13 @@ def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
     merged = grid.join(rates, on="timestamp", how="left")
 
     # Flag filled rows BEFORE forward-fill (otherwise we lose the signal).
-    merged = merged.with_columns(
-        pl.col("update_count").is_null().alias("is_gap_filled"),
-    )
+    missing_row = pl.col("update_count").is_null()
+    if "is_gap_filled" in merged.columns:
+        merged = merged.with_columns(
+            pl.col("is_gap_filled").fill_null(missing_row).alias("is_gap_filled")
+        )
+    else:
+        merged = merged.with_columns(missing_row.alias("is_gap_filled"))
 
     # Forward-fill rate columns and identifiers. update_count is filled with 0
     # (not forward-filled — a filled hour has zero events by definition).
@@ -572,17 +559,21 @@ def merge_symbol(
 
     # --- Source 2: HyperSync Funding Factor (V2.2+, unsigned) ---
     factor_path = rates_dir / symbol / "1h_factor.parquet"
-    if factor_path.exists():
+    raw_factor_path = rates_dir.parent / "raw" / "funding" / symbol / "partition=0" / "data.parquet"
+    if factor_path.exists() and raw_factor_path.exists():
         hs_df = pl.read_parquet(factor_path)
-        hs_df = forward_fill_hourly_grid(hs_df)
+        # Legacy unified companions carry a source label and can contain
+        # DataStore rows. Never reinterpret them as unsigned factor input.
+        if "source" not in hs_df.columns:
+            hs_df = forward_fill_hourly_grid(hs_df)
 
-        # --- Source 3: Direction correction (forward-filled, see helper) ---
-        direction_path = direction_dir / symbol / "1h.parquet"
-        dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
-        hs_df = apply_direction_to_rates(hs_df, dir_df)
+            # --- Source 3: Direction correction (forward-filled, see helper) ---
+            direction_path = direction_dir / symbol / "1h.parquet"
+            dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
+            hs_df = apply_direction_to_rates(hs_df, dir_df)
 
-        hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
-        frames.append(hs_df)
+            hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
+            frames.append(hs_df)
 
     if not frames:
         return None
@@ -590,8 +581,13 @@ def merge_symbol(
     # Concatenate with schema alignment
     unified = pl.concat(frames, how="diagonal_relaxed")
 
-    # DataStore rows predate is_gap_filled; they are real hourly RPC reads, never filled.
-    unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
+    # Older DataStore files lack provenance columns; make their meaning explicit.
+    if "is_gap_filled" not in unified.columns:
+        unified = unified.with_columns(pl.lit(False).alias("is_gap_filled"))
+    else:
+        unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
+    if "source" not in unified.columns:
+        unified = unified.with_columns(pl.lit("unknown").alias("source"))
 
     # Deduplicate by timestamp (prefer later source — hypersync appended second)
     unified = unified.unique(subset=["timestamp"], keep="last")
@@ -601,6 +597,14 @@ def merge_symbol(
     ext = "feather" if output_format == "feather" else "parquet"
     unified_path = rates_dir / symbol / f"1h.{ext}"
     unified_path.parent.mkdir(parents=True, exist_ok=True)
+    if unified_path.exists():
+        existing = (
+            pl.read_ipc(unified_path)
+            if output_format == "feather"
+            else pl.read_parquet(unified_path)
+        )
+        if existing.equals(unified):
+            return len(unified)
     if output_format == "feather":
         atomic_write_ipc(unified, unified_path)
     else:
@@ -831,6 +835,12 @@ Examples:
         default=None,
         help="Filter by market symbol (e.g., 'ETH/USD')",
     )
+    parser.add_argument(
+        "--from-block", type=int, default=None, help="Start block for bounded extraction"
+    )
+    parser.add_argument(
+        "--to-block", type=int, default=None, help="End block for bounded extraction"
+    )
 
     # Phase control
     parser.add_argument(
@@ -966,9 +976,6 @@ def main():
     # Phase 2: Funding Factor (async, HyperSync) - V2.2+
     if not args.merge_only:
         run_phase("Phase 2: Funding Factor (HyperSync)", build_factor_cmd(args))
-
-        # Rename 1h.parquet -> 1h_factor.parquet before merge
-        rename_factor_outputs(network_dir)
 
     # Phase 3: Direction (async, HyperSync) - full range
     if not args.skip_direction and not args.merge_only:

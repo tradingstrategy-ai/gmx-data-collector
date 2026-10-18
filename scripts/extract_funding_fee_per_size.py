@@ -303,6 +303,11 @@ def save_checkpoint(
         "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
     }
+    previous = load_checkpoint(path)
+    if previous and all(
+        previous.get(key) == value for key, value in checkpoint.items() if key != "last_updated"
+    ):
+        return
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
     console.print(f"  Checkpoint saved: block [cyan]{last_block:,}[/cyan] -> [green]{path}[/green]")
@@ -804,8 +809,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
     """
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    if filepath.exists():
-        existing = pl.read_parquet(filepath)
+    existing = pl.read_parquet(filepath) if filepath.exists() else None
+    if existing is not None:
         for col in existing.columns:
             if col in df.columns and existing[col].dtype != df[col].dtype:
                 df = df.with_columns(pl.col(col).cast(existing[col].dtype))
@@ -820,6 +825,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=["timestamp"], keep="last")
         combined = combined.sort("timestamp")
 
+    if existing is not None and existing.equals(combined):
+        return
     atomic_write_parquet(combined, filepath)
 
 
@@ -854,6 +861,41 @@ def save_direction_per_symbol(
         filepath = output_dir / "direction" / symbol / "1h.parquet"
         append_parquet(df, filepath)
         console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
+
+
+def rebuild_direction_from_raw(
+    output_dir: Path,
+    market_filter: str | None = None,
+    touched_records: list[FundingFeePerSizeRecord] | None = None,
+) -> dict[str, "pl.DataFrame"]:
+    """Recompute only touched hourly directions from complete raw-hour events."""
+    if not touched_records:
+        return {}
+    raw_dir = output_dir / "raw" / "fee_per_size"
+    if not raw_dir.exists():
+        return {}
+    symbol_filter = market_filter.split("/")[0].strip() if market_filter else None
+    hours_by_symbol: dict[str, set[int]] = defaultdict(set)
+    for record in touched_records:
+        hours_by_symbol[record.symbol].add(record.block_timestamp // 3600 * 3600)
+    records = []
+    for raw_path in sorted(raw_dir.glob("*/data.parquet")):
+        if symbol_filter and raw_path.parent.name != symbol_filter:
+            continue
+        touched_hours = hours_by_symbol.get(raw_path.parent.name)
+        if not touched_hours:
+            continue
+        hour_predicates = [
+            (pl.col("block_timestamp") >= start) & (pl.col("block_timestamp") < start + 3600)
+            for start in touched_hours
+        ]
+        raw_events = pl.read_parquet(raw_path).filter(pl.any_horizontal(hour_predicates))
+        records.extend(FundingFeePerSizeRecord(**row) for row in raw_events.to_dicts())
+    if records:
+        hourly = aggregate_hourly_direction(records)
+        save_direction_per_symbol(hourly, output_dir)
+        return hourly
+    return {}
 
 
 def save_feather_freqtrade(
@@ -1069,8 +1111,7 @@ async def async_main(args: argparse.Namespace) -> None:
         if args.output in STREAMABLE_OUTPUTS:
             save_raw_per_symbol(batch, output_dir)
             with console.status("Aggregating hourly rates..."):
-                hourly = aggregate_hourly_direction(batch)
-            save_direction_per_symbol(hourly, output_dir)
+                hourly = rebuild_direction_from_raw(output_dir, args.market, touched_records=batch)
             if args.feather_dir or args.output == "feather":
                 feather_out = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
                 save_feather_freqtrade(hourly, feather_out)
@@ -1110,12 +1151,15 @@ async def async_main(args: argparse.Namespace) -> None:
     if not has_data:
         console.print("\n[yellow]No FundingFeeAmountPerSizeUpdated events found.[/yellow]")
         if args.resume:
+            previous = load_checkpoint(checkpoint_path)
             save_checkpoint(
                 checkpoint_path,
-                last_block=to_block,
-                last_timestamp=int(time.time()),
-                total_events=0,
-                markets_seen=0,
+                last_block=max(to_block, previous["last_block"] if previous else 0),
+                last_timestamp=(previous["last_timestamp"] if previous else int(time.time())),
+                total_events=previous["total_events"] if previous else 0,
+                markets_seen=(
+                    previous.get("metadata", {}).get("markets_seen", 0) if previous else 0
+                ),
             )
         return
 
@@ -1125,14 +1169,17 @@ async def async_main(args: argparse.Namespace) -> None:
         if args.output == "parquet":
             save_raw_per_symbol(records, output_dir)
             with console.status("Aggregating hourly rates..."):
-                hourly = aggregate_hourly_direction(records)
-            save_direction_per_symbol(hourly, output_dir)
+                hourly = rebuild_direction_from_raw(
+                    output_dir, args.market, touched_records=records
+                )
             if args.feather_dir:
                 save_feather_freqtrade(hourly, Path(args.feather_dir))
         elif args.output == "feather":
             with console.status("Aggregating hourly rates..."):
-                hourly = aggregate_hourly_direction(records)
-            save_direction_per_symbol(hourly, output_dir)
+                save_raw_per_symbol(records, output_dir)
+                hourly = rebuild_direction_from_raw(
+                    output_dir, args.market, touched_records=records
+                )
             feather_dir = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
             save_feather_freqtrade(hourly, feather_dir)
         elif args.output == "json":
