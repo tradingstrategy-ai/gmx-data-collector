@@ -696,6 +696,8 @@ def export_feather(
     console.print("  Feather Export (FreqTrade format)")
     console.print(f"{'=' * 70}")
 
+    from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+
     rates_dir = network_dir / "rates"
     if not rates_dir.exists():
         console.print("  [yellow]No rates directory found[/yellow]")
@@ -704,14 +706,27 @@ def export_feather(
     gmx_dir = feather_dir / "data" / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
 
+    # The same exporter that backs ``make export-funding``: one signed hourly
+    # transformation and one guarded merge writer, so the two entry points
+    # cannot drift apart (issue #60).
+    exporter = FreqtradeExporter(network_dir, feather_dir / "data", funding_dir=rates_dir)
+
     symbols: dict[str, Path] = {}
     for d in rates_dir.iterdir():
         if not d.is_dir():
             continue
-        if (d / "1h.feather").exists():
-            symbols[d.name] = d / "1h.feather"
-        elif (d / "1h.parquet").exists():
+        # ``1h.parquet`` is the single authoritative source -- the file
+        # ``export_funding`` reads -- so both entry points agree whatever
+        # stale ``1h.feather`` is lying around. A feather-only lake predates
+        # that convention; read it, but say so.
+        if (d / "1h.parquet").exists():
             symbols[d.name] = d / "1h.parquet"
+        elif (d / "1h.feather").exists():
+            console.print(
+                f"  [yellow]{d.name}: no 1h.parquet, falling back to legacy 1h.feather "
+                "-- re-run the merge to regenerate parquet[/yellow]"
+            )
+            symbols[d.name] = d / "1h.feather"
 
     if market_filter:
         filter_sym = market_symbol_from_filter(market_filter)
@@ -721,43 +736,37 @@ def export_feather(
     for symbol in sorted(symbols):
         unified_path = symbols[symbol]
         df = (
-            pl.read_ipc(unified_path)
+            pl.read_ipc(unified_path, memory_map=False)
             if unified_path.suffix == ".feather"
             else pl.read_parquet(unified_path)
         )
         if df.is_empty():
             continue
 
-        # open = per-settlement funding rate (per 1h for GMX continuous accrual)
-        #      = funding_rate_per_second × 3600 (same unit as Hyperliquid 1h settlement).
-        rate_expr = (
-            pl.col("funding_rate_hourly")
-            if "funding_rate_hourly" in df.columns
-            else pl.col("funding_rate") * 3600
+        n_before = len(exporter.funding_reconciliations)
+        written = exporter.export_funding_frame(
+            symbol,
+            "1h",
+            df,
+            gmx_dir=gmx_dir,
+            output_format="feather",
+            quote_currency=quote_currency,
         )
-
-        result = (
-            df.select(
-                pl.col("timestamp").cast(pl.Datetime("ns", "UTC")).alias("date"),
-                rate_expr.cast(pl.Float64).alias("open"),
-            )
-            .with_columns(
-                pl.lit(0.0).alias("high"),
-                pl.lit(0.0).alias("low"),
-                pl.lit(0.0).alias("close"),
-                pl.lit(0.0).alias("volume"),
-            )
-            .select(["date", "open", "high", "low", "close", "volume"])
-            .sort("date")
-            .unique(subset=["date"], keep="first", maintain_order=True)
-            .drop_nulls(subset=["open"])
-        )
-
-        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
-        filepath = gmx_dir / filename
-        atomic_write_ipc(result, filepath)
+        for rec in exporter.funding_reconciliations[n_before:]:
+            if not rec.clean:
+                console.print(
+                    f"  [yellow]{symbol:<12}[/yellow] {len(rec.missing_hours)} source hour(s) "
+                    f"missing, {len(rec.null_rate_hours)} null-rate, "
+                    f"{len(rec.unknown_direction_hours)} unknown-direction row(s) excluded"
+                )
+        if not written:
+            continue
         exported += 1
-        console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
+        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
+        console.print(
+            f"  [green]{symbol:<12}[/green] {exporter.funding_reconciliations[-1].exported_hours:>8,}"
+            f" source hours -> {gmx_dir / filename}"
+        )
 
     console.print(f"\n  Exported {exported} feather file(s) to {gmx_dir}")
 

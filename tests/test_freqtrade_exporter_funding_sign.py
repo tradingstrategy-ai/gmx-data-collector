@@ -8,14 +8,18 @@ hours where shorts actually pay. These tests pin the signing in
 :meth:`FreqtradeExporter._transform_funding_rate`:
 
 - known direction: ``+|rate|`` when longs pay, ``-|rate|`` when shorts pay;
-- unknown direction (``null``, before the first observation): value unchanged;
+- unknown direction (``null``, before the first observation): a nonzero unsigned
+  magnitude is excluded (never exported positive); zeros and already-signed
+  values are kept;
 - no ``longs_pay_shorts`` column (already-signed sources): value unchanged;
-- the ``funding_rate`` fallback column is signed the same way.
+- the ``funding_rate`` fallback column is per-second, so it is scaled by 3600
+  and then signed the same way.
 """
 
 from datetime import UTC, datetime
 
 import polars as pl
+import pytest
 
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
 
@@ -48,8 +52,8 @@ def test_rate_is_signed_by_direction(tmp_path):
     assert out.columns == ["date", "open", "high", "low", "close", "volume"]
 
 
-def test_unknown_direction_keeps_the_value(tmp_path):
-    """Hours before the first direction observation are left as stored."""
+def test_unknown_direction_unsigned_magnitude_is_excluded(tmp_path):
+    """A nonzero magnitude with unknown direction is not exported as "longs pay"."""
     df = pl.DataFrame(
         {
             "timestamp": _hours(3),
@@ -58,9 +62,26 @@ def test_unknown_direction_keeps_the_value(tmp_path):
         }
     )
 
+    out, report = FreqtradeExporter(tmp_path, tmp_path)._transform_funding_rate_with_report(df)
+
+    assert out["open"].to_list() == [-3e-6]
+    assert report.unknown_direction_hours == tuple(_hours(2).to_list())
+
+
+def test_unknown_direction_zero_and_signed_values_are_kept(tmp_path):
+    """Genuine zeros and already-signed values survive a null direction."""
+    df = pl.DataFrame(
+        {
+            "timestamp": _hours(3),
+            "funding_rate_hourly": [0.0, -2e-6, 3e-6],
+            "longs_pay_shorts": pl.Series([None, None, None], dtype=pl.Boolean),
+            "source": ["hypersync", "hypersync", "datastore"],
+        }
+    )
+
     out = FreqtradeExporter(tmp_path, tmp_path)._transform_funding_rate(df)
 
-    assert out["open"].to_list() == [1e-6, 2e-6, -3e-6]
+    assert out["open"].to_list() == [0.0, -2e-6, 3e-6]
 
 
 def test_without_direction_column_values_pass_through(tmp_path):
@@ -92,8 +113,8 @@ def test_direction_decides_the_sign_even_if_the_rate_is_signed(tmp_path):
     assert out["open"].to_list() == [-2e-6, 3e-6]
 
 
-def test_funding_rate_fallback_is_signed(tmp_path):
-    """When ``funding_rate_hourly`` is absent, ``funding_rate`` is signed the same way."""
+def test_funding_rate_fallback_is_per_hour_and_signed(tmp_path):
+    """Without ``funding_rate_hourly`` the per-second ``funding_rate`` is x3600, then signed."""
     df = pl.DataFrame(
         {
             "timestamp": _hours(2),
@@ -104,7 +125,7 @@ def test_funding_rate_fallback_is_signed(tmp_path):
 
     out = FreqtradeExporter(tmp_path, tmp_path)._transform_funding_rate(df)
 
-    assert out["open"].to_list() == [2.8e-10, -5.6e-10]
+    assert out["open"].to_list() == pytest.approx([2.8e-10 * 3600, -5.6e-10 * 3600])
 
 
 def test_export_funding_writes_signed_rates(tmp_path):
