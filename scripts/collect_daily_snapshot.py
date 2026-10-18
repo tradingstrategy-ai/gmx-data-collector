@@ -875,11 +875,11 @@ def _feather_date_stats(filepath: Path) -> dict | None:
 def _funding_export_summary(futures_dir: Path) -> dict:
     """Summarise the funding-rate exports sitting beside the candle feathers.
 
-    Funding is not collected by this script and is not refreshed by the daily
-    release -- the files ride along inside ``gmx-full.tar.gz`` untouched. That
-    is exactly why they need reporting: without it, a funding export going
-    stale, orphaned or missing is invisible until a downstream backtest fails
-    (issue #47).
+    Funding is not collected by this script. The release workflow refreshes the
+    canonical ``1h`` companions in its own gated steps (#56, see
+    ``gmx_historical_data.series_coverage``); this summary still reports what
+    sits beside the candles, so a variant going stale, orphaned or missing is
+    visible rather than discovered by a downstream backtest (issue #47).
 
     Reports two things: how far the canonical ``1h`` export reaches, and which
     other variants are present that nothing produces any more.
