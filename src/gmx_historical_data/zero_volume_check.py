@@ -1,18 +1,11 @@
-"""Per-symbol zero-volume check -- collector bug or a genuinely quiet market?
+"""Per-symbol zero-volume check comparing candle and tick-volume sources.
 
-Some GMX markets are listed but barely traded (BOME, BRETT, MEME, MEW, SATS
-at the time this was written), so "this pair's recent candles are almost all
-zero volume" is not, by itself, evidence that anything is broken. What tells
-a dormant market apart from a collector defect is open interest: a pair with
-negligible OI *and* zero volume is quiet because nobody is trading it, while
-a pair carrying real OI but reporting zero volume is suspicious -- positions
-are open, so the underlying market is active even though the volume series
-says otherwise.
+Open interest can remain open for weeks without fresh fills, so it is context
+rather than evidence of a collection gap. A suspicious result requires tick
+volume in the same window where candles report almost none.
 
-Pure module: it takes already-computed zero-volume shares and open-interest
-totals and never touches the filesystem or a DataFrame, so the classification
-rule is testable without fixture candles. The I/O -- reading recent 1h
-candles and today's snapshot -- lives in ``scripts/collect_daily_snapshot.py``.
+Pure module: the caller supplies precomputed zero-volume shares, open interest,
+and tick-volume sums. Filesystem I/O lives in ``scripts/collect_daily_snapshot.py``.
 """
 
 from __future__ import annotations
@@ -44,12 +37,10 @@ NEGLIGIBLE_OI_USD = 1_000.0
 class ZeroVolumeVerdict(Enum):
     """What a pair's zero-volume streak means, once OI is checked.
 
-    :cvar EXPECTED: Negligible OI alongside the zero volume -- nobody is
-        trading this market; nothing to report.
-    :cvar SUSPICIOUS: Non-trivial OI despite zero reported volume --
-        positions are open, so this looks like a collector defect.
-    :cvar UNKNOWN: No OI data for this pair (missing snapshot or OI column).
-        Reported as such rather than guessed at.
+    :cvar EXPECTED: No tick-volume evidence contradicts the quiet candles.
+    :cvar SUSPICIOUS: Tick volume exists despite almost-zero candle volume.
+    :cvar UNKNOWN: Retained for compatibility; current classification uses
+        source disagreement rather than OI availability.
     """
 
     EXPECTED = "expected (no activity)"
@@ -67,7 +58,7 @@ class ZeroVolumeFinding:
     :param candles: How many candles were in the lookback window.
     :param open_interest_usd: Today's OI for this pair, or ``None`` when no
         OI data was available for it.
-    :param verdict: What the OI says about whether this is expected.
+    :param verdict: Whether tick volume disagrees with candle volume.
     """
 
     pair: str
@@ -81,6 +72,7 @@ def classify_zero_volume(
     zero_share_by_pair: dict[str, tuple[float, int]],
     open_interest_by_pair: dict[str, float],
     live_pairs: set[str] | None = None,
+    tick_volume_by_pair: dict[str, float] | None = None,
     share_threshold: float = ZERO_VOLUME_SHARE_THRESHOLD,
     negligible_oi_usd: float = NEGLIGIBLE_OI_USD,
 ) -> list[ZeroVolumeFinding]:
@@ -88,19 +80,20 @@ def classify_zero_volume(
 
     :param zero_share_by_pair: Pair -> ``(zero_share, candle_count)`` over
         the lookback window.
-    :param open_interest_by_pair: Pair -> today's OI in USD. A pair absent
-        from this dict is graded :attr:`ZeroVolumeVerdict.UNKNOWN` rather
-        than assumed either way.
+    :param open_interest_by_pair: Pair -> today's OI in USD, shown as context.
+    :param tick_volume_by_pair: Pair -> summed perp tick volume over the same
+        window. Missing pairs are treated as zero tick volume.
     :param live_pairs: Pairs to consider -- callers exclude delisted markets
         before calling this, since a delisted market's frozen history is
         expected to stop trading entirely. ``None`` considers every pair
         present in ``zero_share_by_pair``.
     :param share_threshold: Minimum zero-candle share to flag a pair.
-    :param negligible_oi_usd: OI at or below this reads as "no activity".
+    :param negligible_oi_usd: Deprecated compatibility parameter; ignored.
     :returns: Findings for every pair at or above ``share_threshold``,
         sorted by descending zero share.
     """
     findings: list[ZeroVolumeFinding] = []
+    tick_volume_by_pair = tick_volume_by_pair or {}
     for pair, (share, count) in zero_share_by_pair.items():
         if live_pairs is not None and pair not in live_pairs:
             continue
@@ -108,12 +101,11 @@ def classify_zero_volume(
             continue
 
         oi = open_interest_by_pair.get(pair)
-        if oi is None:
-            verdict = ZeroVolumeVerdict.UNKNOWN
-        elif oi <= negligible_oi_usd:
-            verdict = ZeroVolumeVerdict.EXPECTED
-        else:
-            verdict = ZeroVolumeVerdict.SUSPICIOUS
+        verdict = (
+            ZeroVolumeVerdict.SUSPICIOUS
+            if tick_volume_by_pair.get(pair, 0.0) > 0
+            else ZeroVolumeVerdict.EXPECTED
+        )
 
         findings.append(ZeroVolumeFinding(pair, share, count, oi, verdict))
 
@@ -122,7 +114,7 @@ def classify_zero_volume(
 
 
 def suspicious_findings(findings: list[ZeroVolumeFinding]) -> list[ZeroVolumeFinding]:
-    """Return the findings whose OI says the silence is not expected.
+    """Return findings where tick volume disagrees with candle volume.
 
     :param findings: Output of :func:`classify_zero_volume`.
     :returns: Findings graded :attr:`ZeroVolumeVerdict.SUSPICIOUS`.

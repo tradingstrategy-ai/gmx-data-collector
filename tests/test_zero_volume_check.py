@@ -53,22 +53,33 @@ class TestClassifyZeroVolume:
 
         assert findings[0].verdict is ZeroVolumeVerdict.EXPECTED
 
-    def test_zero_volume_with_real_oi_is_suspicious(self):
+    def test_zero_volume_with_tick_volume_is_suspicious(self):
         findings = classify_zero_volume(
             zero_share_by_pair={"AAA_USDC_USDC": (1.0, 720)},
             open_interest_by_pair={"AAA_USDC_USDC": 5_000_000.0},
+            tick_volume_by_pair={"AAA_USDC_USDC": 12.0},
         )
 
         assert findings[0].verdict is ZeroVolumeVerdict.SUSPICIOUS
 
-    def test_missing_oi_data_is_unknown_not_a_crash(self):
+    def test_both_sources_zero_is_expected_regardless_of_oi(self):
         findings = classify_zero_volume(
             zero_share_by_pair={"AAA_USDC_USDC": (1.0, 720)},
-            open_interest_by_pair={},
+            open_interest_by_pair={"AAA_USDC_USDC": 5_000_000.0},
+            tick_volume_by_pair={"AAA_USDC_USDC": 0.0},
         )
 
-        assert findings[0].verdict is ZeroVolumeVerdict.UNKNOWN
-        assert findings[0].open_interest_usd is None
+        assert findings[0].verdict is ZeroVolumeVerdict.EXPECTED
+        assert findings[0].open_interest_usd == 5_000_000.0
+
+    def test_nonzero_ticks_with_zero_oi_is_still_suspicious(self):
+        findings = classify_zero_volume(
+            zero_share_by_pair={"AAA_USDC_USDC": (1.0, 720)},
+            open_interest_by_pair={"AAA_USDC_USDC": 0.0},
+            tick_volume_by_pair={"AAA_USDC_USDC": 12.0},
+        )
+
+        assert findings[0].verdict is ZeroVolumeVerdict.SUSPICIOUS
 
     def test_delisted_pairs_are_excluded_via_live_pairs(self):
         findings = classify_zero_volume(
@@ -127,6 +138,7 @@ class TestSuspiciousFindings:
                 "QUIET_USDC_USDC": 0.0,
                 "BUG_USDC_USDC": 2_000_000.0,
             },
+            tick_volume_by_pair={"BUG_USDC_USDC": 1.0},
         )
 
         suspicious = suspicious_findings(findings)

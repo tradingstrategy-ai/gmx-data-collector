@@ -105,7 +105,6 @@ from gmx_historical_data.quickstart import (
     seed_from_release,
 )
 from gmx_historical_data.zero_volume_check import (
-    NEGLIGIBLE_OI_USD,
     ZERO_VOLUME_LOOKBACK_DAYS,
     ZERO_VOLUME_SHARE_THRESHOLD,
     classify_zero_volume,
@@ -1012,6 +1011,34 @@ def _zero_volume_shares(
     return result
 
 
+def _tick_volume_by_symbol(
+    gmx_root: Path, lookback_days: int, now: pd.Timestamp
+) -> dict[str, float]:
+    """Sum perp tick sidecar volume by symbol over the candle window."""
+    tick_dir = gmx_root / "tick_volume"
+    if not tick_dir.is_dir():
+        return {}
+    cutoff = now - pd.Timedelta(days=lookback_days)
+    totals: dict[str, float] = {}
+    for path in tick_dir.glob("*.parquet"):
+        try:
+            frame = pd.read_parquet(path, columns=["symbol", "date", "timeframe", "kind", "volume"])
+            dates = pd.to_datetime(frame["date"], utc=True)
+            window = frame.loc[
+                (dates >= cutoff)
+                & (dates <= now)
+                & (frame["timeframe"] == "1h")
+                & (frame["kind"] == "perp")
+            ]
+            for symbol, group in window.groupby("symbol"):
+                totals[str(symbol).upper()] = totals.get(str(symbol).upper(), 0.0) + float(
+                    group["volume"].sum()
+                )
+        except Exception:
+            continue
+    return totals
+
+
 def _pair_symbol(pair: str) -> str | None:
     """Extract a pair's base symbol, the same way ``cadence_gate`` does.
 
@@ -1125,16 +1152,26 @@ def _append_zero_volume_section(
             if symbol is not None and symbol in oi_by_symbol:
                 oi_by_pair[pair] = oi_by_symbol[symbol]
 
-        findings = classify_zero_volume(zero_shares, oi_by_pair, live_pairs=live_pairs)
+        tick_volume_by_symbol = _tick_volume_by_symbol(gmx_root, ZERO_VOLUME_LOOKBACK_DAYS, now)
+        tick_volume_by_pair = {
+            pair: tick_volume_by_symbol.get(symbol, 0.0)
+            for pair in live_pairs
+            if (symbol := _pair_symbol(pair)) is not None
+        }
+        findings = classify_zero_volume(
+            zero_shares,
+            oi_by_pair,
+            live_pairs=live_pairs,
+            tick_volume_by_pair=tick_volume_by_pair,
+        )
 
         lines.append("")
         lines.append("## Per-Symbol Zero-Volume Check")
         lines.append(
             f"  Live pairs whose 1h candles were at least "
             f"{ZERO_VOLUME_SHARE_THRESHOLD:.0%} zero-volume over the last "
-            f"{ZERO_VOLUME_LOOKBACK_DAYS}d. OI below ${NEGLIGIBLE_OI_USD:,.0f} "
-            f"reads as genuinely dormant (expected); real OI with no volume "
-            f"looks like a collector defect (suspicious)."
+            f"{ZERO_VOLUME_LOOKBACK_DAYS}d. Tick volume without corresponding "
+            f"candle volume is suspicious; OI is shown as context."
         )
         if not findings:
             lines.append("  (none)")
@@ -1151,10 +1188,10 @@ def _append_zero_volume_section(
         if os.environ.get("GITHUB_ACTIONS") == "true":
             for f in suspicious_findings(findings):
                 print(
-                    f"::warning::zero-volume with open interest: {f.pair} is "
+                    f"::warning::zero-volume cross-source mismatch: {f.pair} is "
                     f"{f.zero_share:.0%} zero-volume over {ZERO_VOLUME_LOOKBACK_DAYS}d "
-                    f"but carries ${f.open_interest_usd:,.0f} OI -- looks like a "
-                    f"collector defect, not an inactive market"
+                    f"but tick sidecar volume is non-zero (OI context: "
+                    f"${(f.open_interest_usd or 0):,.0f})"
                 )
     except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report check
         console.print(f"  [yellow]WARNING: zero-volume check failed: {exc}[/yellow]")
