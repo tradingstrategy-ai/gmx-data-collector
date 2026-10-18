@@ -17,6 +17,7 @@ import pyarrow.feather as feather
 from scripts.collect_daily_snapshot import (
     _earliest_dates_by_tf,
     _open_interest_usd_by_symbol,
+    _tick_volume_by_symbol,
     _zero_volume_shares,
     generate_report,
 )
@@ -125,9 +126,10 @@ class TestZeroVolumeShares:
 
         result = _zero_volume_shares(tmp_path, lookback_days=30, now=now)
 
-        share, count = result["BOME_USDC_USDC"]
+        share, count, volume_sum = result["BOME_USDC_USDC"]
         assert count == 10
         assert share == 0.8
+        assert volume_sum == 10.0
 
     def test_candles_outside_the_window_are_excluded(self, tmp_path):
         now = pd.Timestamp(datetime(2026, 9, 27, tzinfo=UTC))
@@ -143,7 +145,7 @@ class TestZeroVolumeShares:
 
         result = _zero_volume_shares(tmp_path, lookback_days=30, now=now)
 
-        _share, count = result["AAA_USDC_USDC"]
+        _share, count, _volume_sum = result["AAA_USDC_USDC"]
         assert count == 5  # the old, non-zero candle must not dilute the window
 
     def test_non_1h_files_are_ignored(self, tmp_path):
@@ -151,6 +153,41 @@ class TestZeroVolumeShares:
         _write_candles(tmp_path, "AAA_USDC_USDC", "4h", [now])
 
         assert _zero_volume_shares(tmp_path, 30, now) == {}
+
+
+class TestTickVolumeBySymbol:
+    def test_sums_only_one_hour_perp_rows_in_window(self, tmp_path):
+        tick_dir = tmp_path / "tick_volume"
+        tick_dir.mkdir()
+        now = pd.Timestamp(datetime(2026, 9, 27, tzinfo=UTC))
+        pd.DataFrame(
+            {
+                "symbol": ["AAA", "AAA", "AAA", "AAA"],
+                "date": pd.to_datetime(
+                    [
+                        now - timedelta(hours=1),
+                        now - timedelta(hours=2),
+                        now,
+                        now - timedelta(days=40),
+                    ],
+                    utc=True,
+                ),
+                "timeframe": ["1h", "1h", "4h", "1h"],
+                "kind": ["perp", "swap", "perp", "perp"],
+                "volume": [3.0, 7.0, 11.0, 13.0],
+            }
+        ).to_parquet(tick_dir / "2026-09-27.parquet", index=False)
+
+        assert _tick_volume_by_symbol(tmp_path, 30, now) == {"AAA": 3.0}
+
+    def test_missing_or_unreadable_sidecar_is_unavailable(self, tmp_path):
+        now = pd.Timestamp(datetime(2026, 9, 27, tzinfo=UTC))
+        assert _tick_volume_by_symbol(tmp_path, 30, now) is None
+
+        tick_dir = tmp_path / "tick_volume"
+        tick_dir.mkdir()
+        (tick_dir / "2026-09-27.parquet").write_bytes(b"unreadable")
+        assert _tick_volume_by_symbol(tmp_path, 30, now) is None
 
 
 class TestReportDepthAndVolumeSections:
@@ -282,6 +319,17 @@ class TestReportDepthAndVolumeSections:
         now = datetime(2026, 9, 27, tzinfo=UTC)
         dates = [now - timedelta(hours=i) for i in range(720)]
         _write_candles(futures_dir, "BUGGY_USDC_USDC", "1h", dates, volume=[0.0] * 720)
+        tick_dir = tmp_path / "gmx" / "tick_volume"
+        tick_dir.mkdir(parents=True)
+        pd.DataFrame(
+            {
+                "symbol": ["BUGGY"],
+                "date": [pd.Timestamp(now)],
+                "timeframe": ["1h"],
+                "kind": ["perp"],
+                "volume": [2.0],
+            }
+        ).to_parquet(tick_dir / "2026-09-27.parquet", index=False)
 
         markets_df = self._base_markets_df({"BUGGY": 5_000_000.0})
         content = self._generate(
