@@ -121,6 +121,32 @@ def test_release_workflow_can_opt_in_to_ohlcv_repair() -> None:
     assert '[ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]' in collect
 
 
+def test_release_workflow_can_limit_repair_to_timeframes() -> None:
+    """#58: the 1d/4h backfill must not re-fetch 10000 bars of every timeframe.
+
+    ``repair_timeframes`` (default empty = all) is passed as
+    ``--repair-timeframes`` only on a repair dispatch.
+    """
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert inputs["repair_timeframes"]["default"] == ""
+    assert inputs["repair_timeframes"]["required"] is False
+
+    step = next(
+        s for s in workflow["jobs"]["release"]["steps"] if s.get("name") == "Collect daily snapshot"
+    )
+    collect = step["run"]
+    assert "--repair-timeframes" in collect
+    # Free-text input goes through env, never interpolated into the script.
+    assert step["env"]["REPAIR_TIMEFRAMES"] == "${{ github.event.inputs.repair_timeframes }}"
+    assert "github.event.inputs.repair_timeframes" not in collect
+    # Only meaningful together with a repair: appended after --repair-ohlcv is set.
+    assert collect.index("--repair-ohlcv") < collect.index("--repair-timeframes")
+    assert collect.index("--repair-timeframes") < collect.index("collect_daily_snapshot.py")
+
+
 def test_cadence_regression_files_a_deduped_issue() -> None:
     text = WORKFLOW.read_text()
 
@@ -305,3 +331,123 @@ def test_volume_refresh_step_runs_even_if_volume_collection_fails() -> None:
     )
 
     assert refresh.get("if") == "always()"
+
+
+def _step(name: str) -> dict:
+    import yaml
+
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    return next(s for s in workflow["jobs"]["release"]["steps"] if s.get("name") == name)
+
+
+def _run_collect_step(tmp_path, repair_timeframes: str):
+    """Run the "Collect daily snapshot" script with ``python`` stubbed to echo argv."""
+    import os
+    import subprocess
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "python"
+    stub.write_text('#!/bin/bash\nprintf "ARG:%s\\n" "$@"\n')
+    stub.chmod(0o755)
+    script = tmp_path / "collect.sh"
+    script.write_text(
+        _step("Collect daily snapshot")["run"].replace(
+            "${{ github.event.inputs.repair_ohlcv }}", "true"
+        )
+    )
+    env = {
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "REPAIR_TIMEFRAMES": repair_timeframes,
+    }
+    return subprocess.run(
+        ["bash", "-e", str(script)], env=env, cwd=tmp_path, capture_output=True, text=True
+    )
+
+
+def test_repair_timeframes_is_passed_as_one_normalised_argument(tmp_path) -> None:
+    proc = _run_collect_step(tmp_path, "1d, 4h")
+    assert proc.returncode == 0, proc.stderr
+    args = [line[4:] for line in proc.stdout.splitlines() if line.startswith("ARG:")]
+    assert "--repair-ohlcv" in args
+    assert args[args.index("--repair-timeframes") + 1] == "1d,4h"
+
+
+def test_repair_timeframes_rejects_option_injection(tmp_path) -> None:
+    proc = _run_collect_step(tmp_path, "1d --output-dir /tmp/x")
+    assert proc.returncode != 0
+    assert "ARG:" not in proc.stdout
+
+
+def test_repair_timeframes_empty_adds_no_flag(tmp_path) -> None:
+    proc = _run_collect_step(tmp_path, "")
+    assert proc.returncode == 0, proc.stderr
+    assert "--repair-timeframes" not in proc.stdout
+    assert "ARG:--repair-ohlcv" in proc.stdout
+
+
+def _run_history_validation(tmp_path, baseline_rows: int, after_rows: int, pruned: list):
+    """Run the "Validate candle history integrity" script on a one-file fixture.
+
+    ``pruned`` is the prune evidence the collector recorded for the file.
+    """
+    import json
+    import subprocess
+    import sys
+
+    import pandas as pd
+
+    futures = tmp_path / "user_data" / "data" / "gmx" / "futures"
+    futures.mkdir(parents=True, exist_ok=True)
+    name = "ETH_USDC_USDC-4h-futures.feather"
+    dates = pd.date_range("2026-10-01", periods=after_rows, freq="4h", tz="UTC")
+    pd.DataFrame({"date": dates}).to_feather(futures / name)
+    baseline_path = tmp_path / "restore.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                name: {
+                    "rows": baseline_rows,
+                    "min_date": dates.min().isoformat(),
+                    "max_date": dates.max().isoformat(),
+                }
+            }
+        )
+    )
+    prune_path = tmp_path / "prune.json"
+    if pruned:
+        prune_path.write_text(json.dumps({name: pruned}))
+    code = _step("Validate candle history integrity")["run"]
+    code = code.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    code = code.replace("/tmp/gmx-restore-manifest.json", str(baseline_path))
+    code = code.replace("/tmp/gmx-prune-report.json", str(prune_path))
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=tmp_path,
+        env={"PYTHONPATH": src, "PATH": "/usr/bin"},
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_history_guard_tolerates_exactly_the_recorded_prunes(tmp_path) -> None:
+    # A 03:59 repair pruned the 00:00 4h bar; validation at 04:01 must still pass
+    # because the collector recorded it, whatever the wall clock says.
+    proc = _run_history_validation(tmp_path, 10, 9, ["2026-10-02T00:00:00+00:00"])
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_history_guard_rejects_shrinkage_without_or_beyond_prune_evidence(tmp_path) -> None:
+    assert _run_history_validation(tmp_path, 10, 9, []).returncode != 0
+    one = ["2026-10-02T00:00:00+00:00"]
+    assert _run_history_validation(tmp_path, 10, 8, one).returncode != 0
+
+
+def test_collect_step_writes_the_prune_report_outside_the_packaged_tree(tmp_path) -> None:
+    proc = _run_collect_step(tmp_path, "")
+    args = [line[4:] for line in proc.stdout.splitlines() if line.startswith("ARG:")]
+    report = args[args.index("--prune-report") + 1]
+    assert report == "/tmp/gmx-prune-report.json"
+    assert "user_data" not in report  # the release tarballs pack user_data/data/gmx/
+    assert report in _step("Validate candle history integrity")["run"]

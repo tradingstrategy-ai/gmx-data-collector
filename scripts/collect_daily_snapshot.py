@@ -44,6 +44,7 @@ Usage::
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
@@ -162,7 +163,9 @@ def _merge_feather(
     filepath: Path,
     *,
     prefer_dense: bool = True,
-) -> None:
+    closed_before: pd.Timestamp | None = None,
+    interval: pd.Timedelta | None = None,
+) -> list[pd.Timestamp]:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
     Existing historical data is never deleted. By default, overlapping
@@ -185,20 +188,31 @@ def _merge_feather(
     :param prefer_dense: Preserve dense existing rows over flat incoming rows.
         Explicit repair/force-refresh runs disable this so a corrected API row
         can replace a previously erroneous candle.
+    :param closed_before: With ``interval``, rows whose bar has not closed by
+        this instant (``date + interval > closed_before``) are dropped from the
+        persisted result too -- including ones already on disk, e.g. restored
+        from a release cut before open bars stopped being stored.
+    :param interval: Bar length used with ``closed_before``.
+    :returns: Timestamps of the open rows pruned from what was on disk (empty
+        when nothing was pruned). The release guard uses this as evidence.
     """
-    if new_df.empty:
-        return
+    prune_open = closed_before is not None and interval is not None
+    if new_df.empty and not (prune_open and filepath.exists()):
+        return []
 
-    if new_df["date"].dt.tz is None:
-        new_df["date"] = new_df["date"].dt.tz_localize("UTC")
-    new_df["date"] = new_df["date"].dt.as_unit("ns")
+    if not new_df.empty:
+        if new_df["date"].dt.tz is None:
+            new_df["date"] = new_df["date"].dt.tz_localize("UTC")
+        new_df["date"] = new_df["date"].dt.as_unit("ns")
 
     if filepath.exists():
         existing = pd.read_feather(filepath)
         if existing["date"].dt.tz is None:
             existing["date"] = existing["date"].dt.tz_localize("UTC")
         existing["date"] = existing["date"].dt.as_unit("ns")
-        if prefer_dense:
+        if new_df.empty:
+            combined = existing
+        elif prefer_dense:
             combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
         else:
             combined = pd.concat([existing, new_df], ignore_index=True).drop_duplicates(
@@ -212,7 +226,15 @@ def _merge_feather(
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
+    pruned: list[pd.Timestamp] = []
+    if prune_open:
+        closed = combined["date"] + interval <= closed_before
+        pruned = list(combined.loc[~closed, "date"])
+        if new_df.empty and closed.all():
+            return []  # nothing new and nothing to prune: leave the file untouched
+        combined = combined[closed].reset_index(drop=True)
     atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
+    return pruned
 
 
 def incremental_candle_limit(
@@ -262,8 +284,10 @@ def _expected_last_bar(
 ) -> pd.Timestamp:
     """Latest fully-closed bar we expect on disk for ``target_date``.
 
-    For *today's* date, returns the most recent closed bar of the timeframe
-    (e.g. ``1h`` at 17:42 UTC → ``today 17:00``).  For *past* dates,
+    For *today's* date, returns the most recent *closed* bar of the timeframe
+    (e.g. ``1h`` at 17:42 UTC → ``today 16:00``, whose bar ended at 17:00; the
+    17:00 bar is still open and is never stored, see
+    :func:`_drop_open_bars`).  For *past* dates,
     returns the last bar of that calendar day (e.g. ``1h`` and
     ``--date 2026-03-10`` → ``2026-03-10 23:00``).
 
@@ -278,6 +302,7 @@ def _expected_last_bar(
         anchor = target + pd.Timedelta(hours=23, minutes=59)
     else:
         anchor = now
+    interval = _TIMEFRAME_DELTAS[tf]
     floor_freq = {
         "1m": "1min",
         "5m": "5min",
@@ -286,7 +311,44 @@ def _expected_last_bar(
         "4h": "4h",
         "1d": "1D",
     }[tf]
-    return anchor.floor(floor_freq)
+    last = anchor.floor(floor_freq)
+    return last - interval if anchor is now else last
+
+
+def _drop_open_bars(df: pd.DataFrame, tf: str, now: pd.Timestamp | datetime) -> pd.DataFrame:
+    """Drop candles whose bar has not closed yet (``timestamp + interval > now``).
+
+    The oracle candle API returns the in-progress bar as the newest row. Stored
+    as-is it ships a partial bar labelled as closed, and it freezes if the
+    market stops trading before the next run re-fetches it (#58).
+
+    :param df: Frame with a ``timestamp`` column.
+    :param tf: Timeframe of the frame.
+    :param now: Request-time UTC clock.
+    """
+    now_ts = pd.Timestamp(now)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    stamps = pd.to_datetime(df["timestamp"], utc=True)
+    return df[stamps + _TIMEFRAME_DELTAS[tf] <= now_ts]
+
+
+def parse_repair_timeframes(value: str | None) -> list[str] | None:
+    """Parse the ``--repair-timeframes`` CLI value.
+
+    :param value: Comma-separated timeframes (``"1d,4h"``); empty/``None`` = all.
+    :returns: List of timeframes, or ``None`` meaning every timeframe.
+    :raises argparse.ArgumentTypeError: On a timeframe not in :data:`TIMEFRAMES`.
+    """
+    if value is None or not value.strip():
+        return None
+    tfs = [t.strip() for t in value.split(",") if t.strip()]
+    unknown = [t for t in tfs if t not in TIMEFRAMES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown timeframe(s) {', '.join(unknown)}; choose from {', '.join(TIMEFRAMES)}"
+        )
+    return tfs
 
 
 def _extract_symbols(markets: list[dict]) -> list[str]:
@@ -1639,6 +1701,7 @@ def collect_and_save_ohlcv(
     force_refresh: bool = False,
     target_date: str | None = None,
     repair: bool = False,
+    repair_timeframes: list[str] | None = None,
     now: pd.Timestamp | datetime | None = None,
 ) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
@@ -1654,12 +1717,17 @@ def collect_and_save_ohlcv(
     ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be merged
     back in (the 2026-09-07 / 2026-09-09 1m seams).
 
+    Bars that have not closed yet (``timestamp + interval > now``) are never
+    stored.
+
     :param api: Initialised GMXAPI client.
     :param markets: Raw market dicts from ``get_markets_info()``.
     :param futures_dir: Directory for CCXT feather files.
     :param timeframes: List of timeframes to collect (default: all from TIMEFRAMES).
     :param repair: When ``True``, skip the coverage gate and request
         ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be filled.
+    :param repair_timeframes: Restrict ``repair`` to these timeframes; the rest
+        run as a normal incremental collection. ``None`` repairs every timeframe.
     :param now: Request-time UTC clock. Defaults to ``datetime.now(UTC)``.
     :returns: Tuple of ``(total files saved, failed symbol/timeframe pairs,
         coverage_map)``. ``coverage_map`` is keyed by ``(symbol, tf)`` and
@@ -1675,12 +1743,15 @@ def collect_and_save_ohlcv(
     saved = 0
     failed = []
     coverage: dict[tuple[str, str], dict] = {}
-    now = now if now is not None else datetime.now(UTC)
+    now = pd.Timestamp(now if now is not None else datetime.now(UTC))
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
 
     for symbol in symbols:
         for tf in tfs:
             filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
             pre_stats = _feather_date_stats(filepath)
+            repair_tf = repair and (repair_timeframes is None or tf in repair_timeframes)
 
             # Coverage gate — skip fetch entirely if on-disk feather already
             # covers today's last expected bar. ``has_ohlcv_through`` is
@@ -1689,9 +1760,24 @@ def collect_and_save_ohlcv(
             # placeholder, so a gate pass is overridden when the recent tail
             # is stale-flat (see ``_tail_is_stale_density``) — otherwise a
             # bad tail would latch "current" forever, never re-fetched.
-            if target_date is not None and not repair:
-                expected_last = _expected_last_bar(tf, target_date=target_date)
-                gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
+            if target_date is not None and not repair_tf:
+                expected_last = _expected_last_bar(tf, target_date=target_date, now=now)
+                # The newest stored bar may have been written while it was still
+                # open (releases cut before open bars were dropped, a mid-bar
+                # run), so it is always re-fetched: the file only counts as
+                # current once it extends *past* the last closed bar.
+                gate = has_ohlcv_through(
+                    filepath, expected_last + _TIMEFRAME_DELTAS[tf], force=force_refresh
+                )
+                if (
+                    gate.skip
+                    and pre_stats is not None
+                    and pre_stats["max_date"] <= now < pre_stats["max_date"] + _TIMEFRAME_DELTAS[tf]
+                ):
+                    # Newest stored bar has started but not closed (a pre-fix
+                    # release, or a mid-bar run): never retain it -- collect so
+                    # it is pruned.
+                    gate = SkipDecision(False, "open_tail", gate.existing_rows, 0)
                 if gate.skip and _tail_is_stale_density(filepath, tf):
                     console.print(
                         f"    [yellow]STALE DENSITY: {symbol}/{tf} — timestamps are "
@@ -1720,12 +1806,13 @@ def collect_and_save_ohlcv(
             coverage[(symbol, tf)] = entry
 
             try:
-                if filepath.exists() and not repair:
+                if filepath.exists() and not repair_tf:
                     last_bar = pre_stats["max_date"] if pre_stats else None
                     limit = incremental_candle_limit(tf, last_bar, now)
                 else:
                     limit = MAX_CANDLE_LIMIT
                 df = _fetch_candles_with_retry(api, symbol, tf, limit)
+                df = _drop_open_bars(df, tf, now)
 
                 api_stats = _date_stats(df["timestamp"])
                 entry["api_slice"] = api_stats
@@ -1741,11 +1828,14 @@ def collect_and_save_ohlcv(
                     }
                 )
 
-                _merge_feather(
+                pruned = _merge_feather(
                     new_rows,
                     filepath,
-                    prefer_dense=not (repair or force_refresh),
+                    prefer_dense=not (repair_tf or force_refresh),
+                    closed_before=now,
+                    interval=_TIMEFRAME_DELTAS[tf],
                 )
+                entry["pruned_open"] = [pd.Timestamp(t).isoformat() for t in pruned]
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
 
@@ -1782,6 +1872,24 @@ def collect_and_save_ohlcv(
         )
     )
     return saved, failed, coverage
+
+
+def write_prune_report(coverage: dict[tuple[str, str], dict], path: Path) -> None:
+    """Record which feather files had an open bar pruned, and at which timestamps.
+
+    The release workflow's candle-history guard tolerates exactly these rows
+    shrinking a file and nothing else. Written outside the packaged data tree.
+
+    :param coverage: Coverage map from :func:`collect_and_save_ohlcv`.
+    :param path: Destination JSON file ``{feather name: [ISO timestamps]}``.
+    """
+    report = {
+        f"{sym}_USDC_USDC-{tf}-futures.feather": entry["pruned_open"]
+        for (sym, tf), entry in sorted(coverage.items())
+        if entry.get("pruned_open")
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
 def _summarise_daily_files(dir_path: Path) -> dict:
@@ -2357,6 +2465,26 @@ Examples:
             "incremental lookback cannot reach (e.g. 2026-09-07 / 2026-09-09)."
         ),
     )
+    parser.add_argument(
+        "--prune-report",
+        type=Path,
+        default=None,
+        help=(
+            "Write a JSON map of feather files that had a not-yet-closed bar pruned "
+            "(and its timestamps) to this path. Used by the release integrity guard."
+        ),
+    )
+    parser.add_argument(
+        "--repair-timeframes",
+        type=parse_repair_timeframes,
+        default=None,
+        metavar="TF[,TF...]",
+        help=(
+            "Limit --repair-ohlcv to these comma-separated timeframes "
+            f"({', '.join(TIMEFRAMES)}); the others collect incrementally. "
+            "Default: all timeframes."
+        ),
+    )
 
     parser.add_argument(
         "--tick-max-blocks",
@@ -2451,7 +2579,10 @@ Examples:
         force_refresh=args.force_refresh,
         target_date=date_str,
         repair=args.repair_ohlcv,
+        repair_timeframes=args.repair_timeframes,
     )
+    if args.prune_report is not None:
+        write_prune_report(ohlcv_coverage, args.prune_report)
     console.print()
 
     # Phase 3: 24h per-market volume runs in a separate workflow (collect-volume.yml)

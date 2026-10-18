@@ -17,6 +17,10 @@ on:
         description: 'Re-fetch MAX_CANDLE_LIMIT candles and merge to fill interior 1m holes (2026-09-08 02:17). Off on the daily cron.'
         required: false
         default: 'false'
+      repair_timeframes:
+        description: 'With repair_ohlcv=true: comma-separated timeframes to re-fetch (e.g. 1d,4h). Empty = all timeframes.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -234,13 +238,25 @@ jobs:
         env:
           JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+          REPAIR_TIMEFRAMES: ${{ github.event.inputs.repair_timeframes }}
         run: |
-          REPAIR_FLAG=""
+          ARGS=(--output-dir ./user_data --prune-report /tmp/gmx-prune-report.json)
           if [ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]; then
-            REPAIR_FLAG="--repair-ohlcv"
+            ARGS+=(--repair-ohlcv)
             echo "repair_ohlcv=true: filling interior holes with MAX_CANDLE_LIMIT"
+            # Free-text input: drop whitespace, then allow only [0-9a-z,] so it
+            # stays one plain argument and can never inject an option.
+            TIMEFRAMES="${REPAIR_TIMEFRAMES//[[:space:]]/}"
+            if [ -n "$TIMEFRAMES" ]; then
+              if ! [[ "$TIMEFRAMES" =~ ^[0-9a-z,]+$ ]]; then
+                echo "ERROR: repair_timeframes must look like 1d,4h (got: $REPAIR_TIMEFRAMES)" >&2
+                exit 1
+              fi
+              ARGS+=(--repair-timeframes "$TIMEFRAMES")
+              echo "repair_timeframes=$TIMEFRAMES"
+            fi
           fi
-          PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data $REPAIR_FLAG
+          PYTHONPATH=src python scripts/collect_daily_snapshot.py "${ARGS[@]}"
 
       - name: Validate candle history integrity
         run: |
@@ -257,6 +273,10 @@ jobs:
               sys.exit(1)
 
           baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          prune_path = Path("/tmp/gmx-prune-report.json")
+          pruned = (
+              json.loads(prune_path.read_text(encoding="utf-8")) if prune_path.exists() else {}
+          )
           futures_dir = Path("./user_data/data/gmx/futures")
           current = {}
 
@@ -284,7 +304,10 @@ jobs:
               after = current.get(name)
               if not after:
                   continue
-              if after["rows"] < before["rows"]:
+              # The collector never stores a bar that has not closed yet and records
+              # every open row it prunes; tolerate exactly those rows, nothing else.
+              tolerated = len(pruned.get(name, []))
+              if after["rows"] < before["rows"] - tolerated:
                   regressions.append(
                       f"{name} row count shrank from {before['rows']} to {after['rows']}"
                   )
