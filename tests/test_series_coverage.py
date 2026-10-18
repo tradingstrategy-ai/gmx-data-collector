@@ -244,6 +244,18 @@ def test_failed_extraction_state_or_export_blocks_the_set(tmp_path: Path) -> Non
     assert "B1" in codes(by_symbol(lake.assess())["BTC"])
 
 
+def test_mark_export_failure_is_reported_as_b5(tmp_path: Path) -> None:
+    lake = Lake(tmp_path)
+    lake.pair("BTC")
+    lake.export_report["mark_failures"] = [
+        {"symbol": "BTC", "timeframe": "1h", "reason": "OSError"}
+    ]
+
+    pair = by_symbol(lake.assess())["BTC"]
+    assert "B5" in codes(pair)
+    assert "B1" not in codes(pair)
+
+
 def test_newest_funding_bar_far_behind_cutoff_blocks_the_set(tmp_path: Path) -> None:
     lake = Lake(tmp_path)
     lake.pair("BTC", funding_end=CUTOFF - timedelta(days=2))

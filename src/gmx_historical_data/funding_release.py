@@ -24,7 +24,7 @@ import polars as pl
 
 from gmx_historical_data.atomic_parquet import atomic_write_ipc
 from gmx_historical_data.cadence_gate import load_exempt_symbols
-from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+from gmx_historical_data.freqtrade_exporter import FreqtradeExporter, _drop_rejected_funding_hours
 from gmx_historical_data.funding_state import funding_network_dir
 from gmx_historical_data.series_coverage import (
     FUNDING_EPOCH,
@@ -114,10 +114,11 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
         if not rejected or not target.is_file():
             continue
         frame = pl.read_ipc(target, memory_map=False)
-        drop = pl.DataFrame({"date": pl.Series(sorted(rejected), dtype=frame.schema["date"])})
-        kept = frame.join(drop, on="date", how="anti")
+        kept, removed = _drop_rejected_funding_hours(frame, rejected)
+        removed = max(removed, rec.removed_destination_rows)
+        if removed:
+            dropped[rec.symbol] = removed
         if len(kept) != len(frame):
-            dropped[rec.symbol] = len(frame) - len(kept)
             atomic_write_ipc(kept, target)
 
     def iso(hours) -> list[str]:
@@ -128,13 +129,18 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
         "dropped_rejected_hours": dropped,
         "failures": [
             {"symbol": f.symbol, "timeframe": f.timeframe, "reason": f.reason, "message": f.message}
-            for f in [*failures, *mark_failures]
+            for f in failures
+        ],
+        "mark_failures": [
+            {"symbol": f.symbol, "timeframe": f.timeframe, "reason": f.reason, "message": f.message}
+            for f in mark_failures
         ],
         "reconciliations": {
             r.symbol: {
                 "missing_hours": iso(r.missing_hours),
                 "unknown_direction_hours": iso(r.unknown_direction_hours),
                 "null_rate_hours": iso(r.null_rate_hours),
+                "removed_destination_rows": r.removed_destination_rows,
             }
             for r in exporter.funding_reconciliations
             if r.timeframe == TIMEFRAME

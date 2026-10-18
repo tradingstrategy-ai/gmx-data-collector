@@ -22,7 +22,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+from gmx_historical_data.freqtrade_exporter import FreqtradeExporter, _drop_rejected_funding_hours
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -72,7 +72,7 @@ def _main_file(out: Path, symbol: str = "ETH") -> Path:
 
 
 def _legacy_file(out: Path, symbol: str = "ETH") -> Path:
-    return out / "data" / "gmx" / "futures" / f"{symbol}_USDC_USDC-1h-funding_rate.feather"
+    return out / "gmx" / "futures" / f"{symbol}_USDC_USDC-1h-funding_rate.feather"
 
 
 def _both(tmp_path: Path, frame: pl.DataFrame):
@@ -185,6 +185,60 @@ def test_legacy_writer_keeps_longer_destination_history(tmp_path):
     assert written["date"].min() == older["date"].min()
     assert written["open"].to_list()[:10] == [9e-6] * 10
     assert written["open"].to_list()[10:] == [1e-6, 2e-6, 3e-6]
+
+
+def test_export_removes_destination_rows_rejected_by_current_source(tmp_path):
+    """Rejected source hours are removed while live hours beyond source coverage stay."""
+    frame = pl.DataFrame(
+        {
+            "timestamp": _ts(3),
+            "funding_rate_hourly": [1e-6, 2e-6, 3e-6],
+            "longs_pay_shorts": pl.Series([True, None, True], dtype=pl.Boolean),
+            "source": ["hypersync"] * 3,
+        }
+    )
+    network_dir = _lake(tmp_path, frame)
+    out = tmp_path / "out"
+    dest = _main_file(out)
+    dest.parent.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "date": pl.Series([_hour(0), _hour(1), _hour(3)])
+            .dt.replace_time_zone("UTC")
+            .dt.cast_time_unit("ns"),
+            "open": [1e-6, 2e-6, 4e-6],
+            "high": [0.0] * 3,
+            "low": [0.0] * 3,
+            "close": [0.0] * 3,
+            "volume": [0.0] * 3,
+        }
+    ).write_ipc(dest)
+
+    exporter = _run_main(network_dir, out)
+
+    written = pl.read_ipc(dest)
+    assert written["date"].to_list() == [_hour(0), _hour(2), _hour(3)]
+    assert written["open"].to_list() == [1e-6, 3e-6, 4e-6]
+    assert exporter.funding_reconciliations[0].removed_destination_rows == 1
+
+
+def test_rejected_hour_anti_join_handles_tz_naive_destination():
+    """Legacy naive dates are aligned to the source's UTC date dtype before joining."""
+    existing = pl.DataFrame(
+        {
+            "date": pl.Series(
+                [datetime(2026, 2, 19, hour) for hour in (7, 8)],
+                dtype=pl.Datetime("ns"),
+            ),
+            "open": [1e-5, 2e-5],
+        }
+    )
+
+    kept, removed = _drop_rejected_funding_hours(existing, [datetime(2026, 2, 19, 8, tzinfo=UTC)])
+
+    assert removed == 1
+    assert kept.schema["date"] == pl.Datetime("ns", "UTC")
+    assert kept["open"].to_list() == [1e-5]
 
 
 def test_stale_feather_with_newer_mtime_never_shadows_parquet(tmp_path):

@@ -141,10 +141,10 @@ export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
 export HYPERSYNC_API_TOKEN="your_token_here"  # Free from https://envio.dev
 
 # Collect full historical data for the Chainlink-feed tokens (no HyperSync needed)
-make collect-full ARGS="--chainlink-only"
+make collect-candles ARGS="--chainlink-only"
 
 # Initial collection: all tokens (~4-5 hours)
-make collect-full
+make full-data
 
 # Daily incremental update (~10-30 minutes for all tokens)
 make collect-update
@@ -220,7 +220,9 @@ daily runs accumulated; it is not "genesis" history.
   API serves for that timeframe — for 1d, 2021-10 for the longest-listed majors (BTC, ETH,
   SOL), shorter for newer markets. Releases cut before that dispatch (e.g. `data-2026-10-18`)
   still start 1d at 2026-03-08 for most pairs.
-* The newest bar of each file is a **closed** bar; in-progress bars are no longer stored (#72).
+* The newest candle in each candle file is a **closed** bar; in-progress candles are no longer
+  stored (#72). The newest funding hour is provisional: the exporter extends the latest funding
+  event through the hour end, and the next run revises that hour as needed.
 
 ### Market-specific caveats
 
@@ -262,11 +264,11 @@ All targets write to `./user_data` by default. Configuration variables can be ov
 ### Candle Collection
 
 ```bash
-make collect-full                           # Full historical backfill (all symbols)
-make collect-full SYMBOL=ETH               # Single symbol only
-make collect-full ARGS="--chainlink-only"  # Chainlink-feed markets only (no HyperSync)
-make collect-full CONCURRENCY=15           # Tune parallelism (default: 4)
-make collect-full DATA_DIR=./data          # Override output directory
+make collect-candles                       # Full candle backfill (all symbols)
+make collect-candles SYMBOL=ETH            # Single symbol only
+make collect-candles ARGS="--chainlink-only" # Chainlink-feed markets only (no HyperSync)
+make collect-candles CONCURRENCY=15        # Tune parallelism (default: 5)
+make collect-candles DATA_DIR=./data       # Override output directory
 
 make collect-update                        # Incremental update (only missing data)
 make collect-update SYMBOL=BTC             # Incremental for one symbol
@@ -275,7 +277,7 @@ make collect-update SYMBOL=BTC             # Incremental for one symbol
 ### Combined Updates
 
 ```bash
-make update-gmx-data                       # Candles + funding (recommended for daily runs)
+make refresh-data                          # Candles + funding (recommended for daily runs)
 make extract-all                           # OI + pool liquidity (full history)
 make extract-all-resume                    # OI + pool liquidity (incremental)
 ```
@@ -328,10 +330,10 @@ All `make` targets run under `nice -n 10` by default, giving the OS permission t
 
 ```bash
 # Disable (run at normal priority)
-make collect-full NICE=""
+make collect-candles NICE=""
 
 # Run at even lower priority (background-only)
-make collect-full NICE="nice -n 19"
+make collect-candles NICE="nice -n 19"
 ```
 
 Tip: create a `.env` file — it is auto-loaded by the Makefile:
@@ -386,7 +388,7 @@ CONCURRENCY=8
 ```bash
 # Cron job: update daily at 2 AM
 0 2 * * * cd /path/to/gmx_historical_data && \
-  make update-gmx-data >> /var/log/gmx-update.log 2>&1
+  make refresh-data >> /var/log/gmx-update.log 2>&1
 ```
 
 ## Export for Freqtrade
@@ -461,9 +463,9 @@ Contract notes:
   was checked by the run that stamped it.
 - `breaks_total` and `missing_bars_total` are always exact. When `truncated` is `true`
   the `breaks` list is capped at 200 entries (1m series can carry thousands).
-- Only candle (`-futures`) files are covered. `-funding_rate` files are deliberately not
-  cadence-checked: the funding transform drops null rates by design, so holes there are
-  expected.
+- Only candle (`-futures`) files appear in this cadence manifest. Funding holes are checked
+  separately by series coverage: recent holes block release (B3, #76), while older holes can
+  remain when the raw source cannot backfill them.
 - Timestamps are ISO-8601 UTC. `before` is the last bar present before the hole, `after`
   the next one present.
 - A gap listed here is a known upstream outage, not corruption. GMX retains raw data for

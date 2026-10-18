@@ -226,6 +226,11 @@ def assess_series_coverage(
         for f in report.get("failures", [])
         if f.get("timeframe", "1h") == "1h"
     }
+    mark_failures: dict[str, str] = {
+        f["symbol"]: f.get("reason", "failed")
+        for f in report.get("mark_failures", [])
+        if f.get("timeframe", "1h") == "1h"
+    }
     recs = report.get("reconciliations", {})
     prev_pairs = (previous or {}).get("pairs", {})
 
@@ -268,6 +273,8 @@ def assess_series_coverage(
         )
         pending = active and first_candle > cutoff - grace
         blockers: list[str] = []
+        if symbol in mark_failures:
+            blockers.append(f"B5: mark export failed ({mark_failures[symbol]})")
 
         mark = _read_series(companion_dir / f"{symbol}_USDC_USDC-1h-mark.feather", ["date"])
         if mark is None:
