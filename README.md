@@ -74,7 +74,7 @@ remain — see below.
 | Store | Path | Schema | Role |
 |-------|------|--------|------|
 | Source candles | `candles/arbitrum/{TOKEN}/{tf}.parquet` | `timestamp,…,symbol` | collector output |
-| FreqTrade exports | `gmx/futures/{PAIR}-{tf}-futures.{feather,parquet}` | `date,o,h,l,c,volume` | what FreqTrade reads |
+| FreqTrade exports | `gmx/futures/{PAIR}-{tf}-futures.feather` (`.parquet` too in locally exported trees; the release ships feather only) | `date,o,h,l,c,volume` | what FreqTrade reads |
 
 The **FreqTrade exports are the deepest copy** for non-Chainlink tokens — the source
 candles are *not*. Treat `gmx/futures/` as the source of truth for those.
@@ -85,18 +85,20 @@ The GMX API only serves a shallow rolling window (`limit=10000`, ~7 days of 1m).
 Deep history needs a backfill source:
 
 - **Chainlink-backed tokens** rebuild full history from Chainlink RPC on a
-  `--force` collect (all timeframes, to genesis). This works — verified.
+  `--force` collect of a local tree (all timeframes, to genesis). This works — verified. It does not change what the daily release ships; see [Candle depth](#candle-depth).
 - **Non-Chainlink tokens cannot be rebuilt by the collector.**
   `collect_non_chainlink_markets()` only layers a thin oracle-event pass on top of
   the GMX window (≈10–11k 1m rows), **not** a genesis backfill. Their deep history
   exists **only in the feathers** (captured by an earlier, more complete run).
   So the source `candles/` parquets for these tokens remain shallow by design; the
-  deep data is preserved in `gmx/futures/` (feather + parquet).
+  deep data is preserved in `gmx/futures/` (feather; parquet too in locally exported trees).
 
-### Limit 2 — intraday (1m/5m/15m/1h) truncated for ~47 non-Chainlink tokens
+### Limit 2 — intraday (1m/5m/15m/1h) truncated for many non-Chainlink tokens
 
-For ~47 non-Chainlink pairs (e.g. `ADA, DOT, BCH, TRX, FIL, INJ, XLM, ICP, SUI`),
-**1d / 4h reach 2022 but 1m/5m/15m/1h only start ~2024-11** (their deep daily came
+For a subset of non-Chainlink pairs (e.g. `ADA, DOT, BCH, TRX, FIL, INJ, XLM, ICP, SUI`)
+in the local deep-history trees (as of the 2026-06 recovery pass; the daily release's 1d/4h
+depth is the API contract in [Candle depth](#candle-depth)),
+**1d / 4h reached 2022 but 1m/5m/15m/1h only start ~2024-11** (their deep daily came
 from a coarse CEX backfill that never pulled fine-resolution data). Not yet fixed.
 The only fix is the **CEX gap-fill at fine resolution** (`make fill-gaps-cex`,
 Binance/Bybit have deep 1m) followed by a re-export.
@@ -190,16 +192,17 @@ missing ones are copied, so `-q` is safe to re-run and easy to undo
 
 ## What the daily release contains
 
-Each `data-YYYY-MM-DD` release carries `gmx-full.tar.gz`, `gmx-light.tar.gz`,
-`gmx-funding-state.tar.gz` and `data_report.txt` (the report is the authority for current
-symbol counts, per-timeframe date ranges and freshness; this README quotes no counts).
+Each `data-YYYY-MM-DD` release carries `gmx-full.tar.gz`, `gmx-light.tar.gz` and
+`data_report.txt` (the report is the authority for current symbol counts, per-timeframe
+date ranges and freshness), plus `gmx-funding-state.tar.gz` when funding state exists.
 Candles ship as **feather only** — there are no `.parquet` candle files in the release.
 
 | Asset | Contents |
 |---|---|
-| `gmx-full.tar.gz` | Everything under `user_data/data/gmx/` except the raw funding state: `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, `ticks/`, `futures/` (OHLCV `-futures` feathers for 1m/5m/15m/1h/4h/1d, plus `1h` `-funding_rate` and `1h` `-mark` feathers and `_cadence_manifest.json`), `funding_coverage.json` and `delisted_markets.json`. The backtest bundle. |
+| `gmx-full.tar.gz` | Everything under `user_data/data/gmx/` except the raw funding state: `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, `ticks/`, `checkpoints/`, `futures/` (OHLCV `-futures` feathers for 1m/5m/15m/1h/4h/1d, plus `1h` `-funding_rate` and `1h` `-mark` feathers and `_cadence_manifest.json`), `funding_coverage.json` and `delisted_markets.json`. The backtest bundle. |
 | `gmx-light.tar.gz` | `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, the `futures/*-1h-funding_rate.feather` files and `funding_coverage.json`. **No OHLCV candles and no mark** (mark is derived from the candles). |
-| `gmx-funding-state.tar.gz` | Raw funding state the next daily run resumes from. Not a consumer artifact. |
+| `gmx-funding-state.tar.gz` | Raw funding state the next daily run resumes from. Shipped only when funding state exists on the runner. Not a consumer artifact. |
+| `gmx-ticks.tar.gz`, `gmx-ticks.manifest.json` | Trade-tick intake assets; present only when the tick intake publishes them. |
 
 The release notes list a per-asset/timeframe **Coverage** table inside a collapsed
 `<details>` block (one row per candle file).
@@ -613,14 +616,9 @@ The DataStore phase uses fully-batched JSON-RPC — all network I/O completes be
 ### Funding and mark in the daily release
 
 The daily `data-YYYY-MM-DD` release ships hourly `futures/{PAIR}-1h-funding_rate.feather`
-and `futures/{PAIR}-1h-mark.feather` (#56). Set freqtrade's `funding_fee_timeframe` and
-`mark_ohlcv_timeframe` to `1h` -- its default is `8h`, for which no file exists.
-
-| Asset | Funding / mark content |
-|---|---|
-| `gmx-full.tar.gz` | OHLCV + `1h` funding_rate + `1h` mark + `funding_coverage.json`. The backtest bundle. |
-| `gmx-light.tar.gz` | `1h` funding_rate + `funding_coverage.json` only (no OHLCV, no mark -- mark is derived from the candles). |
-| `gmx-funding-state-<timestamp>.tar.gz` | The raw funding state the daily run resumes from. Not a consumer artifact. |
+and `futures/{PAIR}-1h-mark.feather` (#56). Which bundle carries what is in
+[What the daily release contains](#what-the-daily-release-contains); the freqtrade settings
+and the exported-value semantics are in [Funding data contract](#funding-data-contract).
 
 How it runs (`release-data.yml`): restore the state asset, `extract_unified_funding.py
 --resume` (HyperSync only), export through the shared signed exporter into a **staging
@@ -635,8 +633,8 @@ nothing previous ships no companions.
   `data_report.txt`) lists every `LAGGING` (>6h) and `STALE` (>48h) market with its last
   bar and age. Tails are never forward-filled; a quiet market's tail is reported, not
   blocking (`--stale-tail-blocks` flips that).
-* **History starts 2025-08-19.** Earlier funding needs archive-RPC DataStore reads (#47)
-  and is not in the daily release.
+* **History starts 2025-08-19** (see the contract below). Earlier funding needs archive-RPC
+  DataStore reads (#47) and is not in the daily release.
 * **One-off rollout.** After merging, dispatch `release-data.yml` once with
   `seed_funding_from=data/full-history`. It copies the branch's raw funding sources,
   derives the checkpoints the branch never stored, catches up to now (step timeout 30
@@ -651,7 +649,8 @@ What a freqtrade backtest reads from `futures/{PAIR}-1h-funding_rate.feather` (#
   fraction of position notional** (`0.0001` = 0.01% per hour), not annualised and not
   per-second.
 * **Sign:** positive = **longs pay shorts**, negative = shorts pay longs (the Freqtrade
-  convention, #53). Rows with no known direction are excluded rather than exported positive
+  convention, #53). Only unsigned positive magnitudes with unknown direction are excluded rather than
+  exported positive; zero, already-negative and DataStore (signed) rows pass through
   (`FreqtradeExporter._transform_funding_rate`).
 * **Paying side only, symmetric approximation.** The exported number is the *paying* side's
   rate, and Freqtrade applies that one signed rate to both sides (a short receives what a long
