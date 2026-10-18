@@ -885,7 +885,7 @@ jobs:
           **Generated:** ${TIMESTAMP} UTC
 
           Contents (${COUNT} files total):
-          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, futures/ (OHLCV + 1h funding_rate + 1h mark), funding_coverage.json. The backtest bundle.
+          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, ticks/, checkpoints/, futures/ (OHLCV + 1h funding_rate + 1h mark + _cadence_manifest.json), funding_coverage.json, delisted_markets.json. The backtest bundle.
           - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, futures/*-1h-funding_rate.feather, funding_coverage.json (no OHLCV, no mark)
           - \`gmx-funding-state-<timestamp>.tar.gz\` — raw funding state carried between daily runs; not a consumer artifact
           - \`data_report.txt\` — collection summary
