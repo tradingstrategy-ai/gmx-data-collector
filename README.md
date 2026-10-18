@@ -46,7 +46,7 @@ Daily data collection now ships as **GitHub Releases** instead of the `data/dail
 | Consumer download | `git clone --depth 1 --branch data/daily-collection` | `scripts/download_gmx_data.sh` or `gh release download` |
 | Quickstart (`-q` flag) | `seed_from_branch()` — shallow git clone | `seed_from_release()` — `gh release download` + tar extract |
 | CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
-| Release assets | — | `gmx-full.tar.gz`, `gmx-light.tar.gz` (no OHLCV; 1h funding only), `gmx-funding-state.tar.gz`, `data_report.txt` |
+| Release assets | — | `gmx-full.tar.gz`, `gmx-light.tar.gz` (no OHLCV; 1h funding only), `gmx-funding-state-<timestamp>.tar.gz`, `data_report.txt` |
 
 **`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. New consumers should use the Releases path (see [Downloading GMX historical data](#downloading-gmx-historical-data) below).
 
@@ -567,7 +567,7 @@ and `futures/{PAIR}-1h-mark.feather` (#56). Set freqtrade's `funding_fee_timefra
 |---|---|
 | `gmx-full.tar.gz` | OHLCV + `1h` funding_rate + `1h` mark + `funding_coverage.json`. The backtest bundle. |
 | `gmx-light.tar.gz` | `1h` funding_rate + `funding_coverage.json` only (no OHLCV, no mark -- mark is derived from the candles). |
-| `gmx-funding-state.tar.gz` | The raw funding state the daily run resumes from. Not a consumer artifact. |
+| `gmx-funding-state-<timestamp>.tar.gz` | The raw funding state the daily run resumes from. Not a consumer artifact. |
 
 How it runs (`release-data.yml`): restore the state asset, `extract_unified_funding.py
 --resume` (HyperSync only), export through the shared signed exporter into a **staging
