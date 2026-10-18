@@ -21,7 +21,7 @@ def test_fetch_converts_annualized_to_hourly():
     """API value / 1e30 / 8766 = per-hour rate."""
     # ETH verified value from real API call on 2026-02-19
     eth_long_raw = 92443962298858360338273696000
-    expected_hourly = eth_long_raw / 1e30 / _HOURS_PER_YEAR  # ≈ 1.055e-5
+    expected_hourly = -eth_long_raw / 1e30 / _HOURS_PER_YEAR  # API positive means longs receive
 
     markets = [
         {
@@ -71,8 +71,8 @@ def test_fetch_deduplicates_by_open_interest():
 
         rates = fetch_live_funding_rates()
 
-    # Should pick ETH-USDC market (higher OI), rate = 1e30/1e30/8766
-    assert abs(rates["ETH"] - (1.0 / _HOURS_PER_YEAR)) < 1e-12
+    # Should pick ETH-USDC market (higher OI); API positive means longs receive.
+    assert abs(rates["ETH"] - (-1.0 / _HOURS_PER_YEAR)) < 1e-12
 
 
 def test_fetch_skips_unlisted_markets():
@@ -97,8 +97,8 @@ def test_fetch_skips_unlisted_markets():
     assert "APE" not in rates
 
 
-def test_fetch_handles_negative_funding_rate():
-    """Negative fundingRateLong produces a negative per-hour rate (shorts pay)."""
+def test_fetch_inverts_negative_funding_rate_long_pays():
+    """GMX negative fundingRateLong means longs pay, positive in our export."""
     raw = -92443962298858360338273696000
     markets = [
         {
@@ -117,8 +117,8 @@ def test_fetch_handles_negative_funding_rate():
 
         rates = fetch_live_funding_rates()
 
-    assert rates["ETH"] < 0
-    assert abs(rates["ETH"] - (raw / 1e30 / _HOURS_PER_YEAR)) < 1e-12
+    assert rates["ETH"] > 0
+    assert abs(rates["ETH"] - (-raw / 1e30 / _HOURS_PER_YEAR)) < 1e-12
 
 
 def test_fetch_skips_swap_only_markets():

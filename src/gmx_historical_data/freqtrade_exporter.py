@@ -68,6 +68,18 @@ _FUNDING_EXPORT_PATTERN = re.compile(
 )
 
 
+def _drop_rejected_funding_hours(
+    frame: pl.DataFrame, rejected_hours: Iterable[datetime]
+) -> tuple[pl.DataFrame, int]:
+    """Remove destination rows whose source hours the current transform rejects."""
+    rejected = sorted(set(rejected_hours))
+    if not rejected or frame.is_empty():
+        return frame, 0
+    drop = pl.DataFrame({"date": pl.Series(rejected, dtype=frame.schema["date"])})
+    kept = frame.join(drop, on="date", how="anti")
+    return kept, len(frame) - len(kept)
+
+
 def find_orphaned_funding_variants(gmx_dir: Path, produced: set[str]) -> dict[str, int]:
     """Find funding variants on disk that an export run can no longer produce.
 
@@ -270,6 +282,8 @@ class FundingReconciliation:
     :param null_rate_hours: Source rows rejected because the rate was null.
     :param unknown_direction_hours: Source rows excluded for unknown direction.
     :param duplicate_rows: Rows collapsed as duplicate timestamps.
+    :param removed_destination_rows: Existing destination rows removed because
+        the current source rejected their timestamps.
     """
 
     symbol: str
@@ -280,6 +294,7 @@ class FundingReconciliation:
     null_rate_hours: tuple[datetime, ...]
     unknown_direction_hours: tuple[datetime, ...]
     duplicate_rows: int
+    removed_destination_rows: int = 0
 
     @property
     def clean(self) -> bool:
@@ -862,16 +877,6 @@ class FreqtradeExporter:
         :raises ExportValidationError: If no row survives the transform.
         """
         transformed, report = self._transform_funding_rate_with_report(funding_df)
-        if transformed.is_empty():
-            # Nothing exportable: account for the rejected rows, then let the
-            # validator raise as it always has so the symbol counts as failed.
-            self._record_reconciliation(symbol, timeframe, report, published=None)
-        ft_funding = validate_ohlcv(
-            transformed,
-            timestamp_column="date",
-            location=f"export_funding({symbol}/{timeframe})",
-            allow_nonpositive_prices=True,
-        )
         primary_fmt = "feather" if output_format == "both" else output_format
         path = gmx_dir / self._get_freqtrade_filename(
             symbol,
@@ -880,6 +885,44 @@ class FreqtradeExporter:
             trading_mode,
             quote_currency,
             candle_type="funding_rate",
+        )
+        rejected_hours = set(report.unknown_direction_hours) | set(report.null_rate_hours)
+        removed_destination_rows = 0
+        destinations = (
+            (path.with_suffix(".feather"), path.with_suffix(".parquet"))
+            if output_format == "both"
+            else (path,)
+        )
+        for destination in destinations:
+            if not rejected_hours or not destination.is_file():
+                continue
+            existing = (
+                pl.read_ipc(destination, memory_map=False)
+                if destination.suffix == ".feather"
+                else pl.read_parquet(destination)
+            )
+            kept, removed = _drop_rejected_funding_hours(existing, rejected_hours)
+            if removed:
+                if destination.suffix == ".feather":
+                    atomic_write_ipc(kept, destination)
+                else:
+                    atomic_write_parquet(kept, destination)
+                removed_destination_rows = max(removed_destination_rows, removed)
+        if transformed.is_empty():
+            # Nothing exportable: account for the rejected rows, then let the
+            # validator raise as it always has so the symbol counts as failed.
+            self._record_reconciliation(
+                symbol,
+                timeframe,
+                report,
+                published=None,
+                removed_destination_rows=removed_destination_rows,
+            )
+        ft_funding = validate_ohlcv(
+            transformed,
+            timestamp_column="date",
+            location=f"export_funding({symbol}/{timeframe})",
+            allow_nonpositive_prices=True,
         )
         self._write(
             ft_funding,
@@ -894,7 +937,13 @@ class FreqtradeExporter:
             if primary_fmt == "feather"
             else pl.read_parquet(path)
         )
-        self._record_reconciliation(symbol, timeframe, report, published=published)
+        self._record_reconciliation(
+            symbol,
+            timeframe,
+            report,
+            published=published,
+            removed_destination_rows=removed_destination_rows,
+        )
         return 2 if output_format == "both" else 1
 
     def _record_reconciliation(
@@ -904,6 +953,7 @@ class FreqtradeExporter:
         report: FundingTransformReport,
         *,
         published: pl.DataFrame | None,
+        removed_destination_rows: int = 0,
     ) -> FundingReconciliation:
         """Compare source hours with the published file, record and warn.
 
@@ -926,6 +976,7 @@ class FreqtradeExporter:
             null_rate_hours=report.null_rate_hours,
             unknown_direction_hours=report.unknown_direction_hours,
             duplicate_rows=report.duplicate_rows,
+            removed_destination_rows=removed_destination_rows,
         )
         self.funding_reconciliations.append(rec)
         if rec.null_rate_hours:

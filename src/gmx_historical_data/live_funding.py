@@ -21,8 +21,10 @@ def fetch_live_funding_rates(network: str = "arbitrum") -> dict[str, float]:
     """Fetch current per-hour funding rates for all listed GMX markets.
 
     Calls :class:`eth_defi.gmx.api.GMXAPI` ``get_markets_info()`` and converts
-    ``fundingRateLong`` (annualised, 1e30 fixed-point, signed) to a signed
-    per-hour float. When multiple markets share a symbol (e.g. three ETH
+    ``fundingRateLong`` (annualised, 1e30 fixed-point, signed) to the
+    exporter's per-hour convention. GMX uses negative for longs paying, while
+    the exporter uses positive for longs paying, so the API sign is inverted.
+    When multiple markets share a symbol (e.g. three ETH
     markets), the one with the highest combined open interest is used.
 
     :param network: GMX network slug — ``"arbitrum"`` or ``"avalanche"``.
@@ -49,7 +51,7 @@ def fetch_live_funding_rates(network: str = "arbitrum") -> dict[str, float]:
             continue
 
         try:
-            hourly = int(market["fundingRateLong"]) / _GMX_PRECISION / _HOURS_PER_YEAR
+            hourly = -int(market["fundingRateLong"]) / _GMX_PRECISION / _HOURS_PER_YEAR
             oi = int(market.get("openInterestLong", 0)) + int(market.get("openInterestShort", 0))
         except (KeyError, ValueError, TypeError):
             # fundingRateLong missing, non-numeric, or OI field is null — skip market

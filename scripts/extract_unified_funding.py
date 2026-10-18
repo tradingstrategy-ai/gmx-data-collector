@@ -707,13 +707,13 @@ def export_feather(
         console.print("  [yellow]No rates directory found[/yellow]")
         return
 
-    gmx_dir = feather_dir / "data" / "gmx" / "futures"
+    gmx_dir = feather_dir / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
 
     # The same exporter that backs ``make export-funding``: one signed hourly
     # transformation and one guarded merge writer, so the two entry points
     # cannot drift apart (issue #60).
-    exporter = FreqtradeExporter(network_dir, feather_dir / "data", funding_dir=rates_dir)
+    exporter = FreqtradeExporter(network_dir, feather_dir, funding_dir=rates_dir)
 
     symbols: dict[str, Path] = {}
     for d in rates_dir.iterdir():
