@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./scripts/download_gmx_data.sh                          # latest, full
-#   ./scripts/download_gmx_data.sh --asset light            # latest, no futures/
+#   ./scripts/download_gmx_data.sh --asset light            # latest, no OHLCV/mark (1h funding kept)
 #   ./scripts/download_gmx_data.sh --release data-2026-04-27
 #   ./scripts/download_gmx_data.sh --output-dir ./mydata    # default: ./
 #

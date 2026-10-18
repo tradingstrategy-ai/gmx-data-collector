@@ -106,6 +106,30 @@ class TestRenderCoverageTable:
         eth_1m = table.index("ETH_USDC_USDC | 1m")
         assert btc_1h < btc_1m < eth_1m
 
+    def test_table_is_wrapped_in_collapsed_details(self):
+        from gmx_historical_data.release_notes import CoverageRow, render_coverage_table
+
+        rows = [
+            CoverageRow("BTC_USDC_USDC", "1h", "2025-09-13", "2026-09-09", 8809),
+            CoverageRow("BTC_USDC_USDC", "1m", "2026-03-05", "2026-09-09", 256992),
+        ]
+
+        table = render_coverage_table(rows)
+
+        summary = "<details><summary>Coverage (2 asset/timeframe rows)</summary>"
+        assert summary in table
+        assert table.rstrip().endswith("</details>")
+        # Rows sit inside the collapsed block; the heading stays outside.
+        assert table.index("## Coverage") < table.index(summary)
+        assert table.index(summary) < table.index("| Asset |") < table.index("</details>")
+        # A blank line after <summary> is required for GitHub to render the table.
+        assert f"{summary}\n\n| Asset" in table
+
+    def test_empty_rows_is_not_wrapped_in_details(self):
+        from gmx_historical_data.release_notes import render_coverage_table
+
+        assert "<details>" not in render_coverage_table([])
+
     def test_empty_rows_does_not_render_a_bare_header(self):
         from gmx_historical_data.release_notes import render_coverage_table
 
