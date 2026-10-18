@@ -75,7 +75,9 @@ def _drop_rejected_funding_hours(
     rejected = sorted(set(rejected_hours))
     if not rejected or frame.is_empty():
         return frame, 0
-    drop = pl.DataFrame({"date": pl.Series(rejected, dtype=frame.schema["date"])})
+    drop = pl.DataFrame({"date": pl.Series(rejected, dtype=pl.Datetime("ns", "UTC"))})
+    if frame.schema["date"] != drop.schema["date"]:
+        frame = frame.with_columns(pl.col("date").cast(drop.schema["date"]))
     kept = frame.join(drop, on="date", how="anti")
     return kept, len(frame) - len(kept)
 

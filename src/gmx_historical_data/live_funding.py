@@ -81,12 +81,12 @@ def upsert_live_rates_to_feather(
     Rounds the current UTC time down to the hour boundary and writes a
     one-row OHLCV-format row (``open`` = signed hourly rate, all other
     columns zero) into each
-    ``{feather_dir}/data/gmx/futures/{SYM}_USDC_USDC-1h-funding_rate.feather``.
+    ``{feather_dir}/gmx/futures/{SYM}_USDC_USDC-1h-funding_rate.feather``.
     An existing row at the same timestamp is replaced (idempotent on re-run).
 
     :param feather_dir: Root directory for feather files (e.g. FreqTrade
-        ``user_data/``); the function looks under
-        ``{feather_dir}/data/gmx/futures/``.
+        ``user_data/data/``); the function looks under
+        ``{feather_dir}/gmx/futures/``.
     :param rates: Mapping of ``{symbol: signed_hourly_rate}`` as returned by
         :func:`fetch_live_funding_rates`.
     :param market_filter: Optional market symbol filter, e.g. ``"ETH/USD"``.
@@ -102,7 +102,7 @@ def upsert_live_rates_to_feather(
         filter_sym = market_filter.split("/")[0].strip()
         rates = {s: r for s, r in rates.items() if s == filter_sym}
 
-    gmx_dir = feather_dir / "data" / "gmx" / "futures"
+    gmx_dir = feather_dir / "gmx" / "futures"
     updated = 0
 
     for symbol, hourly_rate in rates.items():
@@ -129,9 +129,9 @@ def upsert_live_rates_to_feather(
             ]
         )
 
-        # Normalise timezone to UTC so comparison works for both tz-aware and tz-naive files
-        if df["date"].dt.tz is None:
-            df["date"] = df["date"].dt.tz_localize("UTC")
+        # Normalise Arrow-backed, tz-naive, and tz-aware dates to pandas UTC
+        # timestamps so comparison works across exporter-created feather files.
+        df["date"] = pd.to_datetime(df["date"], utc=True)
 
         # Drop any existing row at the same timestamp, append, sort
         df = df[df["date"] != hour_ts]
