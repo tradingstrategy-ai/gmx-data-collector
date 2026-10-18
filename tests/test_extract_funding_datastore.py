@@ -60,8 +60,12 @@ class FakeRpc:
     a JSON-RPC error on their first funding call; ``fail_always`` never succeed.
     """
 
-    def __init__(self, values, fail_once=(), fail_always=(), bad_ts=()):
+    def __init__(
+        self, values, fail_once=(), fail_always=(), bad_ts=(), created=None, read_failed=()
+    ):
         self.values = values
+        self.created = created or {}  # market -> first block where it has code
+        self.read_failed = set(read_failed)  # (block, market) whose getInt reverts
         self.fail_once = set(fail_once)
         self.fail_always = set(fail_always)
         self.bad_ts = set(bad_ts)
@@ -84,7 +88,15 @@ class FakeRpc:
                 self.fail_once.discard(bn)
                 out.append({"id": req["id"], "error": {"code": -32000, "message": "boom"}})
             else:
-                raw = abi_encode(["int256[]"], [self.values[bn]]).hex()
+                statuses = []
+                for market, _ in zip((ETH, BTC), self.values[bn]):
+                    if bn < self.created.get(market, 0):
+                        statuses.append(mod.READ_NOT_DEPLOYED)
+                    elif (bn, market) in self.read_failed:
+                        statuses.append(mod.READ_FAILED)
+                    else:
+                        statuses.append(mod.READ_OK)
+                raw = abi_encode(["int256[]", "uint8[]"], [self.values[bn], statuses]).hex()
                 out.append({"id": req["id"], "result": "0x" + raw})
         return _Resp(out)
 
@@ -191,6 +203,49 @@ def test_interruption_before_persistence_then_resume(monkeypatch, tmp_path):
 
     keys = {(r.block_number, r.market) for r in persisted}
     assert keys == {(bn, m) for bn in blocks for m in (ETH, BTC)}
+
+
+def test_pre_creation_blocks_are_not_observations(monkeypatch):
+    """A market with no code at a block yields no record there; later zeros stay."""
+    values = {bn: [SCALE // 10**6, 0] for bn in (1000, 1001, 1002)}
+    rpc = FakeRpc(values, created={BTC: 1001})
+    records = _extract(rpc, monkeypatch, [1000, 1001, 1002])
+
+    btc = sorted(r.block_number for r in records if r.market == BTC)
+    eth = sorted(r.block_number for r in records if r.market == ETH)
+    assert btc == [1001, 1002]  # nothing invented for 1000; genuine zeros after creation kept
+    assert eth == [1000, 1001, 1002]  # sampling grid unchanged for existing markets
+    assert all(int(r.funding_factor_per_second) == 0 for r in records if r.market == BTC)
+
+
+def test_reverted_datastore_read_is_a_failure_not_zero(monkeypatch):
+    """A reverted getInt (reader status READ_FAILED) fails the batch instead of reading 0."""
+    values = {1000: [1, 2], 1001: [3, 4]}
+    rpc = FakeRpc(values, read_failed=[(1001, ETH)])
+    with pytest.raises(mod.FundingExtractionError):
+        _extract(rpc, monkeypatch, [1000, 1001])
+
+
+def test_reader_source_has_no_catch_to_zero():
+    src = (
+        Path(__file__).resolve().parents[1] / "contracts" / "GMXFundingRateBatch.sol"
+    ).read_text()
+    assert "results[i] = 0" not in src
+    assert "statuses[i] = 2" in src
+
+
+def test_legacy_checkpoint_refuses_resume(tmp_path):
+    """An unversioned checkpoint may point past unwritten data: refuse, don't skip."""
+    (tmp_path / "funding_datastore_checkpoint.json").write_text(
+        '{"last_block": 1001, "total_records": 4}'
+    )
+    with pytest.raises(mod.LegacyCheckpointError, match="legacy"):
+        mod.resume_block(tmp_path, 1, 1000)
+
+
+def test_saved_checkpoint_is_versioned_and_resumable(tmp_path):
+    mod.save_checkpoint(tmp_path, 1001, 4)
+    assert mod.resume_block(tmp_path, 1, 1000) == 1002
 
 
 @pytest.mark.parametrize(

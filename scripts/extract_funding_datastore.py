@@ -100,12 +100,24 @@ GMX_V22_FUNDING_EVENT_START = 370_000_000  # ~Aug 2025
 # (Paris = pre-Shanghai; no PUSH0 — required for Arbitrum blocks before ArbOS 20 ~block 174M)
 # NOT deployed — used exclusively via eth_call with to=null:
 #   data = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(["address[]"], [markets])
-# Returns: abi_decode(["int256[]"], result)[0]
-FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b50604051610683380380610683833981810160405281019061003291906103de565b600073fd70de6b91282d8017aa4e741e9ae325cab992d89050600060405160200161005c90610484565b60405160208183030381529060405280519060200120905060008351905060008167ffffffffffffffff8111156100965761009561023d565b5b6040519080825280602002602001820160405280156100c45781602001602082028036833780820191505090505b50905060005b828110156101e6576000848783815181106100e8576100e76104a4565b5b60200260200101516040516020016101019291906104fb565b6040516020818303038152906040528051906020012090508573ffffffffffffffffffffffffffffffffffffffff1663dc97d962826040518263ffffffff1660e01b81526004016101529190610524565b602060405180830381865afa92505050801561018c57506040513d601f19601f820116820180604052508101906101899190610575565b60015b6101b65760008383815181106101a5576101a46104a4565b5b6020026020010181815250506101d8565b808484815181106101ca576101c96104a4565b5b602002602001018181525050505b5080806001019150506100ca565b506000816040516020016101fa9190610660565b6040516020818303038152906040529050805160208201f35b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b6102758261022c565b810181811067ffffffffffffffff821117156102945761029361023d565b5b80604052505050565b60006102a7610213565b90506102b3828261026c565b919050565b600067ffffffffffffffff8211156102d3576102d261023d565b5b602082029050602081019050919050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b6000610314826102e9565b9050919050565b61032481610309565b811461032f57600080fd5b50565b6000815190506103418161031b565b92915050565b600061035a610355846102b8565b61029d565b9050808382526020820190506020840283018581111561037d5761037c6102e4565b5b835b818110156103a657806103928882610332565b84526020840193505060208101905061037f565b5050509392505050565b600082601f8301126103c5576103c4610227565b5b81516103d5848260208601610347565b91505092915050565b6000602082840312156103f4576103f361021d565b5b600082015167ffffffffffffffff81111561041257610411610222565b5b61041e848285016103b0565b91505092915050565b600082825260208201905092915050565b7f53415645445f46554e44494e475f464143544f525f5045525f5345434f4e4400600082015250565b600061046e601f83610427565b915061047982610438565b602082019050919050565b6000602082019050818103600083015261049d81610461565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b6000819050919050565b6104e6816104d3565b82525050565b6104f581610309565b82525050565b600060408201905061051060008301856104dd565b61051d60208301846104ec565b9392505050565b600060208201905061053960008301846104dd565b92915050565b6000819050919050565b6105528161053f565b811461055d57600080fd5b50565b60008151905061056f81610549565b92915050565b60006020828403121561058b5761058a61021d565b5b600061059984828501610560565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6105d78161053f565b82525050565b60006105e983836105ce565b60208301905092915050565b6000602082019050919050565b600061060d826105a2565b61061781856105ad565b9350610622836105be565b8060005b8381101561065357815161063a88826105dd565b9750610645836105f5565b925050600181019050610626565b5085935050505092915050565b6000602082019050818103600083015261067a8184610602565b90509291505056fe"
+# Returns: abi_decode(["int256[]", "uint8[]"], result) -> (values, statuses); see
+# READ_OK / READ_NOT_DEPLOYED / READ_FAILED below.  Rebuild with `forge build` in
+# contracts/ and paste out/.../GMXFundingRateBatchRequest.json "bytecode.object".
+FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b506040516108223803806108228339818101604052810190610032919061049d565b600073fd70de6b91282d8017aa4e741e9ae325cab992d89050600060405160200161005c90610543565b60405160208183030381529060405280519060200120905060008351905060008167ffffffffffffffff811115610096576100956102fc565b5b6040519080825280602002602001820160405280156100c45781602001602082028036833780820191505090505b50905060008267ffffffffffffffff8111156100e3576100e26102fc565b5b6040519080825280602002602001820160405280156101115781602001602082028036833780820191505090505b50905060005b838110156102a357600087828151811061013457610133610563565b5b602002602001015173ffffffffffffffffffffffffffffffffffffffff163b0361018657600182828151811061016d5761016c610563565b5b602002602001019060ff16908160ff1681525050610296565b60008588838151811061019c5761019b610563565b5b60200260200101516040516020016101b59291906105ba565b6040516020818303038152906040528051906020012090508673ffffffffffffffffffffffffffffffffffffffff1663dc97d962826040518263ffffffff1660e01b815260040161020691906105e3565b602060405180830381865afa92505050801561024057506040513d601f19601f8201168201806040525081019061023d9190610634565b60015b61027257600283838151811061025957610258610563565b5b602002602001019060ff16908160ff1681525050610294565b8085848151811061028657610285610563565b5b602002602001018181525050505b505b8080600101915050610117565b50600082826040516020016102b99291906107ea565b6040516020818303038152906040529050805160208201f35b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b610334826102eb565b810181811067ffffffffffffffff82111715610353576103526102fc565b5b80604052505050565b60006103666102d2565b9050610372828261032b565b919050565b600067ffffffffffffffff821115610392576103916102fc565b5b602082029050602081019050919050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006103d3826103a8565b9050919050565b6103e3816103c8565b81146103ee57600080fd5b50565b600081519050610400816103da565b92915050565b600061041961041484610377565b61035c565b9050808382526020820190506020840283018581111561043c5761043b6103a3565b5b835b81811015610465578061045188826103f1565b84526020840193505060208101905061043e565b5050509392505050565b600082601f830112610484576104836102e6565b5b8151610494848260208601610406565b91505092915050565b6000602082840312156104b3576104b26102dc565b5b600082015167ffffffffffffffff8111156104d1576104d06102e1565b5b6104dd8482850161046f565b91505092915050565b600082825260208201905092915050565b7f53415645445f46554e44494e475f464143544f525f5045525f5345434f4e4400600082015250565b600061052d601f836104e6565b9150610538826104f7565b602082019050919050565b6000602082019050818103600083015261055c81610520565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b6000819050919050565b6105a581610592565b82525050565b6105b4816103c8565b82525050565b60006040820190506105cf600083018561059c565b6105dc60208301846105ab565b9392505050565b60006020820190506105f8600083018461059c565b92915050565b6000819050919050565b610611816105fe565b811461061c57600080fd5b50565b60008151905061062e81610608565b92915050565b60006020828403121561064a576106496102dc565b5b60006106588482850161061f565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b610696816105fe565b82525050565b60006106a8838361068d565b60208301905092915050565b6000602082019050919050565b60006106cc82610661565b6106d6818561066c565b93506106e18361067d565b8060005b838110156107125781516106f9888261069c565b9750610704836106b4565b9250506001810190506106e5565b5085935050505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600060ff82169050919050565b6107618161074b565b82525050565b60006107738383610758565b60208301905092915050565b6000602082019050919050565b60006107978261071f565b6107a1818561072a565b93506107ac8361073b565b8060005b838110156107dd5781516107c48882610767565b97506107cf8361077f565b9250506001810190506107b0565b5085935050505092915050565b6000604082019050818103600083015261080481856106c1565b90508181036020830152610818818461078c565b9050939250505056fe"
 
 # =============================================================================
 # DATA CLASSES & HELPERS
 # =============================================================================
+
+# Per-market status codes returned by the batch reader (contracts/GMXFundingRateBatch.sol)
+READ_OK = 0  # value is a genuine DataStore reading (zero included)
+READ_NOT_DEPLOYED = 1  # market token has no code at this block: not created yet
+READ_FAILED = 2  # getInt reverted: a failed read, never a zero
+
+# Version of the durable checkpoint format.  Version 2 means "last_block is the
+# last sample block whose data has been persisted".  Unversioned (legacy)
+# checkpoints were advanced before any data was written and cannot be trusted.
+CHECKPOINT_VERSION = 2
 
 # Attempts per JSON-RPC batch before the extraction fails (backoff: 1s, 4s, 16s, 60s)
 RPC_MAX_ATTEMPTS = 5
@@ -113,6 +125,10 @@ RPC_MAX_ATTEMPTS = 5
 
 class FundingExtractionError(RuntimeError):
     """Raised when an RPC batch stays failed/empty/undecodable after all retries."""
+
+
+class LegacyCheckpointError(RuntimeError):
+    """Raised when ``--resume`` finds an unversioned (pre-durable) checkpoint."""
 
 
 def _post_batch_with_retry(
@@ -217,7 +233,7 @@ def batch_fetch_funding_rates(
     block_numbers: list[int],
     batch_size: int = 130,
     timeout: int = 120,
-) -> dict[int, dict[str, int]]:
+) -> dict[int, dict[str, int | None]]:
     """Batch-fetch ``savedFundingFactorPerSecond`` for all markets across many blocks.
 
     Sends groups of ``eth_call`` requests (using ``GMXFundingRateBatchRequest``
@@ -232,8 +248,10 @@ def batch_fetch_funding_rates(
     :param batch_size: ``eth_call`` requests per HTTP batch (default: 130).
     :param timeout: Per-request timeout in seconds (default: 120).
     :returns: Dict mapping block number → {market address → int256 value}.  A
-        successful read of ``0`` is a valid value; failed, empty or undecodable
-        responses are retried and never converted to zero.
+        successful read of ``0`` is a valid value.  The value is ``None`` when
+        the market has no code at that block (not created yet), so it must be
+        skipped.  Failed reads (reverted ``getInt``, RPC error, empty or
+        undecodable response) are retried and never converted to zero.
     :raises FundingExtractionError: If any batch stays failed after all retries.
     """
     raw_urls = rpc_config.strip().split()
@@ -263,9 +281,9 @@ def batch_fetch_funding_rates(
         ]
         url = call_urls[i % len(call_urls)]
 
-        def parse_funding(items, chunk=chunk) -> dict[int, dict[str, int]]:
+        def parse_funding(items, chunk=chunk) -> dict[int, dict[str, int | None]]:
             by_id = {item.get("id"): item for item in items}
-            parsed: dict[int, dict[str, int]] = {}
+            parsed: dict[int, dict[str, int | None]] = {}
             for j, bn in enumerate(chunk):
                 item = by_id.get(j)
                 if item is None or item.get("error"):
@@ -273,12 +291,22 @@ def batch_fetch_funding_rates(
                 raw = item.get("result")
                 if not isinstance(raw, str) or raw in ("", "0x"):
                     raise ValueError(f"block {bn}: empty result")
-                values = abi_decode(["int256[]"], bytes.fromhex(raw[2:]))[0]
-                if len(values) != len(market_addresses):
+                values, statuses = abi_decode(["int256[]", "uint8[]"], bytes.fromhex(raw[2:]))
+                if len(values) != len(market_addresses) or len(statuses) != len(market_addresses):
                     raise ValueError(
                         f"block {bn}: expected {len(market_addresses)} values, got {len(values)}"
                     )
-                parsed[bn] = dict(zip(market_addresses, values))
+                row: dict[str, int | None] = {}
+                for addr, value, status in zip(market_addresses, values, statuses):
+                    if status == READ_OK:
+                        row[addr] = value
+                    elif status == READ_NOT_DEPLOYED:
+                        row[addr] = None  # market did not exist at this block
+                    else:
+                        raise ValueError(
+                            f"block {bn}: DataStore read failed for {addr} (status {status})"
+                        )
+                parsed[bn] = row
             return parsed
 
         results.update(
@@ -310,15 +338,25 @@ def read_all_markets_bytecode(
     :param w3: Web3 instance (any provider).
     :param market_addresses: Market contract addresses to query.
     :param block_number: Block to query at.
-    :returns: Dict of market address → signed int256 value (0 on failure).
+    :returns: Dict of market address → signed int256 value.  Markets with no code
+        at ``block_number`` are omitted.
+    :raises FundingExtractionError: If a DataStore read fails.
     """
     calldata = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(
         ["address[]"],
         [[Web3.to_checksum_address(a) for a in market_addresses]],
     )
     result = w3.eth.call({"data": calldata}, block_identifier=block_number)
-    values: tuple[int, ...] = abi_decode(["int256[]"], result)[0]
-    return dict(zip(market_addresses, values))
+    values, statuses = abi_decode(["int256[]", "uint8[]"], result)
+    out: dict[str, int] = {}
+    for addr, value, status in zip(market_addresses, values, statuses):
+        if status == READ_FAILED:
+            raise FundingExtractionError(
+                f"DataStore read failed for {addr} at block {block_number}"
+            )
+        if status == READ_OK:
+            out[addr] = value
+    return out
 
 
 @dataclass
@@ -409,7 +447,8 @@ def extract_funding_rates(
     :param persist: Callback that durably writes a list of records.  Called once
         per chunk (in block order); if it raises, no checkpoint is advanced.
     :returns: List of :class:`FundingDatastoreRecord` objects, including valid
-        zero readings.
+        zero readings.  A market is omitted for sample blocks before it exists
+        (no code at that block); the sample grid itself is unchanged.
     :raises FundingExtractionError: If an RPC batch cannot be fully read.
     """
     # Filter markets: exclude swap-only (no index token) and deprecated (isListed=False)
@@ -465,6 +504,8 @@ def extract_funding_rates(
             ts = block_timestamps[block_num]
             dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
             for addr, value in block_funding[block_num].items():
+                if value is None:
+                    continue  # market not created yet at this block: no observation
                 chunk_records.append(
                     FundingDatastoreRecord(
                         symbol=market_symbol(addr, markets),
@@ -640,16 +681,24 @@ def save_json(records: list[FundingDatastoreRecord], output_dir: Path) -> None:
 
 
 def load_checkpoint(checkpoint_dir: Path) -> int | None:
-    """Load the last processed block from checkpoint file.
+    """Load the last persisted sample block from the checkpoint file.
 
     :param checkpoint_dir: Directory containing checkpoint file.
-    :returns: Last processed block number, or ``None`` if no checkpoint.
+    :returns: Last persisted block number, or ``None`` if no checkpoint.
+    :raises LegacyCheckpointError: If the checkpoint is unversioned/legacy.
     """
     filepath = checkpoint_dir / "funding_datastore_checkpoint.json"
     if not filepath.exists():
         return None
     with open(filepath) as f:
         data = json.load(f)
+    if data.get("version") != CHECKPOINT_VERSION:
+        raise LegacyCheckpointError(
+            f"{filepath} is a legacy (unversioned) checkpoint written before data was "
+            f"durably persisted; resuming from block {data.get('last_block')} could skip "
+            "unwritten observations.  Delete the checkpoint file (or run without --resume) "
+            "to restart; existing hourly parquet rows are merged by timestamp."
+        )
     return data.get("last_block")
 
 
@@ -677,6 +726,7 @@ def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -
     filepath = checkpoint_dir / "funding_datastore_checkpoint.json"
     filepath.parent.mkdir(parents=True, exist_ok=True)
     data = {
+        "version": CHECKPOINT_VERSION,
         "last_block": last_block,
         "total_records": total_records,
         "updated_at": datetime.now(tz=UTC).isoformat(),
@@ -768,7 +818,11 @@ def main():
     # Resume from checkpoint
     from_block = args.from_block
     if args.resume:
-        from_block = resume_block(checkpoint_dir, args.interval, args.from_block)
+        try:
+            from_block = resume_block(checkpoint_dir, args.interval, args.from_block)
+        except LegacyCheckpointError as exc:
+            console.print(f"[red]ERROR: {exc}[/red]")
+            sys.exit(1)
         if from_block != args.from_block:
             console.print(f"  Resuming from checkpoint: block {from_block:,}")
 
