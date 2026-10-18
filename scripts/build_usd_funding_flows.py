@@ -214,27 +214,7 @@ def compute_annual_rates(
     if df.is_empty():
         return df.with_columns(pl.lit(None).cast(pl.Float64).alias("annual_rate_usd"))
 
-    df = df.sort(["market", "collateral_token", "is_long", "block_timestamp"])
-
-    # Compute seconds_diff using lag
-    df = df.with_columns(
-        pl.col("block_timestamp")
-        .shift(1)
-        .over(["market", "collateral_token", "is_long"])
-        .alias("prev_timestamp")
-    )
-    df = df.with_columns(
-        (pl.col("block_timestamp") - pl.col("prev_timestamp")).alias("seconds_diff")
-    )
-
-    # Filter: need previous timestamp and post-genesis
-    df = df.filter(
-        pl.col("prev_timestamp").is_not_null()
-        & (pl.col("block_timestamp") >= GMX_V2_GENESIS_TIMESTAMP)
-    )
-
-    # Filter out zero seconds_diff (same-block events — indeterminate time delta)
-    df = df.filter(pl.col("seconds_diff") > 0)
+    df = eligible_annual_events(df)
 
     # Annualise: (delta_usd / seconds_diff) * 86400 * 365
     df = df.with_columns(
@@ -254,22 +234,27 @@ def compute_annual_rates(
     return df.filter(pl.col("delta_usd").is_not_null())
 
 
-def count_eligible_unpriced_events(df: pl.DataFrame) -> int:
-    """Count missing prices only for events eligible for annual-rate output."""
-    if df.is_empty():
-        return 0
-    eligible = df.sort(["market", "collateral_token", "is_long", "block_timestamp"])
-    eligible = eligible.with_columns(
+def eligible_annual_events(df: pl.DataFrame) -> pl.DataFrame:
+    """Add event intervals and retain rows eligible for annual-rate output."""
+    df = df.sort(["market", "collateral_token", "is_long", "block_timestamp"])
+    df = df.with_columns(
         pl.col("block_timestamp")
         .shift(1)
         .over(["market", "collateral_token", "is_long"])
         .alias("prev_timestamp")
     ).with_columns((pl.col("block_timestamp") - pl.col("prev_timestamp")).alias("seconds_diff"))
-    eligible = eligible.filter(
+    return df.filter(
         pl.col("prev_timestamp").is_not_null()
         & (pl.col("block_timestamp") >= GMX_V2_GENESIS_TIMESTAMP)
         & (pl.col("seconds_diff") > 0)
     )
+
+
+def count_eligible_unpriced_events(df: pl.DataFrame) -> int:
+    """Count missing prices only for events eligible for annual-rate output."""
+    if df.is_empty():
+        return 0
+    eligible = eligible_annual_events(df)
     return int(eligible["delta_usd"].is_null().sum())
 
 
@@ -549,8 +534,17 @@ Examples:
 
     if flows.is_empty():
         if args.market:
-            console.print(f"\n[yellow]No flows for market {args.market}[/yellow]")
-            sys.exit(0)
+            market_present = any(
+                not raw.is_empty() and raw.filter(pl.col("symbol") == filter_sym).height > 0
+                for raw in (ff_raw, cf_raw)
+            )
+            if not market_present:
+                console.print(f"\n[yellow]No events for market {args.market}[/yellow]")
+                sys.exit(0)
+            console.print(
+                f"\n[red]No flows survived for market {args.market}; existing outputs were not changed.[/red]"
+            )
+            sys.exit(1)
         console.print("\n[red]No USD flows survived; existing outputs were not changed.[/red]")
         sys.exit(1)
 

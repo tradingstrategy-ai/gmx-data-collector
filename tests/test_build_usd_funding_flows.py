@@ -133,4 +133,23 @@ def test_market_with_no_flows_keeps_success_exit(tmp_path, monkeypatch):
         builder.main()
 
     assert exc.value.code == 0
-    assert "No flows for market BTC/USD" in report.getvalue()
+    assert "No events for market BTC/USD" in report.getvalue()
+
+
+def test_present_market_with_no_surviving_flows_fails(tmp_path, monkeypatch):
+    from scripts import build_usd_funding_flows as builder
+
+    network_dir = tmp_path / "arbitrum"
+    _inputs(network_dir)
+    receiving_path = network_dir / "raw/claimable_fee_per_size/ETH/data.parquet"
+    receiving = pl.read_parquet(receiving_path).with_columns(
+        pl.Series("transaction_hash", ["x", "y", "z", "w"])
+    )
+    receiving.write_parquet(receiving_path)
+    report = _run_main(monkeypatch, builder, tmp_path, extra_args=("--market", "ETH/USD"))
+
+    with pytest.raises(SystemExit) as exc:
+        builder.main()
+
+    assert exc.value.code == 1
+    assert "No flows survived for market ETH/USD" in report.getvalue()
