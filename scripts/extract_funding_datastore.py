@@ -41,6 +41,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -106,6 +107,40 @@ FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b506040516106833803
 # DATA CLASSES & HELPERS
 # =============================================================================
 
+# Attempts per JSON-RPC batch before the extraction fails (backoff: 1s, 4s, 16s, 60s)
+RPC_MAX_ATTEMPTS = 5
+
+
+class FundingExtractionError(RuntimeError):
+    """Raised when an RPC batch stays failed/empty/undecodable after all retries."""
+
+
+def _post_batch_with_retry(
+    url: str, payload: list[dict], timeout: int, parse: Callable, label: str
+):
+    """POST a JSON-RPC batch and parse it, retrying the whole batch on any failure.
+
+    ``parse`` receives the decoded JSON and must raise on a missing, errored or
+    undecodable item — a bad response is never converted into a value.
+
+    :raises FundingExtractionError: If every attempt fails.
+    """
+    for attempt in range(RPC_MAX_ATTEMPTS):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return parse(resp.json())
+        except Exception as exc:
+            if attempt == RPC_MAX_ATTEMPTS - 1:
+                raise FundingExtractionError(
+                    f"{label} failed after {RPC_MAX_ATTEMPTS} attempts: {exc}"
+                ) from exc
+            delay = min(4**attempt, 60)
+            console.print(
+                f"  [yellow]{label} error (attempt {attempt + 1}/{RPC_MAX_ATTEMPTS}): {exc} — retry in {delay}s[/yellow]"
+            )
+            time.sleep(delay)
+
 
 def prefetch_block_timestamps(
     rpc_config: str,
@@ -127,6 +162,7 @@ def prefetch_block_timestamps(
     :param batch_size: Max requests per HTTP batch (default: 200).
     :param timeout: Per-request timeout in seconds (default: 60).
     :returns: Dict mapping block number → Unix timestamp.
+    :raises FundingExtractionError: If any block's timestamp stays unavailable.
     """
     # Parse: strip mev+ prefix (those are transaction endpoints, not suitable for eth_call)
     raw_urls = rpc_config.strip().split()
@@ -148,26 +184,26 @@ def prefetch_block_timestamps(
             for j, bn in enumerate(chunk)
         ]
         url = call_urls[i % len(call_urls)]
-        # Retry with exponential backoff on transient connection errors
-        for attempt in range(5):
-            try:
-                resp = requests.post(url, json=payload, timeout=timeout)
-                resp.raise_for_status()
-                break
-            except Exception as exc:
-                if attempt == 4:
-                    raise
-                delay = min(4**attempt, 60)
-                console.print(
-                    f"  [yellow]Timestamp batch {i} error (attempt {attempt + 1}/5): {exc} — retry in {delay}s[/yellow]"
-                )
-                time.sleep(delay)
-        for item in resp.json():
-            result = item.get("result")
-            if result:
-                bn = int(result["number"], 16)
+
+        def parse_timestamps(items, chunk=chunk) -> dict[int, int]:
+            by_id = {item.get("id"): item for item in items}
+            parsed: dict[int, int] = {}
+            for j, bn in enumerate(chunk):
+                item = by_id.get(j)
+                if item is None or item.get("error"):
+                    raise ValueError(f"block {bn}: missing or errored response")
+                result = item.get("result")
+                if not result or int(result["number"], 16) != bn:
+                    raise ValueError(f"block {bn}: missing or mismatched block")
                 ts = int(result["timestamp"], 16)
-                timestamps[bn] = ts
+                if ts <= 0:
+                    raise ValueError(f"block {bn}: invalid timestamp {ts}")
+                parsed[bn] = ts
+            return parsed
+
+        timestamps.update(
+            _post_batch_with_retry(url, payload, timeout, parse_timestamps, f"Timestamp batch {i}")
+        )
         fetched += len(chunk)
         if fetched % 2000 == 0 or fetched == total:
             console.print(f"  Timestamps: {fetched:,}/{total:,} ({fetched / total * 100:.0f}%)")
@@ -195,7 +231,10 @@ def batch_fetch_funding_rates(
     :param block_numbers: Ordered list of block numbers to query.
     :param batch_size: ``eth_call`` requests per HTTP batch (default: 130).
     :param timeout: Per-request timeout in seconds (default: 120).
-    :returns: Dict mapping block number → {market address → int256 value}.
+    :returns: Dict mapping block number → {market address → int256 value}.  A
+        successful read of ``0`` is a valid value; failed, empty or undecodable
+        responses are retried and never converted to zero.
+    :raises FundingExtractionError: If any batch stays failed after all retries.
     """
     raw_urls = rpc_config.strip().split()
     call_urls = [u[4:] if u.startswith("mev+") else u for u in raw_urls]
@@ -210,7 +249,6 @@ def batch_fetch_funding_rates(
     results: dict[int, dict[str, int]] = {}
     total = len(block_numbers)
     fetched = 0
-    errors = 0
 
     for i, chunk_start in enumerate(range(0, total, batch_size)):
         chunk = block_numbers[chunk_start : chunk_start + batch_size]
@@ -224,28 +262,33 @@ def batch_fetch_funding_rates(
             for j, bn in enumerate(chunk)
         ]
         url = call_urls[i % len(call_urls)]
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
 
-        for item in resp.json():
-            bn = chunk[item["id"]]
-            raw = item.get("result", "")
-            if raw and raw != "0x":
-                try:
-                    values = abi_decode(["int256[]"], bytes.fromhex(raw[2:]))[0]
-                    results[bn] = dict(zip(market_addresses, values))
-                except Exception:
-                    results[bn] = {addr: 0 for addr in market_addresses}
-                    errors += 1
-            else:
-                # Block before GMX V2 or RPC error — all zeros
-                results[bn] = {addr: 0 for addr in market_addresses}
+        def parse_funding(items, chunk=chunk) -> dict[int, dict[str, int]]:
+            by_id = {item.get("id"): item for item in items}
+            parsed: dict[int, dict[str, int]] = {}
+            for j, bn in enumerate(chunk):
+                item = by_id.get(j)
+                if item is None or item.get("error"):
+                    raise ValueError(f"block {bn}: missing or errored response")
+                raw = item.get("result")
+                if not isinstance(raw, str) or raw in ("", "0x"):
+                    raise ValueError(f"block {bn}: empty result")
+                values = abi_decode(["int256[]"], bytes.fromhex(raw[2:]))[0]
+                if len(values) != len(market_addresses):
+                    raise ValueError(
+                        f"block {bn}: expected {len(market_addresses)} values, got {len(values)}"
+                    )
+                parsed[bn] = dict(zip(market_addresses, values))
+            return parsed
+
+        results.update(
+            _post_batch_with_retry(url, payload, timeout, parse_funding, f"DataStore batch {i}")
+        )
 
         fetched += len(chunk)
         if fetched % 2000 == 0 or fetched == total:
             console.print(
-                f"  DataStore reads: {fetched:,}/{total:,} "
-                f"({fetched / total * 100:.0f}%)" + (f" [{errors} decode errors]" if errors else "")
+                f"  DataStore reads: {fetched:,}/{total:,} ({fetched / total * 100:.0f}%)"
             )
 
     return results
@@ -337,22 +380,19 @@ def extract_funding_rates(
     market_filter: str | None = None,
     checkpoint_dir: Path | None = None,
     checkpoint_interval: int = 500,
+    persist: Callable[[list[FundingDatastoreRecord]], None] | None = None,
 ) -> list[FundingDatastoreRecord]:
     """Extract historical funding rates via fully-batched JSON-RPC requests.
 
-    Three-phase approach — all I/O is batched upfront, record construction
-    is pure CPU:
+    Per chunk of sample blocks:
 
-    1. **Timestamp batch**: ``eth_getBlockByNumber`` for all sample blocks
-       in groups of 200, reducing N round-trips to ``ceil(N/200)``.
+    1. **Timestamp batch**: ``eth_getBlockByNumber`` in groups of 50.
     2. **DataStore batch**: ``eth_call`` with ``GMXFundingRateBatchRequest``
-       bytecode for all sample blocks in groups of 130, reducing N round-trips
-       to ``ceil(N/130)``.  All market keys computed on-chain; no pre-computation
-       needed.
-    3. **Record construction**: pure CPU loop over pre-fetched data — no RPC.
+       bytecode in groups of 130.  All market keys computed on-chain.
+    3. **Record construction**, then ``persist`` and checkpoint.
 
-    Total HTTP requests: ``ceil(N/200) + ceil(N/130)`` ≈ 221 for a full run
-    (vs. ~17,000 sequential calls in the old approach).
+    Failed, empty or undecodable responses are retried and then raise; they are
+    never recorded as zero.  A successful zero reading is kept.
 
     :param w3: Web3 instance (used only for ``is_connected()`` check).
     :param rpc_config: Space-separated RPC URL(s); round-robin across providers.
@@ -361,9 +401,16 @@ def extract_funding_rates(
     :param markets: Market address → info dict.
     :param interval_blocks: Block interval between samples (default: ~1 hour).
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
-    :param checkpoint_dir: Optional directory for periodic checkpoint saves.
-    :param checkpoint_interval: Save checkpoint every N sample blocks.
-    :returns: List of :class:`FundingDatastoreRecord` objects.
+    :param checkpoint_dir: Optional directory for checkpoint saves.  Checkpoints
+        are written only when ``persist`` is given, and only after ``persist``
+        has returned for the records they cover.
+    :param checkpoint_interval: Sample blocks fetched, persisted and checkpointed
+        per chunk.
+    :param persist: Callback that durably writes a list of records.  Called once
+        per chunk (in block order); if it raises, no checkpoint is advanced.
+    :returns: List of :class:`FundingDatastoreRecord` objects, including valid
+        zero readings.
+    :raises FundingExtractionError: If an RPC batch cannot be fully read.
     """
     # Filter markets: exclude swap-only (no index token) and deprecated (isListed=False)
     target_markets = {}
@@ -394,52 +441,63 @@ def extract_funding_rates(
         f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total"
     )
 
-    # --- Phase 1: batch-fetch all block timestamps upfront ---
-    console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 50...")
-    t_ts = time.monotonic()
-    block_timestamps = prefetch_block_timestamps(rpc_config, sample_blocks)
-    console.print(f"  Timestamps ready in {time.monotonic() - t_ts:.1f}s")
-
-    # --- Phase 2: batch-fetch all DataStore values upfront ---
-    console.print(
-        f"\n  Batch-fetching DataStore values for {total_samples:,} blocks in batches of 130..."
-    )
-    t_ds = time.monotonic()
-    block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, sample_blocks)
-    console.print(f"  DataStore reads ready in {time.monotonic() - t_ds:.1f}s")
-
-    # --- Phase 3: build records (pure CPU — no more RPC calls) ---
+    # Process the sample blocks in chunks: fetch -> build records -> persist ->
+    # checkpoint.  A checkpoint only ever covers data ``persist`` has written.
     records: list[FundingDatastoreRecord] = []
+    pending: list[FundingDatastoreRecord] = []  # built, not yet persisted
+    t_start = time.monotonic()
 
-    for i, block_num in enumerate(sample_blocks):
-        ts = block_timestamps.get(block_num, 0)
-        dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
-        market_values = block_funding.get(block_num, {})
-        for addr, value in market_values.items():
-            if value == 0:
-                continue
-            rate = value / FUNDING_FACTOR_PRECISION
-            sym = market_symbol(addr, markets)
-            records.append(
-                FundingDatastoreRecord(
-                    symbol=sym,
-                    market=addr.lower(),
-                    funding_factor_per_second=str(value),
-                    funding_rate_per_second=rate,
-                    longs_pay_shorts=(value > 0),
-                    block_number=block_num,
-                    block_timestamp=ts,
-                    block_datetime=dt_str,
+    def flush(batch: list[FundingDatastoreRecord]) -> None:
+        if not batch:
+            return
+        if persist is not None:
+            persist(batch)
+            if checkpoint_dir:
+                save_checkpoint(checkpoint_dir, max(r.block_number for r in batch), len(records))
+
+    for chunk_start in range(0, total_samples, checkpoint_interval):
+        chunk_blocks = sample_blocks[chunk_start : chunk_start + checkpoint_interval]
+        block_timestamps = prefetch_block_timestamps(rpc_config, chunk_blocks)
+        block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, chunk_blocks)
+
+        chunk_records: list[FundingDatastoreRecord] = []
+        for block_num in chunk_blocks:
+            ts = block_timestamps[block_num]
+            dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
+            for addr, value in block_funding[block_num].items():
+                chunk_records.append(
+                    FundingDatastoreRecord(
+                        symbol=market_symbol(addr, markets),
+                        market=addr.lower(),
+                        funding_factor_per_second=str(value),
+                        funding_rate_per_second=value / FUNDING_FACTOR_PRECISION,
+                        longs_pay_shorts=(value > 0),
+                        block_number=block_num,
+                        block_timestamp=ts,
+                        block_datetime=dt_str,
+                    )
                 )
-            )
-        if checkpoint_dir and (i + 1) % checkpoint_interval == 0:
-            save_checkpoint(checkpoint_dir, block_num, len(records))
+        chunk_records.sort(key=lambda r: (r.block_number, r.symbol))
+        records.extend(chunk_records)
+        pending.extend(chunk_records)
 
-    records.sort(key=lambda r: (r.block_number, r.symbol))
+        console.print(
+            f"  Fetched {chunk_start + len(chunk_blocks):,}/{total_samples:,} sample blocks"
+        )
+
+        # Hold back the newest hour: a sub-hour ``interval`` could split it
+        # across chunks, and hourly aggregates are written per hour.
+        if pending and chunk_start + checkpoint_interval < total_samples:
+            last_hour = pending[-1].block_timestamp // 3600
+            flush([r for r in pending if r.block_timestamp // 3600 < last_hour])
+            pending = [r for r in pending if r.block_timestamp // 3600 >= last_hour]
+        else:
+            flush(pending)
+            pending = []
 
     console.print(
-        f"\n  Extraction complete in {time.monotonic() - t_ts:.1f}s total: "
-        f"{len(records):,} non-zero readings from {total_samples:,} sampled blocks"
+        f"\n  Extraction complete in {time.monotonic() - t_start:.1f}s total: "
+        f"{len(records):,} readings from {total_samples:,} sampled blocks"
     )
 
     return records
@@ -488,7 +546,6 @@ def aggregate_hourly_rates(
             pl.col("funding_rate_per_second").mean().alias("funding_rate"),
             pl.col("funding_rate_per_second").min().alias("funding_rate_min"),
             pl.col("funding_rate_per_second").max().alias("funding_rate_max"),
-            pl.col("longs_pay_shorts").last().alias("longs_pay_shorts"),
             pl.len().alias("update_count"),
         )
         .sort(["symbol", "hour"])
@@ -498,14 +555,12 @@ def aggregate_hourly_rates(
     hourly = hourly.with_columns(
         (pl.col("funding_rate") * 3600).alias("funding_rate_hourly"),
         (pl.col("funding_rate") * 3600 * 8760).alias("funding_rate_annualized"),
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * 3600)
-        .otherwise(pl.col("funding_rate") * -3600)
-        .alias("funding_fee_long"),
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * -3600)
-        .otherwise(pl.col("funding_rate") * 3600)
-        .alias("funding_fee_short"),
+        (pl.col("funding_rate") > 0).alias("longs_pay_shorts"),
+    ).with_columns(
+        # funding_rate is already signed (positive = longs pay), so the signed
+        # fees are derived from it once: long = +rate, short = -rate.
+        pl.col("funding_rate_hourly").alias("funding_fee_long"),
+        (-pl.col("funding_rate_hourly")).alias("funding_fee_short"),
     )
 
     # Rename hour -> timestamp
@@ -596,6 +651,20 @@ def load_checkpoint(checkpoint_dir: Path) -> int | None:
     with open(filepath) as f:
         data = json.load(f)
     return data.get("last_block")
+
+
+def resume_block(checkpoint_dir: Path, interval_blocks: int, default_block: int) -> int:
+    """Return the first sample block to fetch when resuming.
+
+    The checkpoint holds the last *persisted* sample block, so the next sample
+    on the same grid is ``last_block + interval_blocks``.
+
+    :param checkpoint_dir: Directory containing the checkpoint file.
+    :param interval_blocks: Sampling interval in blocks.
+    :param default_block: Start block when no checkpoint exists.
+    """
+    last = load_checkpoint(checkpoint_dir)
+    return default_block if last is None else last + interval_blocks
 
 
 def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -> None:
@@ -699,9 +768,8 @@ def main():
     # Resume from checkpoint
     from_block = args.from_block
     if args.resume:
-        last = load_checkpoint(checkpoint_dir)
-        if last is not None:
-            from_block = last + 1
+        from_block = resume_block(checkpoint_dir, args.interval, args.from_block)
+        if from_block != args.from_block:
             console.print(f"  Resuming from checkpoint: block {from_block:,}")
 
     console.print("\n" + "=" * 70)
@@ -724,7 +792,11 @@ def main():
         sys.exit(1)
     console.print(f"  Connected. Latest block: {w3.eth.block_number:,}")
 
-    # Extract
+    def persist(batch: list[FundingDatastoreRecord]) -> None:
+        save_parquet(aggregate_hourly_rates(batch), output_dir)
+
+    # Extract.  Parquet output is persisted (and checkpointed) chunk by chunk;
+    # JSON is a single file written after extraction.
     records = extract_funding_rates(
         w3=w3,
         rpc_config=rpc_config,
@@ -734,23 +806,18 @@ def main():
         interval_blocks=args.interval,
         market_filter=args.market,
         checkpoint_dir=checkpoint_dir,
+        persist=persist if args.output == "parquet" else None,
     )
 
     if not records:
-        console.print("\n[yellow]No non-zero funding rates found in range.[/yellow]")
+        console.print("\n[yellow]No funding readings found in range.[/yellow]")
         sys.exit(0)
 
-    # Save
-    console.print(f"\nSaving {len(records):,} records...")
     if args.output == "json":
+        console.print(f"\nSaving {len(records):,} records...")
         save_json(records, output_dir)
-    else:
-        hourly = aggregate_hourly_rates(records)
-        save_parquet(hourly, output_dir)
-
-    # Save checkpoint
-    max_block = max(r.block_number for r in records)
-    save_checkpoint(checkpoint_dir, max_block, len(records))
+        # Checkpoint only after the JSON file is written
+        save_checkpoint(checkpoint_dir, max(r.block_number for r in records), len(records))
 
     # Summary
     symbols = set(r.symbol for r in records)
