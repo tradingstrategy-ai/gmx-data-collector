@@ -981,16 +981,16 @@ def _open_interest_usd_by_symbol(markets_df: pd.DataFrame) -> dict[str, float]:
 
 def _zero_volume_shares(
     futures_dir: Path, lookback_days: int, now: pd.Timestamp
-) -> dict[str, tuple]:
+) -> dict[str, tuple[float, int, float]]:
     """Compute each pair's zero-volume candle share over a recent window.
 
     :param futures_dir: Directory of ``{PAIR}-1h-futures.feather`` files.
     :param lookback_days: Window size in days, ending at ``now``.
     :param now: Clock (tz-aware UTC) to measure the window against.
-    :returns: Pair -> ``(zero_share, candle_count)``. Pairs with no candles
+    :returns: Pair -> ``(zero_share, candle_count, volume_sum)``. Pairs with no candles
         in the window, or an unreadable file, are omitted -- fail-soft.
     """
-    result: dict[str, tuple] = {}
+    result: dict[str, tuple[float, int, float]] = {}
     if not futures_dir.is_dir():
         return result
     cutoff = now - pd.Timedelta(days=lookback_days)
@@ -1007,20 +1007,30 @@ def _zero_volume_shares(
             continue
         pair = path.name[: -len("-1h-futures.feather")]
         zero = int((window["volume"] == 0).sum())
-        result[pair] = (zero / len(window), len(window))
+        result[pair] = (zero / len(window), len(window), float(window["volume"].sum()))
     return result
 
 
 def _tick_volume_by_symbol(
     gmx_root: Path, lookback_days: int, now: pd.Timestamp
-) -> dict[str, float]:
-    """Sum perp tick sidecar volume by symbol over the candle window."""
+) -> dict[str, float] | None:
+    """Sum perp tick sidecar volume by symbol over the candle window.
+
+    :param gmx_root: GMX data directory containing ``tick_volume/``.
+    :param lookback_days: Number of days included in the sum.
+    :param now: Inclusive end of the UTC window.
+    :returns: Symbol -> volume sum, or ``None`` if the sidecar is unavailable
+        or any sidecar file cannot be read.
+    """
     tick_dir = gmx_root / "tick_volume"
     if not tick_dir.is_dir():
-        return {}
+        return None
     cutoff = now - pd.Timedelta(days=lookback_days)
     totals: dict[str, float] = {}
-    for path in tick_dir.glob("*.parquet"):
+    paths = sorted(tick_dir.glob("*.parquet"))
+    if not paths:
+        return None
+    for path in paths:
         try:
             frame = pd.read_parquet(path, columns=["symbol", "date", "timeframe", "kind", "volume"])
             dates = pd.to_datetime(frame["date"], utc=True)
@@ -1028,14 +1038,14 @@ def _tick_volume_by_symbol(
                 (dates >= cutoff)
                 & (dates <= now)
                 & (frame["timeframe"] == "1h")
-                & (frame["kind"] == "perp")
+                & (frame["kind"] == PERP_KIND)
             ]
             for symbol, group in window.groupby("symbol"):
                 totals[str(symbol).upper()] = totals.get(str(symbol).upper(), 0.0) + float(
                     group["volume"].sum()
                 )
         except Exception:
-            continue
+            return None
     return totals
 
 
@@ -1153,11 +1163,15 @@ def _append_zero_volume_section(
                 oi_by_pair[pair] = oi_by_symbol[symbol]
 
         tick_volume_by_symbol = _tick_volume_by_symbol(gmx_root, ZERO_VOLUME_LOOKBACK_DAYS, now)
-        tick_volume_by_pair = {
-            pair: tick_volume_by_symbol.get(symbol, 0.0)
-            for pair in live_pairs
-            if (symbol := _pair_symbol(pair)) is not None
-        }
+        tick_volume_by_pair = (
+            None
+            if tick_volume_by_symbol is None
+            else {
+                pair: tick_volume_by_symbol.get(symbol, 0.0)
+                for pair in live_pairs
+                if (symbol := _pair_symbol(pair)) is not None
+            }
+        )
         findings = classify_zero_volume(
             zero_shares,
             oi_by_pair,

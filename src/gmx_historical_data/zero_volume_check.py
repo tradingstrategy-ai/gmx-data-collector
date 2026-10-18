@@ -27,25 +27,18 @@ ZERO_VOLUME_LOOKBACK_DAYS = 30
 #: would undercount real collector bugs.
 ZERO_VOLUME_SHARE_THRESHOLD = 0.95
 
-#: Open interest at or below this (in USD) counts as negligible -- the pair
-#: is genuinely dormant, not broken. Chosen far below the OI any actively
-#: traded GMX market carries, and comfortably above the near-zero OI a
-#: listed-but-abandoned market (e.g. BOME/BRETT/MEME/MEW/SATS) actually has.
-NEGLIGIBLE_OI_USD = 1_000.0
-
 
 class ZeroVolumeVerdict(Enum):
-    """What a pair's zero-volume streak means, once OI is checked.
+    """What a pair's low candle volume means after comparing tick volume.
 
     :cvar EXPECTED: No tick-volume evidence contradicts the quiet candles.
-    :cvar SUSPICIOUS: Tick volume exists despite almost-zero candle volume.
-    :cvar UNKNOWN: Retained for compatibility; current classification uses
-        source disagreement rather than OI availability.
+    :cvar SUSPICIOUS: Tick volume exists despite effectively-zero candle volume.
+    :cvar UNKNOWN: Tick-volume sidecar is unavailable or unreadable.
     """
 
-    EXPECTED = "expected (no activity)"
-    SUSPICIOUS = "suspicious (has open interest)"
-    UNKNOWN = "unknown (no OI data)"
+    EXPECTED = "expected (thin market)"
+    SUSPICIOUS = "suspicious (source mismatch)"
+    UNKNOWN = "unknown (tick sidecar unavailable)"
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,43 +62,41 @@ class ZeroVolumeFinding:
 
 
 def classify_zero_volume(
-    zero_share_by_pair: dict[str, tuple[float, int]],
+    zero_share_by_pair: dict[str, tuple[float, int, float]],
     open_interest_by_pair: dict[str, float],
     live_pairs: set[str] | None = None,
     tick_volume_by_pair: dict[str, float] | None = None,
     share_threshold: float = ZERO_VOLUME_SHARE_THRESHOLD,
-    negligible_oi_usd: float = NEGLIGIBLE_OI_USD,
 ) -> list[ZeroVolumeFinding]:
     """Classify pairs whose recent candle volume is almost entirely zero.
 
-    :param zero_share_by_pair: Pair -> ``(zero_share, candle_count)`` over
-        the lookback window.
+    :param zero_share_by_pair: Pair -> ``(zero_share, candle_count, candle_volume_sum)``.
     :param open_interest_by_pair: Pair -> today's OI in USD, shown as context.
     :param tick_volume_by_pair: Pair -> summed perp tick volume over the same
-        window. Missing pairs are treated as zero tick volume.
+        window. ``None`` means the sidecar is unavailable or unreadable.
     :param live_pairs: Pairs to consider -- callers exclude delisted markets
         before calling this, since a delisted market's frozen history is
         expected to stop trading entirely. ``None`` considers every pair
         present in ``zero_share_by_pair``.
     :param share_threshold: Minimum zero-candle share to flag a pair.
-    :param negligible_oi_usd: Deprecated compatibility parameter; ignored.
     :returns: Findings for every pair at or above ``share_threshold``,
         sorted by descending zero share.
     """
     findings: list[ZeroVolumeFinding] = []
-    tick_volume_by_pair = tick_volume_by_pair or {}
-    for pair, (share, count) in zero_share_by_pair.items():
+    for pair, (share, count, candle_volume) in zero_share_by_pair.items():
         if live_pairs is not None and pair not in live_pairs:
             continue
         if share < share_threshold:
             continue
 
         oi = open_interest_by_pair.get(pair)
-        verdict = (
-            ZeroVolumeVerdict.SUSPICIOUS
-            if tick_volume_by_pair.get(pair, 0.0) > 0
-            else ZeroVolumeVerdict.EXPECTED
-        )
+        tick_volume = None if tick_volume_by_pair is None else tick_volume_by_pair.get(pair, 0.0)
+        if tick_volume is None:
+            verdict = ZeroVolumeVerdict.UNKNOWN
+        elif candle_volume <= 1e-12 and tick_volume > 0:
+            verdict = ZeroVolumeVerdict.SUSPICIOUS
+        else:
+            verdict = ZeroVolumeVerdict.EXPECTED
 
         findings.append(ZeroVolumeFinding(pair, share, count, oi, verdict))
 
