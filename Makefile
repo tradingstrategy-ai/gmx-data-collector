@@ -469,7 +469,6 @@ funding-feather:
 	$(NICE) poetry run python scripts/extract_unified_funding.py \
 		--network $(NETWORK) \
 		--output-dir "$(UNIFIED_OUTPUT_DIR)" \
-		--output feather \
 		--feather-dir "$(FEATHER_DIR)" \
 		--merge-only \
 		$(if $(MARKET),--market $(MARKET),)

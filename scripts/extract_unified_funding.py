@@ -715,15 +715,18 @@ def export_feather(
     for d in rates_dir.iterdir():
         if not d.is_dir():
             continue
-        candidates = [p for p in (d / "1h.parquet", d / "1h.feather") if p.exists()]
-        if not candidates:
-            continue
-        # ``merge_symbol`` writes only the requested format, so both files can
-        # coexist; the most recently written one is the current merge output.
-        # Ties go to parquet, the canonical source format.
-        symbols[d.name] = max(
-            candidates, key=lambda p: (p.stat().st_mtime_ns, p.suffix == ".parquet")
-        )
+        # ``1h.parquet`` is the single authoritative source -- the file
+        # ``export_funding`` reads -- so both entry points agree whatever
+        # stale ``1h.feather`` is lying around. A feather-only lake predates
+        # that convention; read it, but say so.
+        if (d / "1h.parquet").exists():
+            symbols[d.name] = d / "1h.parquet"
+        elif (d / "1h.feather").exists():
+            console.print(
+                f"  [yellow]{d.name}: no 1h.parquet, falling back to legacy 1h.feather "
+                "-- re-run the merge to regenerate parquet[/yellow]"
+            )
+            symbols[d.name] = d / "1h.feather"
 
     if market_filter:
         filter_sym = market_symbol_from_filter(market_filter)

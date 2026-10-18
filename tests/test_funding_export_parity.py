@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -186,8 +187,8 @@ def test_legacy_writer_keeps_longer_destination_history(tmp_path):
     assert written["open"].to_list()[10:] == [1e-6, 2e-6, 3e-6]
 
 
-def test_legacy_writer_prefers_newer_parquet_over_stale_feather(tmp_path):
-    """A stale ``1h.feather`` must not shadow a newer ``1h.parquet`` merge output."""
+def test_stale_feather_with_newer_mtime_never_shadows_parquet(tmp_path):
+    """Parquet is the one source for both writers, even beside a newer-mtime stale feather."""
     fresh = pl.DataFrame(
         {
             "timestamp": _ts(4),
@@ -196,19 +197,40 @@ def test_legacy_writer_prefers_newer_parquet_over_stale_feather(tmp_path):
         }
     )
     network_dir = _lake(tmp_path, fresh)
-    stale = fresh.head(2)
     stale_path = network_dir / "rates" / "ETH" / "1h.feather"
-    stale.write_ipc(stale_path)
+    fresh.head(2).write_ipc(stale_path)
     parquet_path = network_dir / "rates" / "ETH" / "1h.parquet"
-    older = stale_path.stat().st_mtime_ns - 10_000_000_000
-    import os
+    newer = parquet_path.stat().st_mtime_ns + 10_000_000_000
+    os.utime(stale_path, ns=(newer, newer))
+    assert stale_path.stat().st_mtime_ns > parquet_path.stat().st_mtime_ns
 
-    os.utime(stale_path, ns=(older, older))
-    assert parquet_path.stat().st_mtime_ns > stale_path.stat().st_mtime_ns
+    main_out, legacy_out = tmp_path / "main", tmp_path / "legacy"
+    _run_main(network_dir, main_out)
+    _run_legacy(network_dir, legacy_out)
+
+    main, legacy = pl.read_ipc(_main_file(main_out)), pl.read_ipc(_legacy_file(legacy_out))
+    assert main.height == 4
+    assert legacy.equals(main)
+
+
+def test_legacy_writer_falls_back_to_feather_only_lake(tmp_path, capsys):
+    """A lake with only ``1h.feather`` still exports, with a regenerate-parquet warning."""
+    frame = pl.DataFrame(
+        {
+            "timestamp": _ts(3),
+            "funding_rate_hourly": [1e-6, 2e-6, 3e-6],
+            "longs_pay_shorts": [True, False, True],
+        }
+    )
+    network_dir = _lake(tmp_path, frame)
+    parquet_path = network_dir / "rates" / "ETH" / "1h.parquet"
+    frame.write_ipc(parquet_path.with_suffix(".feather"))
+    parquet_path.unlink()
 
     _run_legacy(network_dir, tmp_path / "out")
 
-    assert pl.read_ipc(_legacy_file(tmp_path / "out")).height == 4
+    assert pl.read_ipc(_legacy_file(tmp_path / "out"))["open"].to_list() == [1e-6, -2e-6, 3e-6]
+    assert "regenerate parquet" in capsys.readouterr().out
 
 
 def test_live_row_survives_a_rebuild(tmp_path):
