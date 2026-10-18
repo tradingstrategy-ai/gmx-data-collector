@@ -537,7 +537,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert api.calls > 0, "stale-flat tail must force a re-fetch despite timestamp coverage"
@@ -574,7 +576,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
@@ -610,7 +614,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
@@ -882,35 +888,91 @@ class TestOhlcvIncrementalLookback:
         assert dates.max() == pd.Timestamp("2026-10-18", tz="UTC")
         assert df.loc[dates == pd.Timestamp("2026-10-17", tz="UTC"), "close"].iloc[0] == 9.0
 
-    def test_coverage_gate_treats_yesterdays_1d_bar_as_current_for_today(
+    def test_stored_tail_bar_is_refetched_on_the_next_run_with_target_date(
         self, tmp_path, monkeypatch
     ):
-        """Gate and storage agree: with the last closed bar on disk, skip the fetch."""
+        """Production call path (``target_date`` set): the last stored bar may have
+        been written before it closed, so the coverage gate must not latch onto it.
+
+        The Oct-18 02:30 release stored a partial Oct-18 1d bar (high=2); the
+        Oct-19 run expects Oct-18 as its last closed bar and must still replace
+        it with the final value (high=9).
+        """
         from scripts import collect_daily_snapshot as cds
 
         monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
 
         filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
-        stored = pd.date_range("2026-04-01", "2026-10-17", freq="D", tz="UTC")
+        stored = pd.date_range("2026-04-01", "2026-10-18", freq="D", tz="UTC")
         frame = _make_ohlcv(stored, [1.0] * len(stored))
         frame["high"] = 2.0  # dense, not flat placeholders
         feather.write_feather(frame, filepath)
-        now = pd.Timestamp("2026-10-18 02:30", tz="UTC")
+        now = pd.Timestamp("2026-10-19 02:30", tz="UTC")
 
-        class ExplodingAPI:
+        class FinalValueAPI:
             def get_candlesticks_dataframe(self, symbol, period, limit):
-                raise AssertionError("gate should have skipped the fetch")
+                dates = pd.date_range("2026-10-17", "2026-10-19", freq="D", tz="UTC")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 9.0, "low": 0.5, "close": 1.0}
+                )
 
         saved, failed, coverage = cds.collect_and_save_ohlcv(
-            ExplodingAPI(),
+            FinalValueAPI(),
             [{"name": "ETH/USD", "isListed": True}],
             tmp_path,
             timeframes=["1d"],
-            target_date="2026-10-18",
+            target_date="2026-10-19",
             now=now,
         )
         assert failed == []
-        assert coverage[("ETH", "1d")]["status"] == "SKIPPED"
+        assert coverage[("ETH", "1d")]["status"] != "SKIPPED"
+        df = pd.read_feather(filepath)
+        dates = pd.to_datetime(df["date"], utc=True)
+        assert df.loc[dates == pd.Timestamp("2026-10-18", tz="UTC"), "high"].iloc[0] == 9.0
+        assert dates.max() == pd.Timestamp("2026-10-18", tz="UTC")
+
+    def test_open_bar_already_on_disk_is_pruned_by_a_same_day_run(self, tmp_path, monkeypatch):
+        """A repair at 07:28 on Oct-18 merges the API slice into a feather restored
+        from the prior release that already holds an Oct-18 1d row; that open row
+        must not be written back."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-10-10", "2026-10-18", freq="D", tz="UTC")
+        feather.write_feather(_make_ohlcv(stored, [1.0] * len(stored)), filepath)
+        now = pd.Timestamp("2026-10-18 07:28", tz="UTC")
+
+        class OpenBarAPI:
+            def __init__(self, dates):
+                self.dates = dates
+
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                return pd.DataFrame(
+                    {
+                        "timestamp": self.dates,
+                        "open": 1.0,
+                        "high": 2.0,
+                        "low": 0.5,
+                        "close": 1.5,
+                    }
+                )
+
+        full = pd.date_range("2026-10-08", "2026-10-18", freq="D", tz="UTC")
+        only_open = pd.date_range("2026-10-18", "2026-10-18", freq="D", tz="UTC")
+        for dates in (full, only_open):
+            feather.write_feather(_make_ohlcv(stored, [1.0] * len(stored)), filepath)
+            cds.collect_and_save_ohlcv(
+                OpenBarAPI(dates),
+                [{"name": "ETH/USD", "isListed": True}],
+                tmp_path,
+                timeframes=["1d"],
+                repair=True,
+                now=now,
+            )
+            written = pd.to_datetime(pd.read_feather(filepath)["date"], utc=True)
+            assert written.max() == pd.Timestamp("2026-10-17", tz="UTC")
 
     def test_repair_timeframes_limits_the_deep_refetch(self, tmp_path, monkeypatch):
         """``repair_timeframes`` restricts the MAX_CANDLE_LIMIT re-fetch (#58).

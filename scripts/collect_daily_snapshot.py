@@ -163,6 +163,8 @@ def _merge_feather(
     filepath: Path,
     *,
     prefer_dense: bool = True,
+    closed_before: pd.Timestamp | None = None,
+    interval: pd.Timedelta | None = None,
 ) -> None:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
@@ -186,20 +188,29 @@ def _merge_feather(
     :param prefer_dense: Preserve dense existing rows over flat incoming rows.
         Explicit repair/force-refresh runs disable this so a corrected API row
         can replace a previously erroneous candle.
+    :param closed_before: With ``interval``, rows whose bar has not closed by
+        this instant (``date + interval > closed_before``) are dropped from the
+        persisted result too -- including ones already on disk, e.g. restored
+        from a release cut before open bars stopped being stored.
+    :param interval: Bar length used with ``closed_before``.
     """
-    if new_df.empty:
+    prune_open = closed_before is not None and interval is not None
+    if new_df.empty and not (prune_open and filepath.exists()):
         return
 
-    if new_df["date"].dt.tz is None:
-        new_df["date"] = new_df["date"].dt.tz_localize("UTC")
-    new_df["date"] = new_df["date"].dt.as_unit("ns")
+    if not new_df.empty:
+        if new_df["date"].dt.tz is None:
+            new_df["date"] = new_df["date"].dt.tz_localize("UTC")
+        new_df["date"] = new_df["date"].dt.as_unit("ns")
 
     if filepath.exists():
         existing = pd.read_feather(filepath)
         if existing["date"].dt.tz is None:
             existing["date"] = existing["date"].dt.tz_localize("UTC")
         existing["date"] = existing["date"].dt.as_unit("ns")
-        if prefer_dense:
+        if new_df.empty:
+            combined = existing
+        elif prefer_dense:
             combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
         else:
             combined = pd.concat([existing, new_df], ignore_index=True).drop_duplicates(
@@ -213,6 +224,11 @@ def _merge_feather(
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
+    if prune_open:
+        closed = combined["date"] + interval <= closed_before
+        if new_df.empty and closed.all():
+            return  # nothing new and nothing to prune: leave the file untouched
+        combined = combined[closed].reset_index(drop=True)
     atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
 
 
@@ -1670,7 +1686,9 @@ def collect_and_save_ohlcv(
     saved = 0
     failed = []
     coverage: dict[tuple[str, str], dict] = {}
-    now = now if now is not None else datetime.now(UTC)
+    now = pd.Timestamp(now if now is not None else datetime.now(UTC))
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
 
     for symbol in symbols:
         for tf in tfs:
@@ -1686,10 +1704,14 @@ def collect_and_save_ohlcv(
             # is stale-flat (see ``_tail_is_stale_density``) — otherwise a
             # bad tail would latch "current" forever, never re-fetched.
             if target_date is not None and not repair_tf:
-                expected_last = _expected_last_bar(
-                    tf, target_date=target_date, now=pd.Timestamp(now)
+                expected_last = _expected_last_bar(tf, target_date=target_date, now=now)
+                # The newest stored bar may have been written while it was still
+                # open (releases cut before open bars were dropped, a mid-bar
+                # run), so it is always re-fetched: the file only counts as
+                # current once it extends *past* the last closed bar.
+                gate = has_ohlcv_through(
+                    filepath, expected_last + _TIMEFRAME_DELTAS[tf], force=force_refresh
                 )
-                gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
                 if gate.skip and _tail_is_stale_density(filepath, tf):
                     console.print(
                         f"    [yellow]STALE DENSITY: {symbol}/{tf} — timestamps are "
@@ -1744,6 +1766,8 @@ def collect_and_save_ohlcv(
                     new_rows,
                     filepath,
                     prefer_dense=not (repair_tf or force_refresh),
+                    closed_before=now,
+                    interval=_TIMEFRAME_DELTAS[tf],
                 )
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
