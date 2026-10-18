@@ -458,6 +458,8 @@ funding-unified-merge:
 		--merge-only \
 		$(if $(MARKET),--market $(MARKET),)
 
+# Shares the signed hourly transform and guarded merge writer with export-funding
+# (FreqtradeExporter.export_funding_frame); never truncates an existing destination.
 funding-feather:
 	@echo "Exporting to FreqTrade feather format..."
 	@echo "  Source:     $(UNIFIED_OUTPUT_DIR)"
