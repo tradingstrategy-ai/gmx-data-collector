@@ -10,6 +10,7 @@ Verifies that ``apply_direction_to_rates``:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from datetime import UTC, datetime, timedelta
@@ -30,6 +31,16 @@ def _load_module():
 
 _unified = _load_module()
 apply_direction_to_rates = _unified.apply_direction_to_rates
+
+
+def _load_fee_module():
+    repo = Path(__file__).resolve().parents[1]
+    path = repo / "scripts" / "extract_funding_fee_per_size.py"
+    spec = importlib.util.spec_from_file_location("extract_funding_fee_per_size", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["extract_funding_fee_per_size"] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _rates_df(
@@ -125,3 +136,90 @@ def test_no_direction_data_returns_all_null_direction():
     out = apply_direction_to_rates(rates, None).sort("timestamp")
     assert out["longs_pay_shorts"].to_list() == [None, None]
     assert out["funding_fee_long"].to_list() == [None, None]
+
+
+def test_datastore_only_merge_adds_missing_provenance_columns(tmp_path):
+    rates_dir = tmp_path / "rates"
+    direction_dir = tmp_path / "direction"
+    sym_dir = rates_dir / "ETH"
+    sym_dir.mkdir(parents=True)
+    pl.DataFrame(
+        {
+            "timestamp": [datetime(2026, 1, 1, tzinfo=UTC)],
+            "funding_rate": [-1e-9],
+            "funding_rate_hourly": [-3.6e-6],
+            "symbol": ["ETH"],
+            "market": ["0xm"],
+        },
+        schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+    ).write_parquet(sym_dir / "1h_datastore.parquet")
+
+    rows = _unified.merge_symbol("ETH", rates_dir, direction_dir)
+    out = pl.read_parquet(sym_dir / "1h.parquet")
+
+    assert rows == 1
+    assert out["source"].to_list() == ["datastore"]
+    assert out["is_gap_filled"].to_list() == [False]
+
+
+def test_merge_cli_accepts_makefile_block_range_flags():
+    args = _unified.build_parser().parse_args(["--from-block", "10", "--to-block", "20"])
+    assert args.from_block == 10
+    assert args.to_block == 20
+
+
+def test_repeated_merge_is_byte_identical_and_filtered_merge_leaves_other_symbols(tmp_path):
+    rates_dir = tmp_path / "rates"
+    for symbol in ("ETH", "BTC"):
+        sym_dir = rates_dir / symbol
+        sym_dir.mkdir(parents=True)
+        pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1, tzinfo=UTC)],
+                "funding_rate": [-1e-9],
+                "funding_rate_hourly": [-3.6e-6],
+                "symbol": [symbol],
+                "market": [f"0x{symbol.lower()}"],
+            },
+            schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+        ).write_parquet(sym_dir / "1h_datastore.parquet")
+
+    _unified.merge_unified_rates(tmp_path)
+    eth_path = rates_dir / "ETH" / "1h.parquet"
+    btc_path = rates_dir / "BTC" / "1h.parquet"
+    before_eth = hashlib.sha256(eth_path.read_bytes()).digest()
+    before_btc = hashlib.sha256(btc_path.read_bytes()).digest()
+
+    _unified.merge_unified_rates(tmp_path, "ETH/USD")
+
+    assert hashlib.sha256(eth_path.read_bytes()).digest() == before_eth
+    assert hashlib.sha256(btc_path.read_bytes()).digest() == before_btc
+
+
+def test_direction_flush_recomputes_touched_hour_from_all_persisted_events(tmp_path):
+    fee = _load_fee_module()
+    base = datetime(2026, 1, 1, 1, 0, tzinfo=UTC)
+
+    def record(block, is_long, delta):
+        return fee.FundingFeePerSizeRecord(
+            symbol="ETH",
+            market="0xm",
+            collateral_token="0xc",
+            is_long=is_long,
+            delta=str(delta),
+            value=str(delta),
+            block_number=block,
+            block_timestamp=int((base + timedelta(minutes=block)).timestamp()),
+            block_datetime=(base + timedelta(minutes=block)).isoformat(),
+            transaction_hash=f"0x{block:064x}",
+            log_index=0,
+        )
+
+    fee.save_raw_per_symbol([record(1, True, 100)], tmp_path)
+    fee.rebuild_direction_from_raw(tmp_path)
+    fee.save_raw_per_symbol([record(2, False, 1)], tmp_path)
+    fee.rebuild_direction_from_raw(tmp_path)
+
+    out = pl.read_parquet(tmp_path / "direction" / "ETH" / "1h.parquet")
+    assert out["longs_pay_shorts"].to_list() == [True]
+    assert out["update_count"].to_list() == [2]

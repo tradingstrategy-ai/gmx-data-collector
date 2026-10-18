@@ -180,7 +180,34 @@ jobs:
           poetry run python scripts/extract_unified_funding.py \
             --network arbitrum \
             --output-dir "../data/$DATA_ROOT/funding" \
-            --output parquet
+            --output parquet \
+            --resume
+
+      - name: Persist funding checkpoints
+        if: always()
+        working-directory: data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --force "$DATA_ROOT/funding/checkpoints/" 2>/dev/null || true
+          if git diff --cached --quiet; then
+            echo "No funding checkpoints to persist."
+          else
+            git commit -m "data: persist funding checkpoints $(date -u '+%Y-%m-%d %H:%M:%S')"
+            pushed=0
+            for attempt in 1 2 3 4 5; do
+              if git pull --rebase origin "$DATA_BRANCH" && git push origin "$DATA_BRANCH"; then
+                pushed=1
+                break
+              fi
+              echo "Checkpoint push attempt $attempt failed, retrying in $((attempt * 15))s..."
+              sleep $((attempt * 15))
+            done
+            if [ "$pushed" -ne 1 ]; then
+              echo "Failed to persist funding checkpoints."
+              exit 1
+            fi
+          fi
 
       - name: Commit funding rates
         working-directory: data

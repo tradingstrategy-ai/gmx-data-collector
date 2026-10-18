@@ -820,6 +820,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=["timestamp"], keep="last")
         combined = combined.sort("timestamp")
 
+    if filepath.exists() and pl.read_parquet(filepath).equals(combined):
+        return
     atomic_write_parquet(combined, filepath)
 
 
@@ -854,6 +856,23 @@ def save_direction_per_symbol(
         filepath = output_dir / "direction" / symbol / "1h.parquet"
         append_parquet(df, filepath)
         console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
+
+
+def rebuild_direction_from_raw(output_dir: Path, market_filter: str | None = None) -> None:
+    """Rebuild hourly direction from complete persisted raw event history."""
+    raw_dir = output_dir / "raw" / "fee_per_size"
+    if not raw_dir.exists():
+        return
+    symbol_filter = market_filter.split("/")[0].strip() if market_filter else None
+    records = []
+    for raw_path in sorted(raw_dir.glob("*/data.parquet")):
+        if symbol_filter and raw_path.parent.name != symbol_filter:
+            continue
+        records.extend(
+            FundingFeePerSizeRecord(**row) for row in pl.read_parquet(raw_path).to_dicts()
+        )
+    if records:
+        save_direction_per_symbol(aggregate_hourly_direction(records), output_dir)
 
 
 def save_feather_freqtrade(
@@ -1069,10 +1088,10 @@ async def async_main(args: argparse.Namespace) -> None:
         if args.output in STREAMABLE_OUTPUTS:
             save_raw_per_symbol(batch, output_dir)
             with console.status("Aggregating hourly rates..."):
-                hourly = aggregate_hourly_direction(batch)
-            save_direction_per_symbol(hourly, output_dir)
+                rebuild_direction_from_raw(output_dir, args.market)
             if args.feather_dir or args.output == "feather":
                 feather_out = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
+                hourly = aggregate_hourly_direction(batch)
                 save_feather_freqtrade(hourly, feather_out)
 
         flush_state["total_events"] += len(batch)
@@ -1125,14 +1144,15 @@ async def async_main(args: argparse.Namespace) -> None:
         if args.output == "parquet":
             save_raw_per_symbol(records, output_dir)
             with console.status("Aggregating hourly rates..."):
-                hourly = aggregate_hourly_direction(records)
-            save_direction_per_symbol(hourly, output_dir)
+                rebuild_direction_from_raw(output_dir, args.market)
             if args.feather_dir:
+                hourly = aggregate_hourly_direction(records)
                 save_feather_freqtrade(hourly, Path(args.feather_dir))
         elif args.output == "feather":
             with console.status("Aggregating hourly rates..."):
+                save_raw_per_symbol(records, output_dir)
+                rebuild_direction_from_raw(output_dir, args.market)
                 hourly = aggregate_hourly_direction(records)
-            save_direction_per_symbol(hourly, output_dir)
             feather_dir = Path(args.feather_dir) if args.feather_dir else Path(args.output_dir)
             save_feather_freqtrade(hourly, feather_dir)
         elif args.output == "json":

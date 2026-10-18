@@ -23,7 +23,7 @@ cumulative counters, NOT rates.
 
 Outputs:
 - Raw events: ``data/funding/{network}/raw/funding/{SYMBOL}/partition=0/data.parquet``
-- Aggregated rates: ``data/funding/{network}/rates/{SYMBOL}/1h.parquet``
+- Aggregated rates: ``data/funding/{network}/rates/{SYMBOL}/1h_factor.parquet``
 
 The aggregated ``rates/`` files are consumed by ``FreqtradeExporter`` to
 produce ``.feather`` files for FreqTrade backtesting.
@@ -61,6 +61,9 @@ EXAMPLES
     # Incremental cronjob
     poetry run python scripts/extract_funding_factor.py --resume
 
+    # Rebuild factor companions from the full raw history
+    poetry run python scripts/extract_funding_factor.py --from-block 120000000
+
     # Background mode
     poetry run python scripts/extract_funding_factor.py --resume --background
 ================================================================================
@@ -74,7 +77,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import hypersync
@@ -467,6 +470,7 @@ async def extract_funding_events(
     to_block: int | None,
     market_filter: str | None = None,
     markets: dict | None = None,
+    on_batch=None,
 ) -> list[FundingFactorRecord]:
     """Extract Funding events from GMX V2 EventEmitter.
 
@@ -551,6 +555,7 @@ async def extract_funding_events(
         )
 
         async for response in _stream_with_retry(client, query):
+            batch_start = len(records)
             # Build block timestamp map
             # HyperSync returns timestamps as hex strings (e.g., "0x6789abcd")
             for block in response.data.blocks:
@@ -658,6 +663,10 @@ async def extract_funding_events(
                     )
                     next_milestone_idx += 1
 
+            if on_batch is not None:
+                processed_block = max(block_timestamps, default=highest_block)
+                on_batch(records[batch_start:], processed_block)
+
     elapsed = time.monotonic() - t_start
     console.print(
         f"\n  Extraction complete in {elapsed:.1f}s: "
@@ -684,8 +693,8 @@ def aggregate_hourly_rates(
 ) -> dict[str, "pl.DataFrame"]:
     """Aggregate raw Funding events into hourly rate snapshots per symbol.
 
-    Produces one DataFrame per symbol with columns matching the existing
-    ``rates/{SYMBOL}/1h.parquet`` schema.
+    Produces one DataFrame per symbol for the factor-only
+    ``rates/{SYMBOL}/1h_factor.parquet`` companion.
 
     :param records: List of :class:`FundingFactorRecord` objects.
     :returns: Dict mapping symbol to hourly DataFrame.
@@ -693,97 +702,88 @@ def aggregate_hourly_rates(
     if not records:
         return {}
 
-    df = pl.DataFrame([asdict(r) for r in records])
+    rows_by_market: dict[tuple[str, str], list[FundingFactorRecord]] = defaultdict(list)
+    for record in records:
+        rows_by_market[(record.symbol, record.market)].append(record)
 
-    # Convert block_timestamp to datetime and to a hashable hour bucket.
-    df = df.with_columns(
-        pl.from_epoch(pl.col("block_timestamp"), time_unit="s")
-        .cast(pl.Datetime("ns", "UTC"))
-        .alias("timestamp"),
-    ).with_columns(
-        pl.col("timestamp").dt.truncate("1h").alias("hour"),
-    )
-
-    # ------------------------------------------------------------------
-    # Time-weighted average (TWAP) within each hourly bucket
-    # ------------------------------------------------------------------
-    # The rate at any second is the most recent funding_rate_per_second
-    # reported by an event up to that second. dt_seconds is the seconds the
-    # current event's rate stays in effect within its hour bucket:
-    #
-    #   dt_i = min(next_event_ts, hour_end) - event_ts
-    #
-    # For the final event in a bucket (no next event before hour_end),
-    # dt = hour_end - event_ts. TWAP = sum(rate * dt) / sum(dt).
-    df = df.sort(["symbol", "market", "timestamp"])
-    df = df.with_columns(
-        pl.col("timestamp").shift(-1).over(["symbol", "market"]).alias("_next_ts"),
-        (pl.col("hour") + pl.duration(hours=1)).alias("_hour_end"),
-    )
-    df = df.with_columns(
-        pl.min_horizontal(
-            pl.col("_next_ts").fill_null(pl.col("_hour_end")), pl.col("_hour_end")
-        ).alias("_window_end"),
-    )
-    df = df.with_columns(
-        (pl.col("_window_end") - pl.col("timestamp")).dt.total_seconds().alias("dt_seconds"),
-    )
-    # Defensive: any non-positive dt (e.g. duplicate timestamps) contributes
-    # zero seconds but its rate still factors into min/max/update_count.
-    df = df.with_columns(pl.col("dt_seconds").clip(lower_bound=0))
-
-    hourly = (
-        df.group_by(["symbol", "market", "hour"])
-        .agg(
-            (pl.col("funding_rate_per_second") * pl.col("dt_seconds")).sum().alias("_weighted_sum"),
-            pl.col("dt_seconds").sum().alias("_total_seconds"),
-            pl.col("funding_rate_per_second").min().alias("funding_rate_min"),
-            pl.col("funding_rate_per_second").max().alias("funding_rate_max"),
-            pl.len().alias("update_count"),
+    result: dict[str, list[dict]] = defaultdict(list)
+    for (symbol, market), market_records in sorted(rows_by_market.items()):
+        events = sorted(
+            market_records, key=lambda r: (r.block_timestamp, r.block_number, r.log_index)
         )
-        .with_columns(
-            pl.when(pl.col("_total_seconds") > 0)
-            .then(pl.col("_weighted_sum") / pl.col("_total_seconds"))
-            # Degenerate case (all events at hour_end): fall back to max as an
-            # unsigned representative; the row keeps min/max for downstream use.
-            .otherwise(pl.col("funding_rate_max"))
-            .alias("funding_rate"),
-        )
-        .drop(["_weighted_sum", "_total_seconds"])
-        .sort(["symbol", "hour"])
-    )
-
-    # Derived columns (unsigned magnitudes; direction joined later in unified merge)
-    hourly = hourly.with_columns(
-        (pl.col("funding_rate") * 3600).alias("funding_rate_hourly"),
-        (pl.col("funding_rate") * 3600 * 8760).alias("funding_rate_annualized"),
-    )
-
-    hourly = hourly.rename({"hour": "timestamp"})
-
-    # Split by symbol; emit columns in stable order.
-    result = {}
-    for symbol in hourly["symbol"].unique().sort().to_list():
-        sym_df = (
-            hourly.filter(pl.col("symbol") == symbol)
-            .select(
-                [
-                    "timestamp",
-                    "funding_rate",
-                    "funding_rate_min",
-                    "funding_rate_max",
-                    "funding_rate_hourly",
-                    "funding_rate_annualized",
-                    "update_count",
-                    "symbol",
-                    "market",
-                ]
+        event_times = [datetime.fromtimestamp(r.block_timestamp, tz=UTC) for r in events]
+        buckets: dict[datetime, dict] = {}
+        for index, (event, event_time) in enumerate(zip(events, event_times, strict=True)):
+            event_hour = event_time.replace(minute=0, second=0, microsecond=0)
+            bucket = buckets.setdefault(
+                event_hour,
+                {"weighted_sum": 0.0, "covered_seconds": 0.0, "rates": [], "update_count": 0},
             )
-            .cast({"update_count": pl.UInt32})
-        )
-        result[symbol] = sym_df
+            bucket["rates"].append(event.funding_rate_per_second)
+            bucket["update_count"] += 1
 
-    return result
+            interval_end = (
+                event_times[index + 1]
+                if index + 1 < len(events)
+                else event_hour + timedelta(hours=1)
+            )
+            interval_start = event_time
+            while interval_start < interval_end:
+                interval_hour = interval_start.replace(minute=0, second=0, microsecond=0)
+                interval_hour_end = interval_hour + timedelta(hours=1)
+                segment_end = min(interval_end, interval_hour_end)
+                bucket = buckets.setdefault(
+                    interval_hour,
+                    {"weighted_sum": 0.0, "covered_seconds": 0.0, "rates": [], "update_count": 0},
+                )
+                seconds = (segment_end - interval_start).total_seconds()
+                bucket["weighted_sum"] += event.funding_rate_per_second * seconds
+                bucket["covered_seconds"] += seconds
+                if event.funding_rate_per_second not in bucket["rates"]:
+                    bucket["rates"].append(event.funding_rate_per_second)
+                interval_start = segment_end
+
+        for current_hour, bucket in sorted(buckets.items()):
+            if bucket["covered_seconds"] == 0:
+                continue
+            funding_rate = bucket["weighted_sum"] / bucket["covered_seconds"]
+            result[symbol].append(
+                {
+                    "timestamp": current_hour,
+                    "funding_rate": funding_rate,
+                    "funding_rate_min": min(bucket["rates"]),
+                    "funding_rate_max": max(bucket["rates"]),
+                    "funding_rate_hourly": funding_rate * 3600,
+                    "funding_rate_annualized": funding_rate * 3600 * 8760,
+                    "update_count": bucket["update_count"],
+                    "symbol": symbol,
+                    "market": market,
+                    "is_gap_filled": bucket["update_count"] == 0,
+                }
+            )
+
+    return {
+        symbol: pl.DataFrame(rows)
+        .with_columns(
+            pl.col("timestamp").cast(pl.Datetime("ns", "UTC")),
+            pl.col("update_count").cast(pl.UInt32),
+        )
+        .select(
+            [
+                "timestamp",
+                "funding_rate",
+                "funding_rate_min",
+                "funding_rate_max",
+                "funding_rate_hourly",
+                "funding_rate_annualized",
+                "update_count",
+                "symbol",
+                "market",
+                "is_gap_filled",
+            ]
+        )
+        for symbol, rows in result.items()
+    }
 
 
 # =============================================================================
@@ -816,6 +816,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
         combined = combined.unique(subset=["timestamp"], keep="last")
         combined = combined.sort("timestamp")
 
+    if filepath.exists() and pl.read_parquet(filepath).equals(combined):
+        return
     atomic_write_parquet(combined, filepath)
 
 
@@ -845,9 +847,31 @@ def save_rates_per_symbol(hourly_by_symbol: dict[str, "pl.DataFrame"], output_di
     :param output_dir: Base output directory (e.g., ``data/funding/arbitrum``).
     """
     for symbol, df in sorted(hourly_by_symbol.items()):
-        filepath = output_dir / "rates" / symbol / "1h.parquet"
-        append_parquet(df, filepath)
+        filepath = output_dir / "rates" / symbol / "1h_factor.parquet"
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        if filepath.exists() and pl.read_parquet(filepath).equals(df):
+            continue
+        atomic_write_parquet(df, filepath)
         console.print(f"  Rates: [cyan]{len(df):,}[/cyan] hours -> [green]{filepath}[/green]")
+
+
+def rebuild_rates_from_raw(output_dir: Path, market_filter: str | None = None) -> None:
+    """Rebuild factor companions from persisted raw events.
+
+    This also repairs old runs that appended factor aggregates into canonical
+    ``1h.parquet``. Raw event files are the source of truth.
+    """
+    raw_dir = output_dir / "raw" / "funding"
+    if not raw_dir.exists():
+        return
+    symbol_filter = market_filter.split("/")[0].strip() if market_filter else None
+    records = []
+    for raw_path in sorted(raw_dir.glob("*/partition=0/data.parquet")):
+        if symbol_filter and raw_path.parts[-3] != symbol_filter:
+            continue
+        records.extend(FundingFactorRecord(**row) for row in pl.read_parquet(raw_path).to_dicts())
+    if records:
+        save_rates_per_symbol(aggregate_hourly_rates(records), output_dir)
 
 
 def save_json(data: list, filename: str) -> None:
@@ -986,11 +1010,32 @@ async def async_main(args: argparse.Namespace) -> None:
         console.print(f"  Latest block: [cyan]{to_block:,}[/cyan]")
 
     if from_block >= to_block:
+        if args.output == "parquet":
+            rebuild_rates_from_raw(output_dir, args.market)
         console.print(
             f"\n[yellow]Already up to date "
             f"(from_block {from_block:,} >= to_block {to_block:,})[/yellow]"
         )
         return
+
+    resume_base_total = 0
+    if args.resume:
+        previous = load_checkpoint(checkpoint_path)
+        resume_base_total = previous["total_events"] if previous else 0
+    persisted_events = 0
+
+    def persist_batch(batch: list[FundingFactorRecord], processed_block: int) -> None:
+        nonlocal persisted_events
+        if batch:
+            save_raw_per_symbol(batch, output_dir)
+            persisted_events += len(batch)
+        save_checkpoint(
+            checkpoint_path,
+            last_block=processed_block,
+            last_timestamp=max((r.block_timestamp for r in batch), default=int(time.time())),
+            total_events=resume_base_total + persisted_events,
+            markets_seen=len({r.symbol for r in batch}),
+        )
 
     console.print()
     records = await extract_funding_events(
@@ -1000,29 +1045,32 @@ async def async_main(args: argparse.Namespace) -> None:
         to_block=to_block,
         market_filter=args.market,
         markets=markets,
+        on_batch=persist_batch if args.resume and args.output == "parquet" else None,
     )
 
     if not records:
         console.print("\n[yellow]No Funding events found.[/yellow]")
+        if args.output == "parquet":
+            rebuild_rates_from_raw(output_dir, args.market)
         if args.resume:
+            prior_checkpoint = load_checkpoint(checkpoint_path)
             save_checkpoint(
                 checkpoint_path,
-                last_block=to_block,
+                last_block=max(to_block, prior_checkpoint["last_block"] if prior_checkpoint else 0),
                 last_timestamp=int(time.time()),
-                total_events=0,
-                markets_seen=0,
+                total_events=resume_base_total,
+                markets_seen=prior_checkpoint["markets_seen"] if prior_checkpoint else 0,
             )
         return
 
     # Save outputs
     console.print()
     if args.output == "parquet":
-        save_raw_per_symbol(records, output_dir)
+        if not args.resume:
+            save_raw_per_symbol(records, output_dir)
 
         with console.status("Aggregating hourly rates..."):
-            hourly = aggregate_hourly_rates(records)
-
-        save_rates_per_symbol(hourly, output_dir)
+            rebuild_rates_from_raw(output_dir, args.market)
     elif args.output == "json":
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"gmx_v2_funding_factor_{args.network}_{from_block}_{to_block}_{ts}"
@@ -1034,18 +1082,23 @@ async def async_main(args: argparse.Namespace) -> None:
 
     # Save checkpoint
     if args.resume:
-        last_block = max(r.block_number for r in records)
+        prior_checkpoint = load_checkpoint(checkpoint_path)
+        last_block = max(
+            max(r.block_number for r in records),
+            prior_checkpoint["last_block"] if prior_checkpoint else 0,
+        )
         last_timestamp = max(r.block_timestamp for r in records if r.block_timestamp)
         unique_markets = len(set(r.symbol for r in records))
 
-        prev_checkpoint = load_checkpoint(checkpoint_path)
-        prev_total = prev_checkpoint["total_events"] if prev_checkpoint else 0
+        prev_total = resume_base_total if not persisted_events else 0
 
         save_checkpoint(
             checkpoint_path,
             last_block=last_block,
             last_timestamp=last_timestamp,
-            total_events=prev_total + len(records),
+            total_events=(resume_base_total + persisted_events)
+            if persisted_events
+            else prev_total + len(records),
             markets_seen=unique_markets,
         )
 

@@ -9,11 +9,13 @@ Covers the post-fix invariants:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 
@@ -100,20 +102,50 @@ def test_twap_single_event_in_hour():
 
 
 def test_twap_spans_hour_boundary():
-    """Event near the end of one hour, next event in the following hour.
-
-    Event A at 12:30 (rate 1.0); event B at 13:15 (rate 2.0).
-    Hour 12: A holds for 12:30..13:00 → TWAP = 1.0.
-    Hour 13: B is the only event observed within the hour starting at 13:15.
-    Pipeline emits one row per (symbol, hour) that has at least one event.
-    """
+    """Carry-in state contributes to the full hour after a boundary."""
     a = datetime(2026, 1, 1, 12, 30, tzinfo=UTC)
     b = datetime(2026, 1, 1, 13, 15, tzinfo=UTC)
     df = aggregate_hourly_rates([_rec(1, a, 1.0), _rec(2, b, 2.0)])["ETH"]
     hours = df.sort("timestamp")
     assert hours.height == 2
     assert hours["funding_rate"][0] == pytest.approx(1.0, rel=1e-9)
-    assert hours["funding_rate"][1] == pytest.approx(2.0, rel=1e-9)
+    assert hours["funding_rate"][1] == pytest.approx((1.0 * 900 + 2.0 * 2700) / 3600)
+
+
+def test_twap_uses_pre_hour_carry_in_and_silent_hour_uses_last_state():
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    records = [_rec(1, base, 1.0), _rec(2, base + timedelta(hours=1, minutes=30), 3.0)]
+
+    hours = aggregate_hourly_rates(records)["ETH"].sort("timestamp")
+    assert hours["timestamp"].to_list() == [base, base + timedelta(hours=1)]
+    assert hours["funding_rate"].to_list() == pytest.approx([1.0, 2.0])
+    assert hours["update_count"].to_list() == [1, 1]
+    assert hours["funding_rate_min"].to_list() == [1.0, 1.0]
+    assert hours["funding_rate_max"].to_list() == [1.0, 3.0]
+
+
+def test_factor_rebuild_uses_raw_history_and_never_touches_canonical(tmp_path):
+    base = datetime(2026, 1, 1, tzinfo=UTC)
+    canonical_path = tmp_path / "rates" / "ETH" / "1h.parquet"
+    canonical_path.parent.mkdir(parents=True)
+    canonical = pl.DataFrame({"marker": ["canonical"]})
+    canonical.write_parquet(canonical_path)
+
+    _factor.save_raw_per_symbol([_rec(1, base, 1.0)], tmp_path)
+    _factor.rebuild_rates_from_raw(tmp_path)
+    _factor.save_raw_per_symbol([_rec(2, base + timedelta(minutes=30), 3.0)], tmp_path)
+    _factor.rebuild_rates_from_raw(tmp_path)
+
+    one_shot = aggregate_hourly_rates(
+        [_rec(1, base, 1.0), _rec(2, base + timedelta(minutes=30), 3.0)]
+    )["ETH"]
+    persisted = pl.read_parquet(tmp_path / "rates" / "ETH" / "1h_factor.parquet")
+    factor_path = tmp_path / "rates" / "ETH" / "1h_factor.parquet"
+    factor_hash = hashlib.sha256(factor_path.read_bytes()).digest()
+    _factor.rebuild_rates_from_raw(tmp_path)
+    assert hashlib.sha256(factor_path.read_bytes()).digest() == factor_hash
+    assert persisted.equals(one_shot)
+    assert pl.read_parquet(canonical_path).equals(canonical)
 
 
 def test_aggregate_empty_records():
