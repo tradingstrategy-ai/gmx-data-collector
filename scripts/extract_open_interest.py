@@ -530,7 +530,11 @@ def load_checkpoint(path: Path) -> dict | None:
 
 
 def checkpoint_last_values(checkpoint: dict | None) -> dict[tuple[str, str, str, bool], int]:
-    """Restore combo-level OI state from a checkpoint, tolerating old formats."""
+    """Restore combo-level OI state from a checkpoint, tolerating old formats.
+
+    :param checkpoint: Loaded checkpoint mapping, or ``None`` if absent.
+    :return: State keyed by (symbol, market, collateralToken, isLong).
+    """
     values = {}
     for item in (checkpoint or {}).get("last_values", []):
         try:
@@ -544,6 +548,37 @@ def checkpoint_last_values(checkpoint: dict | None) -> dict[tuple[str, str, str,
         except (KeyError, TypeError, ValueError):
             continue
     return values
+
+
+def resolve_resume_state(
+    checkpoint: dict | None, requested_from_block: int | None
+) -> tuple[int, dict[tuple[str, str, str, bool], int], bool]:
+    """Choose the resume start and safe carried state for a checkpoint.
+
+    :param checkpoint: Loaded checkpoint mapping, or ``None`` if absent.
+    :param requested_from_block: Explicit start block, if supplied.
+    :return: (start block, combo state, legacy-checkpoint flag).
+    """
+    if checkpoint is None:
+        start_block = (
+            requested_from_block if requested_from_block is not None else GMX_V2_GENESIS_BLOCK
+        )
+        return start_block, {}, False
+
+    if "last_values" not in checkpoint:
+        return GMX_V2_GENESIS_BLOCK, {}, True
+
+    last_block = int(checkpoint["last_block"])
+    start_block = requested_from_block
+    if start_block is None:
+        start_block = last_block + 1
+
+    # State at a later checkpoint cannot be carried backward over an explicit
+    # replay range; those days must be computed from the replay's own events.
+    values = checkpoint_last_values(checkpoint)
+    if requested_from_block is not None and requested_from_block <= last_block:
+        values = {}
+    return start_block, values, False
 
 
 def save_checkpoint(
@@ -561,6 +596,8 @@ def save_checkpoint(
     :param last_timestamp: Last processed block timestamp
     :param total_events: Total events processed so far
     :param markets_seen: Number of unique markets seen
+    :param last_values: Latest USD OI value for each symbol/market/collateral/side
+        combination, persisted for snapshot carry-forward on resume.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -1337,22 +1374,26 @@ async def async_main(args: argparse.Namespace) -> None:
     )
     checkpoint_path = checkpoint_dir / "oi_checkpoint.json"
 
-    # Determine starting block
-    from_block = args.from_block
-
-    if args.resume and from_block is None:
-        # Load checkpoint
-        checkpoint = load_checkpoint(checkpoint_path)
-        if checkpoint:
-            from_block = checkpoint["last_block"] + 1
-            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
-        else:
-            from_block = GMX_V2_GENESIS_BLOCK
+    # Determine starting block and restore only state valid for that range.
+    checkpoint = load_checkpoint(checkpoint_path) if args.resume else None
+    if args.resume:
+        from_block, last_values, legacy_checkpoint = resolve_resume_state(
+            checkpoint, args.from_block
+        )
+        if legacy_checkpoint:
+            console.print(
+                "[yellow]Warning: checkpoint has no combo-level OI state; "
+                f"restarting from genesis block {GMX_V2_GENESIS_BLOCK:,} to rebuild snapshots.[/yellow]"
+            )
+        elif checkpoint is None:
             console.print(
                 f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]"
             )
-    elif from_block is None:
-        from_block = GMX_V2_GENESIS_BLOCK
+        elif args.from_block is None:
+            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
+    else:
+        from_block = args.from_block if args.from_block is not None else GMX_V2_GENESIS_BLOCK
+        last_values = {}
 
     with console.status("Fetching GMX market registry..."):
         markets = _fetch_markets_cached(args.network, force_refresh=args.refresh_markets)
@@ -1400,11 +1441,10 @@ async def async_main(args: argparse.Namespace) -> None:
         return
 
     _resume_base_total = 0
-    last_values = {}
     if args.resume:
-        _prior = load_checkpoint(checkpoint_path)
-        _resume_base_total = _prior["total_events"] if _prior else 0
-        last_values = checkpoint_last_values(_prior)
+        _resume_base_total = (
+            checkpoint.get("total_events", 0) if checkpoint and "last_values" in checkpoint else 0
+        )
 
     flush_state: dict = {
         "total_events": 0,

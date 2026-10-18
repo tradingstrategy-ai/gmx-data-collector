@@ -4,18 +4,28 @@ import importlib.util
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 
 import polars as pl
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = REPO_ROOT / "scripts"
-sys.path.insert(0, str(REPO_ROOT / "src"))
-SPEC = importlib.util.spec_from_file_location(
-    "extract_open_interest_snapshots", SCRIPTS_DIR / "extract_open_interest.py"
-)
-oi = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = oi
-SPEC.loader.exec_module(oi)
+
+
+def _load_script_module(name: str, filename: str) -> ModuleType:
+    """Load a standalone script with the repository's source imports enabled."""
+    for path in (REPO_ROOT / "src", SCRIPTS_DIR):
+        if str(path) not in sys.path:
+            sys.path.insert(0, str(path))
+
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS_DIR / filename)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+oi = _load_script_module("extract_open_interest_snapshots", "extract_open_interest.py")
 
 
 def _record(market: str, is_long: bool, value_usd: int, day: str, block: int):
@@ -99,3 +109,34 @@ def test_daily_snapshot_restores_combo_state_from_resume_checkpoint(tmp_path: Pa
         "80.00",
         "180.00",
     )
+
+
+def test_explicit_replay_does_not_apply_later_checkpoint_state():
+    checkpoint = {
+        "last_block": 200,
+        "last_values": [
+            {
+                "symbol": "ETH/USD",
+                "market": "0xLONG",
+                "collateral": "0xCOLLATERAL",
+                "is_long": True,
+                "value": 100 * oi.USD_PRECISION,
+            }
+        ],
+    }
+
+    start_block, state, legacy = oi.resolve_resume_state(checkpoint, 150)
+
+    assert start_block == 150
+    assert state == {}
+    assert legacy is False
+
+
+def test_legacy_resume_checkpoint_restarts_from_genesis():
+    checkpoint = {"last_block": 200, "total_events": 25}
+
+    start_block, state, legacy = oi.resolve_resume_state(checkpoint, None)
+
+    assert start_block == oi.GMX_V2_GENESIS_BLOCK
+    assert state == {}
+    assert legacy is True
