@@ -22,7 +22,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+from gmx_historical_data.freqtrade_exporter import FreqtradeExporter, _drop_rejected_funding_hours
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -220,6 +220,25 @@ def test_export_removes_destination_rows_rejected_by_current_source(tmp_path):
     assert written["date"].to_list() == [_hour(0), _hour(2), _hour(3)]
     assert written["open"].to_list() == [1e-6, 3e-6, 4e-6]
     assert exporter.funding_reconciliations[0].removed_destination_rows == 1
+
+
+def test_rejected_hour_anti_join_handles_tz_naive_destination():
+    """Legacy naive dates are aligned to the source's UTC date dtype before joining."""
+    existing = pl.DataFrame(
+        {
+            "date": pl.Series(
+                [datetime(2026, 2, 19, hour) for hour in (7, 8)],
+                dtype=pl.Datetime("ns"),
+            ),
+            "open": [1e-5, 2e-5],
+        }
+    )
+
+    kept, removed = _drop_rejected_funding_hours(existing, [datetime(2026, 2, 19, 8, tzinfo=UTC)])
+
+    assert removed == 1
+    assert kept.schema["date"] == pl.Datetime("ns", "UTC")
+    assert kept["open"].to_list() == [1e-5]
 
 
 def test_stale_feather_with_newer_mtime_never_shadows_parquet(tmp_path):

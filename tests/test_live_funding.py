@@ -11,7 +11,6 @@ import pandas as pd
 import polars as pl
 import pyarrow.feather as feather
 
-from gmx_historical_data.freqtrade_exporter import _drop_rejected_funding_hours
 from gmx_historical_data.live_funding import fetch_live_funding_rates, upsert_live_rates_to_feather
 
 _HOURS_PER_YEAR = 365.25 * 24
@@ -327,22 +326,3 @@ def test_export_feather_output_is_updated_by_live_upsert(tmp_path):
     assert len(rows) == 2
     assert rows["date"].iloc[-1] == pd.Timestamp("2026-02-19 08:00:00", tz="UTC")
     assert rows["open"].iloc[-1] == 1.1e-5
-
-
-def test_rejected_hour_anti_join_handles_tz_naive_destination():
-    """Legacy naive dates are aligned to the source's UTC date dtype before joining."""
-    existing = pl.DataFrame(
-        {
-            "date": pl.Series(
-                [datetime(2026, 2, 19, hour) for hour in (7, 8)],
-                dtype=pl.Datetime("ns"),
-            ),
-            "open": [1e-5, 2e-5],
-        }
-    )
-
-    kept, removed = _drop_rejected_funding_hours(existing, [datetime(2026, 2, 19, 8, tzinfo=UTC)])
-
-    assert removed == 1
-    assert kept.schema["date"] == pl.Datetime("ns", "UTC")
-    assert kept["open"].to_list() == [1e-5]
