@@ -277,7 +277,11 @@ case "$1 $2" in
   "release edit")
     tag="$3"; shift 3
     while [ $# -gt 0 ]; do
-      case "$1" in --notes-file) cp "$2" "$FAKE_GH/notes_$tag.md"; shift;; --repo|--title) shift;; esac
+      case "$1" in
+        --notes-file) cp "$2" "$FAKE_GH/notes_$tag.md"; shift;;
+        --notes) printf '%s' "$2" > "$FAKE_GH/notes_$tag.md"; shift;;
+        --repo|--title) shift;;
+      esac
       shift
     done ;;
   "release delete-asset") drop "$3" "$4" ;;
@@ -676,3 +680,38 @@ def test_gate_step_without_a_fresh_verdict_writes_withheld(tmp_path: Path, stub:
         b"previous release file"
     )
     assert "FUNDING_GATE=fail" in (tmp_path / "github_env").read_text()
+
+
+def test_a_failed_consumer_upload_stops_publication_and_says_so(tmp_path: Path) -> None:
+    today = _today()
+    fake = _fake_gh(tmp_path, tags=[today], state_assets={today: [OLD_STATE]})
+
+    result = _create_release(tmp_path, fake, new_state=True, FAKE_UPLOAD_FAIL="gmx-full.tar.gz")
+
+    assert result.returncode != 0
+    calls = _calls(fake)
+    # No state upload, no deletion of the old state, the old state is intact.
+    assert not any(c.startswith("release upload") and "gmx-funding-state" in c for c in calls)
+    assert _deletes(fake) == []
+    assert OLD_STATE in _assets(fake, today) and NEW_STATE not in _assets(fake, today)
+    # The body does not claim the new bundles; it names what failed.
+    notes = (fake / f"notes_{today}.md").read_text()
+    assert "incomplete" in notes.lower() and "gmx-full.tar.gz" in notes
+    assert "Daily automated GMX data snapshot" not in notes
+
+
+def test_the_unstamped_legacy_state_name_is_not_a_state_asset(tmp_path: Path) -> None:
+    legacy = "gmx-funding-state.tar.gz"
+    # Restore ignores it ...
+    fake = _fake_gh(tmp_path, tags=["data-2026-10-17"], state_assets={"data-2026-10-17": [legacy]})
+    work, result = _restore(tmp_path, fake)
+    assert not (work / "user_data/data/gmx/funding").exists()
+    # ... prune does not protect a release for it ...
+    tags = [_today(), _today(20)]
+    _, deleted = _prune(tmp_path / "p", tags, {_today(20): [legacy]})
+    assert deleted == [_today(20)]
+    # ... and a same-day rerun does not treat it as state.
+    today = _today()
+    fake = _fake_gh(tmp_path / "c", tags=[today], state_assets={today: [legacy]})
+    _create_release(tmp_path / "c", fake, new_state=False)
+    assert any(c.startswith("release delete ") for c in _calls(fake))
