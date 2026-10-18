@@ -8,10 +8,12 @@ The workflow calls these subcommands; the logic lives in
 * ``state``  classify the restored funding state; export ``FUNDING_STATE``.
 * ``export`` stage the 1h funding + mark feathers (never writes ``futures/``).
 * ``gate``   grade the staged files; promote on pass; write ``funding_coverage.json``.
+* ``ensure-verdict`` backstop: no verdict written by this run means WITHHELD.
 * ``notes``  print the release-notes section for a ``funding_coverage.json``.
 
 Exit codes: ``seed``/``state``/``export``/``notes`` are fail-soft (0) so the rest of
-the release proceeds; ``gate`` exits 1 when the companions were withheld.
+the release proceeds; ``gate`` exits 1 when the companions were withheld;
+``ensure-verdict`` exits 0 once a current verdict is in place, whatever it says.
 """
 
 from __future__ import annotations
@@ -112,18 +114,28 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_start(value: str | None) -> datetime:
+    return datetime.fromisoformat(value) if value else datetime.now(UTC)
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     gmx_root = Path(args.gmx_root)
-    now = datetime.fromisoformat(args.run_start) if args.run_start else datetime.now(UTC)
-    coverage = funding_release.run_gate(
-        gmx_root,
-        Path(args.stage_dir),
-        state=args.state,
-        extract_outcome=args.extract_outcome,
-        now=now,
-        thresholds=SeriesThresholds(stale_tail_blocks=args.stale_tail_blocks),
-        report_path=Path(args.report) if args.report else None,
-    )
+    now = _run_start(args.run_start)
+    report = Path(args.report) if args.report else None
+    try:
+        coverage = funding_release.run_gate(
+            gmx_root,
+            Path(args.stage_dir),
+            state=args.state,
+            extract_outcome=args.extract_outcome,
+            now=now,
+            thresholds=SeriesThresholds(stale_tail_blocks=args.stale_tail_blocks),
+            report_path=report,
+        )
+    except Exception as exc:  # noqa: BLE001 - fail closed, and never leave a stale verdict
+        print(f"::error::funding gate crashed: {type(exc).__name__}: {exc}")
+        _withhold(args, now, f"gate crashed: {type(exc).__name__}: {exc}", report)
+        return 1
     for line in funding_release.github_warnings(coverage):
         print(line)
     ok = coverage["status"] == "PASS"
@@ -137,11 +149,54 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _withhold(args: argparse.Namespace, now: datetime, reason: str, report: Path | None) -> bool:
+    """Replace any restored verdict with a WITHHELD one. ``True`` if it was recorded."""
+    _github_env(FUNDING_GATE="fail")
+    try:
+        funding_release.write_withheld_verdict(
+            Path(args.gmx_root),
+            reason,
+            state=args.state,
+            extract_outcome=args.extract_outcome,
+            now=now,
+            report_path=report,
+        )
+    except Exception as exc:  # noqa: BLE001 - last resort: the caller removes the stale file
+        print(f"::error::could not record the withheld verdict: {exc}")
+        return False
+    return True
+
+
+def cmd_ensure_verdict(args: argparse.Namespace) -> int:
+    """Backstop after ``gate``: no current verdict means WITHHELD, never yesterday's."""
+    gmx_root = Path(args.gmx_root)
+    now = _run_start(args.run_start)
+    report = Path(args.report) if args.report else None
+    verdict = funding_release.verdict_is_current(gmx_root, now)
+    if verdict is not None and args.exit_code in (0, 1):
+        ok = verdict.get("status") == "PASS"
+        _github_env(FUNDING_GATE="pass" if ok else "fail")
+        return 0
+    print(
+        f"::error::funding gate exit {args.exit_code} left no current verdict; companions withheld."
+    )
+    recorded = _withhold(
+        args, now, f"gate did not produce a verdict (exit {args.exit_code})", report
+    )
+    # 0 = a correct, current WITHHELD verdict is in place (FUNDING_GATE=fail carries
+    # the failure); nonzero only if even that could not be written.
+    return 0 if recorded else 1
+
+
 def cmd_notes(args: argparse.Namespace) -> int:
     try:
         coverage = json.loads(Path(args.coverage).read_text())
     except (OSError, ValueError):
-        print("### Funding & mark companions\n\nNo funding coverage record was produced.\n")
+        print(
+            "### Funding & mark companions\n\n**Funding and mark were NOT refreshed in this "
+            "release:** no funding coverage record was produced. The companions in `futures/` "
+            "are the previous release's, unchanged.\n"
+        )
         return 0
     print(funding_release.format_release_notes(coverage))
     return 0
@@ -175,6 +230,15 @@ def build_parser() -> argparse.ArgumentParser:
     gate.add_argument("--report", help="data_report.txt to add the funding section to")
     gate.add_argument("--stale-tail-blocks", action="store_true")
     gate.set_defaults(func=cmd_gate)
+
+    ensure = sub.add_parser("ensure-verdict", help="withhold unless gate wrote a current verdict")
+    ensure.add_argument("--gmx-root", required=True)
+    ensure.add_argument("--state", required=True)
+    ensure.add_argument("--extract-outcome", required=True)
+    ensure.add_argument("--run-start", required=True)
+    ensure.add_argument("--exit-code", type=int, required=True)
+    ensure.add_argument("--report")
+    ensure.set_defaults(func=cmd_ensure_verdict)
 
     notes = sub.add_parser("notes", help="print the release-notes section")
     notes.add_argument("--coverage", required=True)

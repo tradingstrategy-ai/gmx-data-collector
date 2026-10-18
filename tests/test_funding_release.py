@@ -262,3 +262,52 @@ def test_seed_then_one_incremental_day_end_to_end(tmp_path: Path) -> None:
     assert shipped["date"].min() == EPOCH  # old timestamps survived
     assert shipped["date"].max() == CUTOFF  # and the new day is there
     assert (gmx_root / "futures" / "BTC_USDC_USDC-1h-mark.feather").exists()
+
+
+def test_restored_history_at_hours_the_source_rejects_is_never_published(tmp_path: Path) -> None:
+    """A restored companion value must not survive at an hour the current source
+    rejects for unknown direction, however old that hour is."""
+    gmx_root = _lake(tmp_path, symbols=("BTC",))
+    bad = datetime(2026, 1, 1, tzinfo=UTC)
+    rates_path = gmx_root / "funding" / "arbitrum" / "rates" / "BTC" / "1h.parquet"
+    rates = pl.read_parquet(rates_path).with_columns(
+        pl.when(pl.col("timestamp") == bad)
+        .then(3e-5)
+        .otherwise(pl.col("funding_rate_hourly"))
+        .alias("funding_rate_hourly"),
+        pl.when(pl.col("timestamp") == bad)
+        .then(None)
+        .otherwise(pl.col("longs_pay_shorts"))
+        .alias("longs_pay_shorts"),
+    )
+    rates.write_parquet(rates_path)
+    restored = hours(bad - 6 * HOUR, 13)
+    write_companion(gmx_root / "futures", "BTC", "funding_rate", restored, value=0.5)
+
+    funding_release.stage_companions(gmx_root, tmp_path / "stage")
+    coverage = _gate(gmx_root, tmp_path / "stage")
+
+    shipped = pl.read_ipc(gmx_root / "futures" / "BTC_USDC_USDC-1h-funding_rate.feather")
+    assert bad not in shipped["date"].to_list()
+    assert 0.5 not in shipped["open"].to_list() or shipped.filter(pl.col("date") == bad).is_empty()
+    # Neighbouring hours carry the current, signed values -- not the restored 0.5.
+    assert shipped.filter(pl.col("date") == bad - HOUR)["open"].to_list() == [pytest.approx(1e-6)]
+    # Too old to block (nothing can repair it), but accounted for.
+    assert coverage["status"] == "PASS"
+    assert coverage["pairs"]["BTC"]["rejected_older"] == 1
+
+
+def test_a_recent_rejected_hour_still_blocks(tmp_path: Path) -> None:
+    gmx_root = _lake(tmp_path, symbols=("BTC",))
+    bad = CUTOFF - timedelta(days=2)
+    rates_path = gmx_root / "funding" / "arbitrum" / "rates" / "BTC" / "1h.parquet"
+    pl.read_parquet(rates_path).with_columns(
+        pl.when(pl.col("timestamp") == bad)
+        .then(None)
+        .otherwise(pl.col("longs_pay_shorts"))
+        .alias("longs_pay_shorts")
+    ).write_parquet(rates_path)
+
+    funding_release.stage_companions(gmx_root, tmp_path / "stage")
+
+    assert _gate(gmx_root, tmp_path / "stage")["status"] == "WITHHELD"

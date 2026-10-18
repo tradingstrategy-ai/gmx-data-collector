@@ -20,6 +20,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import polars as pl
+
+from gmx_historical_data.atomic_parquet import atomic_write_ipc
 from gmx_historical_data.cadence_gate import load_exempt_symbols
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
 from gmx_historical_data.funding_state import funding_network_dir
@@ -96,11 +99,33 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
         futures, symbols=symbols, timeframes=(TIMEFRAME,), out_dir=staged
     )
 
+    # The exporter merges the restored history with the fresh export, so a
+    # restored value would survive at an hour the current source rejects (null
+    # rate, or a nonzero rate with unknown direction). Whatever its age, a
+    # rejected hour must not appear in the output: drop it from the staged
+    # history. The gate accounts for it (blocks if recent, `rejected_older`
+    # otherwise).
+    dropped: dict[str, int] = {}
+    for rec in exporter.funding_reconciliations:
+        if rec.timeframe != TIMEFRAME:
+            continue
+        rejected = set(rec.unknown_direction_hours) | set(rec.null_rate_hours)
+        target = staged / f"{rec.symbol}_USDC_USDC-{TIMEFRAME}-funding_rate.feather"
+        if not rejected or not target.is_file():
+            continue
+        frame = pl.read_ipc(target, memory_map=False)
+        drop = pl.DataFrame({"date": pl.Series(sorted(rejected), dtype=frame.schema["date"])})
+        kept = frame.join(drop, on="date", how="anti")
+        if len(kept) != len(frame):
+            dropped[rec.symbol] = len(frame) - len(kept)
+            atomic_write_ipc(kept, target)
+
     def iso(hours) -> list[str]:
         return [h.isoformat() for h in hours]
 
     report = {
         "failed_symbols": sorted(failed_symbols),
+        "dropped_rejected_hours": dropped,
         "failures": [
             {"symbol": f.symbol, "timeframe": f.timeframe, "reason": f.reason, "message": f.message}
             for f in [*failures, *mark_failures]
@@ -156,6 +181,7 @@ def _pair_json(pair: PairCoverage) -> dict[str, Any]:
         "mark_rows": pair.mark_rows,
         "holes_recent": pair.holes_recent,
         "holes_older": pair.holes_older,
+        "rejected_older": pair.rejected_older,
         "newly_stale": pair.newly_stale,
         "active": pair.active,
         "delisted": pair.delisted,
@@ -193,11 +219,9 @@ def run_gate(
     staged = companion_dir(stage_root)
     now = now or datetime.now(UTC)
     thresholds = thresholds or SeriesThresholds()
-    coverage_path = gmx_root / COVERAGE_FILE
-
     previous = None
     try:
-        previous = json.loads(coverage_path.read_text())
+        previous = json.loads((gmx_root / COVERAGE_FILE).read_text())
     except (OSError, ValueError):
         pass
     try:
@@ -236,6 +260,37 @@ def run_gate(
     if passed:
         promote_staged(staged, futures)
 
+    return _publish_verdict(
+        gmx_root,
+        passed=passed,
+        reasons=reasons,
+        pairs_json=pairs_json,
+        checkpoints=checkpoints,
+        cutoff=cutoff,
+        state=state,
+        extract_outcome=extract_outcome,
+        now=now,
+        thresholds=thresholds,
+        report_path=report_path,
+    )
+
+
+def _publish_verdict(
+    gmx_root: Path,
+    *,
+    passed: bool,
+    reasons: list[str],
+    pairs_json: dict[str, dict[str, Any]],
+    checkpoints: dict[str, Any],
+    cutoff: datetime | None,
+    state: str,
+    extract_outcome: str,
+    now: datetime,
+    thresholds: SeriesThresholds,
+    report_path: Path | None,
+) -> dict[str, Any]:
+    """Record what is actually shipped in ``futures/`` and write the verdict."""
+    futures = gmx_root / "futures"
     for symbol, entry in pairs_json.items():
         entry["shipped_funding_last_bar"] = _last_bar(
             futures / f"{symbol}_USDC_USDC-{TIMEFRAME}-funding_rate.feather"
@@ -264,6 +319,7 @@ def run_gate(
         },
         "pairs": pairs_json,
     }
+    coverage_path = gmx_root / COVERAGE_FILE
     tmp = coverage_path.with_name(coverage_path.name + ".tmp")
     tmp.write_text(json.dumps(coverage, indent=2, sort_keys=True))
     os.replace(tmp, coverage_path)
@@ -271,6 +327,49 @@ def run_gate(
     if report_path is not None:
         write_report_section(Path(report_path), coverage)
     return coverage
+
+
+def write_withheld_verdict(
+    gmx_root: Path,
+    reason: str,
+    *,
+    state: str,
+    extract_outcome: str,
+    now: datetime,
+    report_path: Path | None = None,
+) -> dict[str, Any]:
+    """Record a ``WITHHELD`` verdict without grading anything.
+
+    For when the gate did not produce a current verdict of its own (it crashed,
+    was killed, or exited without writing one). Replaces whatever verdict was
+    restored from the previous release, so the coverage record, the report and
+    the release notes can never claim a refresh that did not happen. ``futures/``
+    is left exactly as it is.
+    """
+    gmx_root = Path(gmx_root)
+    return _publish_verdict(
+        gmx_root,
+        passed=False,
+        reasons=[reason],
+        pairs_json={s: {} for s in _futures_symbols(gmx_root / "futures")},
+        checkpoints={},
+        cutoff=None,
+        state=state,
+        extract_outcome=extract_outcome,
+        now=now,
+        thresholds=SeriesThresholds(),
+        report_path=report_path,
+    )
+
+
+def verdict_is_current(gmx_root: Path, run_start: datetime) -> dict[str, Any] | None:
+    """Return the verdict iff this run wrote it (``generated_at`` is the run start)."""
+    try:
+        data = json.loads((Path(gmx_root) / COVERAGE_FILE).read_text())
+        stamp = datetime.fromisoformat(data["generated_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return data if stamp.astimezone(UTC) == run_start.astimezone(UTC) else None
 
 
 def _flagged_pairs(coverage: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:

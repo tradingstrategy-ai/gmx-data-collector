@@ -103,6 +103,7 @@ class PairCoverage:
     tail_age_hours: float | None = None
     holes_recent: int = 0
     holes_older: int = 0
+    rejected_older: int = 0
     newly_stale: bool = False
     mark_rows: int = 0
     futures_rows: int = 0
@@ -338,6 +339,17 @@ def assess_series_coverage(
             for h in _parse_hours(rec.get("missing_hours"))
             if h >= recent_from and h not in explained
         ]
+        # Rejected hours older than the window cannot block (nothing can repair
+        # them) but are accounted for; staging has already dropped them from the
+        # output, so no restored value survives at those hours.
+        rejected_older = len(
+            {
+                h
+                for h in _parse_hours(rec.get("unknown_direction_hours"))
+                + _parse_hours(rec.get("null_rate_hours"))
+                if h < recent_from
+            }
+        )
         for label, hours in (
             ("unknown-direction", unknown),
             ("null-rate", nulls),
@@ -372,6 +384,7 @@ def assess_series_coverage(
                 tail_age_hours=age,
                 holes_recent=holes_recent,
                 holes_older=len(holes) - holes_recent,
+                rejected_older=rejected_older,
                 newly_stale=tail is TailStatus.STALE and was == TailStatus.CURRENT.value,
                 blockers=tuple(blockers),
                 **base,

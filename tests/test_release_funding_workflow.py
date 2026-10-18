@@ -1,9 +1,12 @@
 """``release-data.yml``: funding state, staged companions, packaging contract."""
 
+import json
 import os
 import stat
 import subprocess
+import sys
 import tarfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -120,14 +123,22 @@ def test_size_guard_covers_every_asset_at_1_8_gib() -> None:
 # ---------------------------------------------------------------------------
 
 
+REPO = Path(__file__).resolve().parent.parent
+
+
 def _run_step(
     name: str, cwd: Path, env_extra: dict[str, str] | None = None, extra_path: Path | None = None
 ) -> subprocess.CompletedProcess:
     script = _step(name)["run"].replace("/tmp/", f"{cwd}/out/")
     script = script.replace("${{ github.repository }}", "owner/repo")
+    script = script.replace("${{ github.event.inputs.retention_days || 14 }}", "14")
+    for link in ("src", "scripts"):
+        if not (cwd / link).exists():
+            (cwd / link).symlink_to(REPO / link)
     script = script.replace("sleep $((attempt * 10))", "sleep 0")
     (cwd / "out").mkdir(exist_ok=True)
     env = {**os.environ, **(env_extra or {})}
+    env["PATH"] = f"{Path(sys.executable).parent}:{env['PATH']}"
     if extra_path:
         env["PATH"] = f"{extra_path}:{env['PATH']}"
     return subprocess.run(
@@ -201,7 +212,9 @@ def test_packaging_without_state_publishes_no_state_asset(tmp_path: Path) -> Non
 
 _FAKE_GH = """#!/usr/bin/env bash
 # Minimal `gh` stand-in driven by files under $FAKE_GH.
+echo "$*" >> "$FAKE_GH/calls.log"
 case "$1 $2" in
+  "release create"|"release upload"|"release edit"|"release delete") ;;
   "release list") cat "$FAKE_GH/tags.txt" ;;
   "release view") cat "$FAKE_GH/assets_$3.txt" 2>/dev/null || true ;;
   "release download")
@@ -303,3 +316,173 @@ def test_restore_never_overwrites_an_existing_funding_dir(tmp_path: Path) -> Non
 
     assert (work / "user_data/data/gmx/funding/keep.txt").read_bytes() == b"keep"
     assert result.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# Release replacement and pruning must never destroy the only copy of the state.
+# ---------------------------------------------------------------------------
+
+STATE = "gmx-funding-state.tar.gz"
+
+
+def _today(offset_days: int = 0) -> str:
+    return f"data-{(datetime.now(UTC) - timedelta(days=offset_days)):%Y-%m-%d}"
+
+
+def _release_env(fake: Path) -> dict[str, str]:
+    return {"FAKE_GH": str(fake), "GH_TOKEN": "x"}
+
+
+def _calls(fake: Path) -> list[str]:
+    log = fake / "calls.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def _publish_tree(root: Path, *, new_state: bool) -> None:
+    _gmx_tree(root, companions=True, state=False)
+    out = root / "out"
+    out.mkdir(exist_ok=True)
+    for asset in ("gmx-full", "gmx-light") + (("gmx-funding-state",) if new_state else ()):
+        (out / f"{asset}.tar.gz").write_bytes(b"x")
+    _touch(root / "user_data/data/gmx/futures/BTC_USDC_USDC-1h-futures.feather", b"x")
+
+
+def _create_release(tmp_path: Path, fake: Path, *, new_state: bool):
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    _publish_tree(work, new_state=new_state)
+    return _run_step(
+        "Create GitHub Release", work, env_extra=_release_env(fake), extra_path=fake / "bin"
+    )
+
+
+def test_same_day_rerun_does_not_delete_a_release_that_holds_the_only_state(
+    tmp_path: Path,
+) -> None:
+    """State restore failed (no new state asset) and today's release, the first
+    seeded one, carries the only copy: it must be updated in place, not deleted."""
+    today = _today()
+    fake = _fake_gh(tmp_path, tags=[today], with_state={today: True})
+
+    result = _create_release(tmp_path, fake, new_state=False)
+
+    assert result.returncode == 0, result.stderr
+    calls = _calls(fake)
+    assert not any(c.startswith("release delete") for c in calls)
+    assert not any(c.startswith("release create") for c in calls)
+    upload = [c for c in calls if c.startswith("release upload")]
+    assert upload and "--clobber" in upload[0] and STATE not in upload[0]
+    assert any(c.startswith("release edit") and "--latest" in c for c in calls)
+
+
+def test_same_day_rerun_replaces_the_state_asset_only_with_a_new_one(tmp_path: Path) -> None:
+    today = _today()
+    fake = _fake_gh(tmp_path, tags=[today], with_state={today: True})
+
+    result = _create_release(tmp_path, fake, new_state=True)
+
+    assert result.returncode == 0, result.stderr
+    calls = _calls(fake)
+    assert not any(c.startswith("release delete") for c in calls)
+    uploads = " ".join(c for c in calls if c.startswith("release upload"))
+    assert STATE in uploads and "--clobber" in uploads
+
+
+def test_same_day_rerun_without_state_still_recreates_the_release(tmp_path: Path) -> None:
+    today = _today()
+    fake = _fake_gh(tmp_path, tags=[today], with_state={})
+
+    result = _create_release(tmp_path, fake, new_state=False)
+
+    assert result.returncode == 0, result.stderr
+    calls = _calls(fake)
+    assert any(c.startswith("release delete") for c in calls)
+    assert any(c.startswith("release create") for c in calls)
+
+
+def _prune(tmp_path: Path, tags: list[str], with_state: dict[str, bool]):
+    fake = _fake_gh(tmp_path, tags=tags, with_state=with_state)
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    result = _run_step(
+        "Prune old releases", work, env_extra=_release_env(fake), extra_path=fake / "bin"
+    )
+    deleted = [c.split()[2] for c in _calls(fake) if c.startswith("release delete")]
+    return result, deleted
+
+
+def test_prune_keeps_the_newest_release_that_carries_the_state(tmp_path: Path) -> None:
+    # Today's run published without the state asset: the 20-day-old release is
+    # now the only resumable copy and is past the 14-day retention.
+    tags = [_today(), _today(20), _today(30)]
+    result, deleted = _prune(tmp_path, tags, {_today(20): True, _today(30): True})
+
+    assert result.returncode == 0, result.stderr
+    assert _today(20) not in deleted
+    assert _today(30) in deleted
+
+
+def test_prune_deletes_old_state_once_a_newer_release_carries_it(tmp_path: Path) -> None:
+    tags = [_today(), _today(20), _today(30)]
+    _, deleted = _prune(tmp_path, tags, {_today(): True, _today(20): True, _today(30): True})
+
+    assert sorted(deleted) == sorted([_today(20), _today(30)])
+
+
+# ---------------------------------------------------------------------------
+# The gate step must never leave yesterday's verdict standing.
+# ---------------------------------------------------------------------------
+
+
+def _run_gate_step(tmp_path: Path, python_stub: str) -> tuple[subprocess.CompletedProcess, Path]:
+    work = tmp_path / "work"
+    gmx = work / "user_data" / "data" / "gmx"
+    (gmx / "futures").mkdir(parents=True)
+    _touch(gmx / "futures" / "BTC_USDC_USDC-1h-funding_rate.feather", b"previous release file")
+    (gmx / "funding_coverage.json").write_text(
+        json.dumps(
+            {"status": "PASS", "refreshed": True, "generated_at": "2026-10-17T02:20:00+00:00"}
+        )
+    )
+    (work / "data_report.txt").write_text("report\n")
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir()
+    stub = stub_dir / "python"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        'case " $* " in\n'
+        f"  *' gate '*) {python_stub} ;;\n"
+        f'  *) exec "{sys.executable}" "$@" ;;\n'
+        "esac\n"
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    env_file = tmp_path / "github_env"
+    env_file.write_text("")
+    result = _run_step(
+        "Gate and promote funding companions",
+        work,
+        env_extra={
+            "FUNDING_STATE": "ready",
+            "EXTRACT_OUTCOME": "success",
+            "STAGE_OUTCOME": "success",
+            "GITHUB_ENV": str(env_file),
+        },
+        extra_path=stub_dir,
+    )
+    return result, work
+
+
+@pytest.mark.parametrize("stub", ["exit 1", "exit 139", "kill -9 $$"])
+def test_gate_step_without_a_fresh_verdict_writes_withheld(tmp_path: Path, stub: str) -> None:
+    result, work = _run_gate_step(tmp_path, stub)
+
+    assert result.returncode == 0, result.stderr
+    gmx = work / "user_data" / "data" / "gmx"
+    verdict = json.loads((gmx / "funding_coverage.json").read_text())
+    assert verdict["status"] == "WITHHELD" and verdict["refreshed"] is False
+    assert verdict["generated_at"] != "2026-10-17T02:20:00+00:00"
+    assert "NOT refreshed" in (work / "data_report.txt").read_text()
+    assert (gmx / "futures" / "BTC_USDC_USDC-1h-funding_rate.feather").read_bytes() == (
+        b"previous release file"
+    )
+    assert "FUNDING_GATE=fail" in (tmp_path / "github_env").read_text()

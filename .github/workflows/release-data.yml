@@ -678,20 +678,32 @@ jobs:
           if [ "${STAGE_OUTCOME}" != "success" ]; then
             rm -rf user_data/.companion-stage
           fi
+          RUN_START="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
           RC=0
           PYTHONPATH=src python scripts/release_funding_companions.py gate \
               --gmx-root user_data/data/gmx \
               --stage-dir user_data/.companion-stage \
               --state "${FUNDING_STATE:-absent}" \
               --extract-outcome "${EXTRACT_OUTCOME:-skipped}" \
-              --run-start "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" \
+              --run-start "${RUN_START}" \
               --report data_report.txt || RC=$?
-          if [ "${RC}" -gt 1 ]; then
-            # The gate itself crashed: fail closed (promotion only happens
-            # inside a passing gate, so futures/ is untouched).
-            echo "::error::funding gate crashed (exit ${RC}); companions withheld."
-            echo "FUNDING_GATE=fail" >> "$GITHUB_ENV"
-          fi
+          # Whatever the gate did (an uncaught exception also exits 1, like a
+          # legitimate WITHHELD): unless it wrote a verdict stamped with this
+          # run's start, the verdict restored from the previous release must not
+          # stand. Replace it with WITHHELD / NOT refreshed. futures/ is untouched
+          # either way: promotion only happens inside a passing gate.
+          PYTHONPATH=src python scripts/release_funding_companions.py ensure-verdict \
+              --gmx-root user_data/data/gmx \
+              --state "${FUNDING_STATE:-absent}" \
+              --extract-outcome "${EXTRACT_OUTCOME:-skipped}" \
+              --run-start "${RUN_START}" \
+              --exit-code "${RC}" \
+              --report data_report.txt || {
+            if [ "${RC}" -gt 1 ] || [ ! -f user_data/data/gmx/funding_coverage.json ]; then
+              rm -f user_data/data/gmx/funding_coverage.json
+              echo "FUNDING_GATE=fail" >> "$GITHUB_ENV"
+            fi
+          }
           rm -rf user_data/.companion-stage
           exit 0
 
@@ -817,9 +829,22 @@ jobs:
           TAG="data-${DATE}"
           COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
 
-          # Idempotent: if today's release already exists (re-run), delete it first
-          gh release delete "${TAG}" --repo ${{ github.repository }} --yes 2>/dev/null || true
-          git push origin --delete "${TAG}" 2>/dev/null || true
+          # Idempotent: if today's release already exists (re-run), replace it.
+          #
+          # Exception: when it carries gmx-funding-state.tar.gz it may hold the only
+          # resumable copy of the funding state (e.g. the first seeded release, and
+          # this run's own restore failed). Then it is never deleted: its assets are
+          # updated in place, and its state asset is only replaced by a new one
+          # uploaded by this run.
+          IN_PLACE=0
+          if gh release view "${TAG}" --repo ${{ github.repository }} --json assets \
+              --jq '.assets[].name' 2>/dev/null | grep -qx gmx-funding-state.tar.gz; then
+            IN_PLACE=1
+            echo "${TAG} carries the funding state; updating it in place instead of deleting it."
+          else
+            gh release delete "${TAG}" --repo ${{ github.repository }} --yes 2>/dev/null || true
+            git push origin --delete "${TAG}" 2>/dev/null || true
+          fi
 
           NOTES_FILE=$(mktemp)
           cat > "$NOTES_FILE" <<NOTES
@@ -858,12 +883,29 @@ jobs:
             ASSETS+=(data_report.txt)
           fi
 
-          gh release create "${TAG}" \
-              --repo ${{ github.repository }} \
-              --title "GMX Data ${DATE}" \
-              --notes-file "$NOTES_FILE" \
-              --latest \
-              "${ASSETS[@]}"
+          if [ "${IN_PLACE}" = "1" ]; then
+            # State asset last, so every other asset is already updated if the
+            # (delete-then-upload) clobber of the state asset is interrupted.
+            OTHER=()
+            for asset in "${ASSETS[@]}"; do
+              [ "$(basename "$asset")" = "gmx-funding-state.tar.gz" ] || OTHER+=("$asset")
+            done
+            gh release upload "${TAG}" --repo ${{ github.repository }} --clobber "${OTHER[@]}"
+            if [ -f /tmp/gmx-funding-state.tar.gz ]; then
+              gh release upload "${TAG}" --repo ${{ github.repository }} --clobber /tmp/gmx-funding-state.tar.gz
+            fi
+            gh release edit "${TAG}" --repo ${{ github.repository }} \
+                --title "GMX Data ${DATE}" \
+                --notes-file "$NOTES_FILE" \
+                --latest
+          else
+            gh release create "${TAG}" \
+                --repo ${{ github.repository }} \
+                --title "GMX Data ${DATE}" \
+                --notes-file "$NOTES_FILE" \
+                --latest \
+                "${ASSETS[@]}"
+          fi
 
           rm -f "$NOTES_FILE"
 
@@ -880,6 +922,20 @@ jobs:
           CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%d)
           echo "Pruning data-* releases with tag date older than ${CUTOFF}..."
 
+          # The newest release that carries gmx-funding-state.tar.gz is the only
+          # resumable copy of the funding state, however old it is. It is kept
+          # unless a newer release carries one (then it is the newer one that is
+          # kept), i.e. unless a replacement was published successfully.
+          KEEP=""
+          for T in $(gh release list --repo ${{ github.repository }} --limit 100 --json tagName \
+              --jq '[.[].tagName | select(test("^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))] | sort | reverse | .[]'); do
+            if gh release view "${T}" --repo ${{ github.repository }} --json assets \
+                --jq '.assets[].name' 2>/dev/null | grep -qx gmx-funding-state.tar.gz; then
+              KEEP="${T}"
+              break
+            fi
+          done
+
           # List releases, filter data-YYYY-MM-DD tags, drop ones older than cutoff
           gh release list --repo ${{ github.repository }} --limit 100 \
               --json tagName --jq '.[].tagName' | \
@@ -887,6 +943,10 @@ jobs:
               while read -r TAG; do
                   TAG_DATE="${TAG#data-}"
                   if [ "$TAG_DATE" \< "$CUTOFF" ]; then
+                      if [ "$TAG" = "$KEEP" ]; then
+                          echo "  Keeping ${TAG}: newest release carrying the funding state"
+                          continue
+                      fi
                       echo "  Deleting ${TAG} (date: ${TAG_DATE})"
                       gh release delete "${TAG}" --repo ${{ github.repository }} --yes --cleanup-tag
                   fi

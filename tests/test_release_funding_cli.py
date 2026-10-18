@@ -88,3 +88,129 @@ def test_notes_cli_prints_markdown(tmp_path: Path, capsys) -> None:
 
     assert "NOT refreshed" in capsys.readouterr().out
     assert cli.main(["notes", "--coverage", str(tmp_path / "absent.json")]) == 0
+
+
+def _yesterdays_pass(gmx_root: Path) -> None:
+    (gmx_root / "futures").mkdir(parents=True, exist_ok=True)
+    (gmx_root / "funding_coverage.json").write_text(
+        json.dumps(
+            {
+                "status": "PASS",
+                "refreshed": True,
+                "generated_at": "2026-10-17T02:20:00+00:00",
+                "reasons": [],
+                "pairs": {"BTC": {"tail": "CURRENT"}},
+            }
+        )
+    )
+
+
+def test_gate_crash_replaces_a_stale_pass_with_a_withheld_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from gmx_historical_data import funding_release
+
+    env_file = tmp_path / "github_env"
+    monkeypatch.setenv("GITHUB_ENV", str(env_file))
+    gmx_root = tmp_path / "gmx"
+    _yesterdays_pass(gmx_root)
+    companion = gmx_root / "futures" / "BTC_USDC_USDC-1h-funding_rate.feather"
+    companion.write_bytes(b"previous release's file")
+    report = tmp_path / "data_report.txt"
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("kaput")
+
+    monkeypatch.setattr(funding_release, "run_gate", boom)
+    rc = cli.main(
+        [
+            "gate",
+            "--gmx-root",
+            str(gmx_root),
+            "--stage-dir",
+            str(tmp_path / "stage"),
+            "--state",
+            "ready",
+            "--extract-outcome",
+            "success",
+            "--run-start",
+            "2026-10-18T02:20:00+00:00",
+            "--report",
+            str(report),
+        ]
+    )
+
+    assert rc != 0
+    verdict = json.loads((gmx_root / "funding_coverage.json").read_text())
+    assert verdict["status"] == "WITHHELD" and verdict["refreshed"] is False
+    assert verdict["generated_at"] == "2026-10-18T02:20:00+00:00"
+    assert any("kaput" in r for r in verdict["reasons"])
+    assert "NOT refreshed" in report.read_text()
+    assert companion.read_bytes() == b"previous release's file"
+    assert "FUNDING_GATE=fail" in env_file.read_text()
+
+
+def test_ensure_verdict_replaces_a_missing_or_stale_verdict(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / "github_env"
+    monkeypatch.setenv("GITHUB_ENV", str(env_file))
+    gmx_root = tmp_path / "gmx"
+    _yesterdays_pass(gmx_root)
+    report = tmp_path / "data_report.txt"
+    args = [
+        "ensure-verdict",
+        "--gmx-root",
+        str(gmx_root),
+        "--state",
+        "ready",
+        "--extract-outcome",
+        "success",
+        "--run-start",
+        "2026-10-18T02:20:00+00:00",
+        "--report",
+        str(report),
+    ]
+
+    # The gate exited 1 without producing a verdict (an uncaught exception).
+    assert cli.main([*args, "--exit-code", "1"]) == 0  # a current WITHHELD verdict is in place
+    verdict = json.loads((gmx_root / "funding_coverage.json").read_text())
+    assert verdict["status"] == "WITHHELD"
+    assert verdict["generated_at"] == "2026-10-18T02:20:00+00:00"
+    assert "exit 1" in " ".join(verdict["reasons"])
+    assert "FUNDING_GATE=fail" in env_file.read_text()
+    assert "NOT refreshed" in report.read_text()
+
+
+def test_ensure_verdict_trusts_a_verdict_this_run_wrote(tmp_path: Path, monkeypatch) -> None:
+    env_file = tmp_path / "github_env"
+    monkeypatch.setenv("GITHUB_ENV", str(env_file))
+    gmx_root = tmp_path / "gmx"
+    gmx_root.mkdir()
+    run_start = "2026-10-18T02:20:00+00:00"
+    (gmx_root / "funding_coverage.json").write_text(
+        json.dumps({"status": "PASS", "refreshed": True, "generated_at": run_start, "reasons": []})
+    )
+
+    rc = cli.main(
+        [
+            "ensure-verdict",
+            "--gmx-root",
+            str(gmx_root),
+            "--state",
+            "ready",
+            "--extract-outcome",
+            "success",
+            "--run-start",
+            run_start,
+            "--exit-code",
+            "0",
+        ]
+    )
+
+    assert rc == 0
+    assert json.loads((gmx_root / "funding_coverage.json").read_text())["status"] == "PASS"
+    assert "FUNDING_GATE=pass" in env_file.read_text()
+
+
+def test_notes_without_any_verdict_say_funding_was_not_refreshed(tmp_path: Path, capsys) -> None:
+    assert cli.main(["notes", "--coverage", str(tmp_path / "absent.json")]) == 0
+    assert "NOT refreshed" in capsys.readouterr().out
