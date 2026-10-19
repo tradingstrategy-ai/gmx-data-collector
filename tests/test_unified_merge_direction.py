@@ -198,8 +198,10 @@ def test_merge_ignores_legacy_factor_companion_without_raw_backing(tmp_path):
     out = pl.read_parquet(sym_dir / "1h.parquet")
 
     assert out["source"].to_list() == ["datastore"]
-    assert out["funding_fee_long"].to_list() == [0.01]
-    assert out["funding_fee_short"].to_list() == [-0.01]
+    # The stored fee columns are never trusted: they are re-derived from the signed rate.
+    assert out["funding_fee_long"].to_list() == [-3.6e-6]
+    assert out["funding_fee_short"].to_list() == [3.6e-6]
+    assert out["longs_pay_shorts"].to_list() == [False]
 
 
 def test_merge_cli_accepts_makefile_block_range_flags():

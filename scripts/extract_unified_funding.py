@@ -72,6 +72,7 @@ from rich.console import Console
 from gmx_historical_data import datastore_tail
 from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_parquet
 from gmx_historical_data.cadence_gate import load_exempt_symbols
+from gmx_historical_data.datastore_signs import repair_datastore_file, resign_from_rate
 
 console = Console()
 
@@ -542,6 +543,67 @@ def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
     return merged.sort("timestamp")
 
 
+def _precedence() -> pl.Expr:
+    """Row preference: an event-derived HyperSync hour, a DataStore read, a carried gap fill."""
+    return (
+        pl.when((pl.col("source") == "hypersync") & ~pl.col("is_gap_filled"))
+        .then(0)
+        .when(pl.col("source") == "datastore")
+        .then(1)
+        .otherwise(2)
+    )
+
+
+def _resolve_hours(
+    unified: pl.DataFrame, existing: pl.DataFrame | None, symbol: str
+) -> pl.DataFrame:
+    """Pick one row per hour from the re-derived sources and the existing canonical file.
+
+    Precedence: an event-derived HyperSync hour, then a DataStore read (chain state at
+    the hour boundary), then a carried gap fill. Between equal precedence the
+    re-derived row wins. Existing rows at hours nothing else covers are kept (and a
+    per-symbol warning names the range); they are never dropped silently.
+
+    :param unified: Re-derived rows (``source`` and ``is_gap_filled`` present).
+    :param existing: The current canonical frame, or ``None``.
+    :param symbol: Symbol, for the warning.
+    :returns: One row per hour, sorted by ``timestamp``.
+    """
+    unified = unified.with_columns(pl.lit(0).alias("_existing"))
+    if existing is not None and not existing.is_empty():
+        old = existing
+        if "is_gap_filled" not in old.columns:
+            old = old.with_columns(pl.lit(False).alias("is_gap_filled"))
+        else:
+            old = old.with_columns(pl.col("is_gap_filled").fill_null(False))
+        if "source" not in old.columns:
+            old = old.with_columns(pl.lit("unknown").alias("source"))
+        # A canonical DataStore row written by the buggy merge has an inverted fee sign.
+        is_ds = pl.col("source") == "datastore"
+        old = pl.concat(
+            [resign_from_rate(old.filter(is_ds)), old.filter(~is_ds | is_ds.is_null())],
+            how="diagonal_relaxed",
+        )
+        old = old.with_columns(pl.lit(1).alias("_existing"))
+        kept_hours = old.join(unified.select("timestamp"), on="timestamp", how="anti")
+        if not kept_hours.is_empty():
+            first_new = unified.get_column("timestamp").min()
+            console.print(
+                f"  [yellow]{symbol}: raw coverage starts {first_new}; keeping "
+                f"{kept_hours.height} pre-coverage hours from canonical "
+                f"({kept_hours['timestamp'].min()} .. {kept_hours['timestamp'].max()})[/yellow]"
+            )
+        unified = pl.concat([unified, old], how="diagonal_relaxed")
+
+    return (
+        unified.with_columns(_precedence().alias("_precedence"))
+        .sort(["timestamp", "_precedence", "_existing"], maintain_order=True)
+        .unique(subset=["timestamp"], keep="first", maintain_order=True)
+        .drop("_precedence", "_existing")
+        .sort("timestamp")
+    )
+
+
 def merge_symbol(
     symbol: str,
     rates_dir: Path,
@@ -561,10 +623,13 @@ def merge_symbol(
     """
     frames = []
 
-    # --- Source 1: DataStore (pre-V2.2, signed, direction built-in) ---
+    # --- Source 1: DataStore (pre-V2.2, signed rate) ---
+    # Legacy files (pre-#69) carry an inverted ``funding_fee_long`` on negative-rate
+    # rows: fee and direction are re-derived from the signed rate, never read as stored.
     datastore_path = rates_dir / symbol / "1h_datastore.parquet"
     if datastore_path.exists():
-        ds_df = pl.read_parquet(datastore_path)
+        repair_datastore_file(datastore_path)
+        ds_df = resign_from_rate(pl.read_parquet(datastore_path))
         ds_df = ds_df.with_columns(pl.lit("datastore").alias("source"))
         frames.append(ds_df)
 
@@ -600,35 +665,27 @@ def merge_symbol(
     if "source" not in unified.columns:
         unified = unified.with_columns(pl.lit("unknown").alias("source"))
 
-    # One row per hour. Precedence: an event-derived HyperSync hour, then a
-    # DataStore read (chain state at the hour boundary), then a carried gap fill.
-    unified = unified.with_columns(
-        pl.when((pl.col("source") == "hypersync") & ~pl.col("is_gap_filled"))
-        .then(0)
-        .when(pl.col("source") == "datastore")
-        .then(1)
-        .otherwise(2)
-        .alias("_precedence")
-    )
-    unified = (
-        unified.sort(["timestamp", "_precedence"], maintain_order=True)
-        .unique(subset=["timestamp"], keep="first", maintain_order=True)
-        .drop("_precedence")
-    )
-    unified = unified.sort("timestamp")
-
     # Write unified output
     ext = "feather" if output_format == "feather" else "parquet"
     unified_path = rates_dir / symbol / f"1h.{ext}"
     unified_path.parent.mkdir(parents=True, exist_ok=True)
+    existing = None
     if unified_path.exists():
         existing = (
             pl.read_ipc(unified_path)
             if output_format == "feather"
             else pl.read_parquet(unified_path)
         )
-        if existing.equals(unified):
-            return len(unified)
+
+    # A rebuild never shrinks history. The raw event store can be truncated (it may start
+    # long after the canonical series does), and a polluted companion is discarded, so
+    # the hours the sources above no longer cover are kept from the existing canonical
+    # file, provenance intact, and compete with the re-derived rows under the same
+    # precedence (a tie goes to the re-derived row).
+    unified = _resolve_hours(unified, existing, symbol)
+
+    if existing is not None and existing.equals(unified):
+        return len(unified)
     if output_format == "feather":
         atomic_write_ipc(unified, unified_path)
     else:
@@ -647,7 +704,8 @@ def merge_unified_rates(
 
     For each symbol:
 
-    1. Read ``rates/{SYM}/1h_datastore.parquet`` (pre-V2.2, already signed)
+    1. Read ``rates/{SYM}/1h_datastore.parquet`` (pre-V2.2, signed rate; fee and
+       direction columns are re-derived from it, legacy files repaired in place)
     2. Read ``rates/{SYM}/1h_factor.parquet`` (V2.2+, unsigned)
     3. Read ``direction/{SYM}/1h.parquet`` (direction from fee-per-size)
     4. Correct V2.2+ direction using fee-per-size data

@@ -34,6 +34,7 @@ from gmx_historical_data.atomic_parquet import (
     atomic_write_parquet,
     is_fatal_environment_error,
 )
+from gmx_historical_data.datastore_signs import resign_from_rate
 from gmx_historical_data.ohlcv_density import merge_ohlcv_preferring_dense
 from gmx_historical_data.ohlcv_validation import (
     CadenceBreak,
@@ -1279,6 +1280,9 @@ class FreqtradeExporter:
         df = pl.read_parquet(path)
         if df.is_empty():
             return None
+        if timeframe.endswith(DATASTORE_VARIANT_SUFFIX):
+            # Legacy (pre-#69) files hold an inverted fee sign on negative rows.
+            df = resign_from_rate(df)
         return df
 
     # ------------------------------------------------------------------
