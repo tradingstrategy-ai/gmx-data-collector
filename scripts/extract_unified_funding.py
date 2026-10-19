@@ -555,53 +555,65 @@ def _precedence() -> pl.Expr:
 
 
 def _resolve_hours(
-    unified: pl.DataFrame, existing: pl.DataFrame | None, symbol: str
+    unified: pl.DataFrame | None,
+    existing: pl.DataFrame | None,
+    symbol: str,
+    raw_window: tuple[datetime, datetime] | None = None,
 ) -> pl.DataFrame:
     """Pick one row per hour from the re-derived sources and the existing canonical file.
 
-    Precedence: an event-derived HyperSync hour, then a DataStore read (chain state at
-    the hour boundary), then a carried gap fill. Between equal precedence the
-    re-derived row wins. Existing rows at hours nothing else covers are kept (and a
-    per-symbol warning names the range); they are never dropped silently.
+    Among re-derived rows: an event-derived HyperSync hour, then a DataStore read (chain
+    state at the hour boundary), then a carried gap fill. Existing canonical rows never
+    compete with fresh sources: every one inside the raw coverage window, or at an hour a
+    fresh DataStore read covers, is obsolete and dropped. Only hours outside the coverage
+    of the fresh sources (history before a truncated raw store, genuinely uncovered hours)
+    are kept, provenance intact, with a per-symbol warning. DataStore rows among them
+    are re-signed from their rate.
 
-    :param unified: Re-derived rows (``source`` and ``is_gap_filled`` present).
+    :param unified: Re-derived rows (``source`` and ``is_gap_filled`` present), or ``None``.
     :param existing: The current canonical frame, or ``None``.
     :param symbol: Symbol, for the warning.
+    :param raw_window: First and last hour the raw-derived factor rows cover.
     :returns: One row per hour, sorted by ``timestamp``.
     """
-    unified = unified.with_columns(pl.lit(0).alias("_existing"))
-    if existing is not None and not existing.is_empty():
-        old = existing
-        if "is_gap_filled" not in old.columns:
-            old = old.with_columns(pl.lit(False).alias("is_gap_filled"))
-        else:
-            old = old.with_columns(pl.col("is_gap_filled").fill_null(False))
-        if "source" not in old.columns:
-            old = old.with_columns(pl.lit("unknown").alias("source"))
-        # A canonical DataStore row written by the buggy merge has an inverted fee sign.
-        is_ds = pl.col("source") == "datastore"
-        old = pl.concat(
-            [resign_from_rate(old.filter(is_ds)), old.filter(~is_ds | is_ds.is_null())],
-            how="diagonal_relaxed",
+    if unified is not None:
+        unified = (
+            unified.with_columns(_precedence().alias("_precedence"))
+            .sort(["timestamp", "_precedence"], maintain_order=True)
+            .unique(subset=["timestamp"], keep="first", maintain_order=True)
+            .drop("_precedence")
         )
-        old = old.with_columns(pl.lit(1).alias("_existing"))
-        kept_hours = old.join(unified.select("timestamp"), on="timestamp", how="anti")
-        if not kept_hours.is_empty():
-            first_new = unified.get_column("timestamp").min()
-            console.print(
-                f"  [yellow]{symbol}: raw coverage starts {first_new}; keeping "
-                f"{kept_hours.height} pre-coverage hours from canonical "
-                f"({kept_hours['timestamp'].min()} .. {kept_hours['timestamp'].max()})[/yellow]"
-            )
-        unified = pl.concat([unified, old], how="diagonal_relaxed")
+    if existing is None or existing.is_empty():
+        return existing if unified is None else unified.sort("timestamp")
 
-    return (
-        unified.with_columns(_precedence().alias("_precedence"))
-        .sort(["timestamp", "_precedence", "_existing"], maintain_order=True)
-        .unique(subset=["timestamp"], keep="first", maintain_order=True)
-        .drop("_precedence", "_existing")
-        .sort("timestamp")
+    old = existing
+    if "is_gap_filled" not in old.columns:
+        old = old.with_columns(pl.lit(False).alias("is_gap_filled"))
+    else:
+        old = old.with_columns(pl.col("is_gap_filled").fill_null(False))
+    if "source" not in old.columns:
+        old = old.with_columns(pl.lit("unknown").alias("source"))
+    # A canonical DataStore row written by the buggy merge has an inverted fee sign.
+    is_ds = pl.col("source") == "datastore"
+    old = pl.concat(
+        [resign_from_rate(old.filter(is_ds)), old.filter(~is_ds | is_ds.is_null())],
+        how="diagonal_relaxed",
     )
+    if unified is None:
+        return old.sort("timestamp")
+
+    obsolete = pl.col("timestamp").is_in(unified["timestamp"].implode())
+    if raw_window is not None:
+        obsolete = obsolete | pl.col("timestamp").is_between(*raw_window)
+    kept = old.filter(~obsolete)
+    if not kept.is_empty():
+        first_new = raw_window[0] if raw_window else unified["timestamp"].min()
+        console.print(
+            f"  [yellow]{symbol}: raw coverage starts {first_new}; keeping "
+            f"{kept.height} pre-coverage hours from canonical "
+            f"({kept['timestamp'].min()} .. {kept['timestamp'].max()})[/yellow]"
+        )
+    return pl.concat([unified, kept], how="diagonal_relaxed").sort("timestamp")
 
 
 def merge_symbol(
@@ -622,6 +634,7 @@ def merge_symbol(
     :returns: Number of rows in the unified output, or ``None`` if no data.
     """
     frames = []
+    raw_window = None
 
     # --- Source 1: DataStore (pre-V2.2, signed rate) ---
     # Legacy files (pre-#69) carry an inverted ``funding_fee_long`` on negative-rate
@@ -642,6 +655,8 @@ def merge_symbol(
         # DataStore rows. Never reinterpret them as unsigned factor input.
         if "source" not in hs_df.columns:
             hs_df = forward_fill_hourly_grid(hs_df)
+            if not hs_df.is_empty():
+                raw_window = (hs_df["timestamp"].min(), hs_df["timestamp"].max())
 
             # --- Source 3: Direction correction (forward-filled, see helper) ---
             direction_path = direction_dir / symbol / "1h.parquet"
@@ -651,24 +666,21 @@ def merge_symbol(
             hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
             frames.append(hs_df)
 
-    if not frames:
-        return None
-
     # Concatenate with schema alignment
-    unified = pl.concat(frames, how="diagonal_relaxed")
+    unified = pl.concat(frames, how="diagonal_relaxed") if frames else None
 
     # Older DataStore files lack provenance columns; make their meaning explicit.
-    if "is_gap_filled" not in unified.columns:
-        unified = unified.with_columns(pl.lit(False).alias("is_gap_filled"))
-    else:
-        unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
-    if "source" not in unified.columns:
-        unified = unified.with_columns(pl.lit("unknown").alias("source"))
+    if unified is not None:
+        if "is_gap_filled" not in unified.columns:
+            unified = unified.with_columns(pl.lit(False).alias("is_gap_filled"))
+        else:
+            unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
+        if "source" not in unified.columns:
+            unified = unified.with_columns(pl.lit("unknown").alias("source"))
 
     # Write unified output
     ext = "feather" if output_format == "feather" else "parquet"
     unified_path = rates_dir / symbol / f"1h.{ext}"
-    unified_path.parent.mkdir(parents=True, exist_ok=True)
     existing = None
     if unified_path.exists():
         existing = (
@@ -676,13 +688,15 @@ def merge_symbol(
             if output_format == "feather"
             else pl.read_parquet(unified_path)
         )
+    if unified is None and existing is None:
+        return None
+    unified_path.parent.mkdir(parents=True, exist_ok=True)
 
     # A rebuild never shrinks history. The raw event store can be truncated (it may start
     # long after the canonical series does), and a polluted companion is discarded, so
-    # the hours the sources above no longer cover are kept from the existing canonical
-    # file, provenance intact, and compete with the re-derived rows under the same
-    # precedence (a tie goes to the re-derived row).
-    unified = _resolve_hours(unified, existing, symbol)
+    # the hours the fresh sources above do not cover are kept from the existing canonical
+    # file, provenance intact. Existing rows inside fresh coverage are obsolete and dropped.
+    unified = _resolve_hours(unified, existing, symbol, raw_window)
 
     if existing is not None and existing.equals(unified):
         return len(unified)

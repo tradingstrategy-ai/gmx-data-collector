@@ -147,3 +147,77 @@ def test_history_never_shrinks_when_a_source_disappears(tmp_path):
     out = pl.read_parquet(rates / "1h.parquet")
 
     assert out.height == canonical.height
+
+
+def test_old_canonical_rows_inside_raw_coverage_never_outrank_fresh_rows(tmp_path):
+    """Raw at 00:00 and 02:00 rebuilds the 01:00 carry; a stale 01:00 row must not win."""
+    rates = tmp_path / "rates" / "ETH"
+    rates.mkdir(parents=True)
+    stale = _canonical(1, 7e-9).filter(pl.col("timestamp") < DAY0 + timedelta(hours=3))
+    stale = stale.with_columns(pl.col("is_gap_filled").and_(pl.lit(False)))
+    stale.write_parquet(rates / "1h.parquet")
+    _factor.save_raw_per_symbol(
+        [_rec(1, DAY0, 2e-9), _rec(2, DAY0 + timedelta(hours=2), 2e-9)], tmp_path
+    )
+
+    out = _resume(tmp_path)
+
+    assert out["timestamp"].to_list() == [DAY0 + timedelta(hours=h) for h in range(3)]
+    assert out["funding_rate"].to_list() == [2e-9] * 3
+
+
+def test_fresh_datastore_read_replaces_old_canonical_row_at_the_same_hour(tmp_path):
+    rates = tmp_path / "rates" / "ETH"
+    rates.mkdir(parents=True)
+    _canonical(1, 7e-9).write_parquet(rates / "1h.parquet")
+    pl.DataFrame(
+        {
+            "timestamp": [DAY0],
+            "funding_rate": [-4e-10],
+            "funding_rate_hourly": [-4e-10 * 3600],
+            "symbol": ["ETH"],
+            "market": ["0xm"],
+        },
+        schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+    ).write_parquet(rates / "1h_datastore.parquet")
+
+    _unified.merge_symbol("ETH", tmp_path / "rates", tmp_path / "direction")
+    out = pl.read_parquet(rates / "1h.parquet").sort("timestamp")
+
+    assert out.height == 24
+    assert out["source"][0] == "datastore"
+    assert out["funding_rate"][0] == -4e-10
+
+
+def test_canonical_datastore_signs_are_repaired_without_any_companion(tmp_path):
+    rates = tmp_path / "rates" / "ETH"
+    rates.mkdir(parents=True)
+    legacy = pl.DataFrame(
+        {
+            "timestamp": [DAY0, DAY0 + timedelta(hours=1)],
+            "funding_rate_hourly": [-2e-6, 1e-6],
+            "funding_fee_long": [2e-6, 1e-6],
+            "funding_fee_short": [-2e-6, -1e-6],
+            "longs_pay_shorts": [True, True],
+            "source": ["datastore", "datastore"],
+            "is_gap_filled": [False, False],
+        },
+        schema_overrides={"timestamp": pl.Datetime("ns", "UTC")},
+    )
+    path = rates / "1h.parquet"
+    legacy.write_parquet(path)
+
+    assert _unified.merge_symbol("ETH", tmp_path / "rates", tmp_path / "direction") == 2
+    out = pl.read_parquet(path).sort("timestamp")
+    assert out["funding_fee_long"].to_list() == [-2e-6, 1e-6]
+    assert out["funding_fee_short"].to_list() == [2e-6, -1e-6]
+    assert out["longs_pay_shorts"].to_list() == [False, True]
+
+    content = path.read_bytes()
+    _unified.merge_symbol("ETH", tmp_path / "rates", tmp_path / "direction")
+    assert path.read_bytes() == content
+
+
+def test_no_sources_and_no_canonical_still_returns_none(tmp_path):
+    (tmp_path / "rates" / "ETH").mkdir(parents=True)
+    assert _unified.merge_symbol("ETH", tmp_path / "rates", tmp_path / "direction") is None
