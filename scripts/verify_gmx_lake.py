@@ -15,7 +15,7 @@ from pathlib import Path
 
 import polars as pl
 
-CHECKS = {"G1a", "G1b", "G1c", "G1d", "G1e", "G1f", "G2", "G3", "G4"}
+CHECKS = {"G1a", "G1b", "G1c", "G1d", "G1e", "G1f", "G1g", "G2", "G3", "G4"}
 TF_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
 
 
@@ -72,6 +72,15 @@ def checkpoint_dt(value):
         return datetime.fromtimestamp(value, UTC)
     stamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+
+
+def _sign(value):
+    number = float(value)
+    if number > 0:
+        return 1
+    if number < 0:
+        return -1
+    return 0
 
 
 def issue(out, check, symbol, message, failed=True):
@@ -223,6 +232,64 @@ def run(
                     name.removesuffix("_checkpoint.json"),
                     "checkpoint missing or unreadable",
                 )
+    if "G1g" in checks:
+        symbols = sorted(
+            {p.parent.name for p in rates.glob("*/1h_datastore.parquet")}
+            | {p.parent.name for p in canonical}
+        )
+        for sym in symbols:
+            checked_rows = fee_mismatches = direction_mismatches = 0
+            sources = (
+                (rates / sym / "1h_datastore.parquet", False),
+                (rates / sym / "1h.parquet", True),
+            )
+            for path, canonical_file in sources:
+                if not path.is_file():
+                    continue
+                source_frame = read(path)
+                if source_frame is None:
+                    continue
+                if "source" in source_frame.columns:
+                    source_frame = source_frame.filter(pl.col("source") == "datastore")
+                elif canonical_file:
+                    continue
+                rate_column = next(
+                    (
+                        c
+                        for c in ("funding_rate_hourly", "funding_rate")
+                        if c in source_frame.columns
+                    ),
+                    None,
+                )
+                if rate_column is None or "funding_fee_long" not in source_frame.columns:
+                    if source_frame.height:
+                        issue(
+                            out, "G1g", sym, f"{path.name} lacks rate or funding_fee_long columns"
+                        )
+                    continue
+                rate_values = source_frame[rate_column].to_list()
+                fees = source_frame["funding_fee_long"].to_list()
+                directions = (
+                    source_frame["longs_pay_shorts"].to_list()
+                    if "longs_pay_shorts" in source_frame.columns
+                    else [None] * source_frame.height
+                )
+                for rate_value, fee_value, direction in zip(rate_values, fees, directions):
+                    if rate_value is None:
+                        continue
+                    checked_rows += 1
+                    rate_sign = _sign(rate_value)
+                    if fee_value is None or _sign(fee_value) != rate_sign:
+                        fee_mismatches += 1
+                    if rate_sign and direction is not (rate_sign > 0):
+                        direction_mismatches += 1
+            issue(
+                out,
+                "G1g",
+                sym,
+                f"datastore rows={checked_rows}; fee/rate sign mismatches={fee_mismatches}; direction/rate sign mismatches={direction_mismatches}",
+                failed=bool(fee_mismatches or direction_mismatches),
+            )
     if "G2" in checks:
         try:
             from gmx_historical_data.funding_release import companion_dir, stage_companions
@@ -386,7 +453,7 @@ def main(argv=None):
             findings = [Finding("G0", "-", str(e))]
     for item in findings:
         print(
-            f"VERIFY_LAKE: {'STALE' if not item.failed and item.check == 'G2' else 'FAIL'} {item.check} {item.symbol} {item.message}"
+            f"VERIFY_LAKE: {'FAIL' if item.failed else 'STALE' if item.check == 'G2' else 'OK'} {item.check} {item.symbol} {item.message}"
         )
     failed = any(f.failed for f in findings)
     print(f"VERIFY_LAKE: {'FAIL' if failed else 'OK'} {len(findings)} findings")

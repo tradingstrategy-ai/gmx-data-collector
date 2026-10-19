@@ -75,6 +75,49 @@ def test_daily_job_can_configure_checkpoint_and_tail_status_ages(tmp_path):
     assert daily == []
 
 
+def test_datastore_fee_and_direction_signs_are_counted_per_symbol(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    rates = root / "funding/arbitrum/rates/BTC"
+    hours = [now - timedelta(hours=i) for i in (3, 2, 1)]
+    pl.DataFrame(
+        {
+            "timestamp": hours[:2],
+            "funding_rate_hourly": [0.1, -0.1],
+            "funding_fee_long": [1.0, 2.0],  # second row should be negative
+            "longs_pay_shorts": [True, False],
+        }
+    ).write_parquet(rates / "1h_datastore.parquet")
+    pl.DataFrame(
+        {
+            "timestamp": hours,
+            "source": ["datastore", "hypersync", "datastore"],
+            "funding_rate_hourly": [0.1, 0.2, -0.1],
+            "funding_fee_long": [1.0, 0.2, -1.0],
+            "longs_pay_shorts": [False, True, False],  # first row disagrees
+        }
+    ).write_parquet(rates / "1h.parquet")
+
+    findings = run(root, {"G1g"}, now, 0.05, 3, False)
+    assert len(findings) == 1
+    assert findings[0].symbol == "BTC" and findings[0].failed
+    assert "datastore rows=4" in findings[0].message
+    assert "fee/rate sign mismatches=1" in findings[0].message
+    assert "direction/rate sign mismatches=1" in findings[0].message
+
+    datastore = pl.read_parquet(rates / "1h_datastore.parquet").with_columns(
+        pl.Series("funding_fee_long", [1.0, -2.0])
+    )
+    datastore.write_parquet(rates / "1h_datastore.parquet")
+    canonical = pl.read_parquet(rates / "1h.parquet").with_columns(
+        pl.Series("longs_pay_shorts", [True, True, False])
+    )
+    canonical.write_parquet(rates / "1h.parquet")
+    passing = run(root, {"G1g"}, now, 0.05, 3, False)
+    assert len(passing) == 1 and not passing[0].failed
+    assert "fee/rate sign mismatches=0" in passing[0].message
+
+
 def test_listing_grace_exempts_new_active_market_without_funding(tmp_path):
     now = datetime.now(UTC)
     root = fixture_lake(tmp_path, now)
