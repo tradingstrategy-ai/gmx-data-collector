@@ -311,3 +311,64 @@ def test_a_recent_rejected_hour_still_blocks(tmp_path: Path) -> None:
     funding_release.stage_companions(gmx_root, tmp_path / "stage")
 
     assert _gate(gmx_root, tmp_path / "stage")["status"] == "WITHHELD"
+
+
+def _write_snapshot(gmx_root: Path, name: str, rows: list[tuple[str, str]]) -> None:
+    snapshots = gmx_root / "snapshots"
+    snapshots.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(
+        {"symbol": [r[0] for r in rows], "listing_date": [r[1] for r in rows]}
+    ).write_parquet(snapshots / f"{name}.parquet")
+
+
+def test_load_listing_dates_takes_the_earliest_market_per_symbol(tmp_path: Path) -> None:
+    gmx_root = tmp_path / "gmx"
+    _write_snapshot(gmx_root, "2026-10-17", [("ZEC", "2020-01-01")])  # older snapshot: ignored
+    _write_snapshot(
+        gmx_root,
+        "2026-10-18",
+        [
+            ("ZEC", "2026-10-16T00:00:00Z"),  # the USDG market
+            ("zec", "2025-12-22"),
+            ("", "2025-01-01"),  # swap-only pool
+            ("BAD", "not-a-date"),
+            ("EMPTY", ""),
+        ],
+    )
+    assert funding_release.load_listing_dates(gmx_root / "snapshots") == {
+        "ZEC": datetime(2025, 12, 22, tzinfo=UTC)
+    }
+    assert funding_release.load_listing_dates(tmp_path / "nowhere") == {}
+
+
+def test_gate_bounds_funding_start_by_the_snapshot_listing_date(tmp_path: Path) -> None:
+    gmx_root = _lake(tmp_path, symbols=("BTC",))
+    futures = gmx_root / "futures"
+    listed = datetime(2026, 1, 9, tzinfo=UTC)
+    # Candles pre-date the listing by five weeks; funding starts at the listing.
+    start = datetime(2025, 12, 3, tzinfo=UTC)
+    n = int((CUTOFF - start) / HOUR) + 1
+    write_futures(futures, "AR", start, n)
+    _write_rates(gmx_root, "AR", CUTOFF, start=listed + timedelta(hours=10))
+    _write_snapshot(gmx_root, "2026-10-18", [("AR", "2026-01-09"), ("BTC", "2020-01-01")])
+    funding_release.stage_companions(gmx_root, tmp_path / "stage")
+
+    coverage = _gate(gmx_root, tmp_path / "stage")
+
+    assert coverage["status"] == "PASS", coverage["reasons"]
+    assert coverage["pairs"]["AR"]["listing_date"] == listed.isoformat()
+    assert coverage["pairs"]["BTC"]["listing_date"] == "2020-01-01T00:00:00+00:00"
+
+
+def test_gate_without_a_snapshot_falls_back_to_the_first_futures_bar(tmp_path: Path) -> None:
+    gmx_root = _lake(tmp_path, symbols=("BTC",))
+    start = datetime(2025, 12, 3, tzinfo=UTC)
+    write_futures(gmx_root / "futures", "AR", start, int((CUTOFF - start) / HOUR) + 1)
+    _write_rates(gmx_root, "AR", CUTOFF, start=datetime(2026, 1, 9, 10, tzinfo=UTC))
+    funding_release.stage_companions(gmx_root, tmp_path / "stage")
+
+    coverage = _gate(gmx_root, tmp_path / "stage")
+
+    assert coverage["status"] != "PASS"
+    assert any("B2" in r and "first futures bar 2025-12-03" in r for r in coverage["reasons"])
+    assert coverage["pairs"]["AR"]["listing_date"] is None

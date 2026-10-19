@@ -156,6 +156,95 @@ def test_funding_that_starts_long_after_listing_blocks(tmp_path: Path) -> None:
     assert "B2" in codes(by_symbol(report)["LATE"])
 
 
+def test_funding_starting_at_the_listing_date_passes_despite_earlier_candles(
+    tmp_path: Path,
+) -> None:
+    # AR-like: GMX's price API serves candles from before the market is listed.
+    lake = Lake(tmp_path)
+    listed = datetime(2026, 1, 9, tzinfo=UTC)
+    lake.pair(
+        "AR",
+        futures_start=datetime(2025, 12, 3, tzinfo=UTC),
+        funding_start=datetime(2026, 1, 9, 10, tzinfo=UTC),
+    )
+    assert "B2" in codes(by_symbol(lake.assess())["AR"])  # the first-candle bound alone fails
+    pair = by_symbol(lake.assess(listing_dates={"AR": listed}))["AR"]
+    assert pair.blockers == ()
+    assert pair.listing_date == listed
+
+
+def test_funding_within_grace_of_a_recent_listing_passes(tmp_path: Path) -> None:
+    # QQQ-like: listed 2026-08-21, funding from 2026-08-25 09:00 (inside the 7d grace).
+    lake = Lake(tmp_path)
+    listed = datetime(2026, 8, 21, tzinfo=UTC)
+    lake.pair(
+        "QQQ",
+        futures_start=datetime(2026, 8, 1, tzinfo=UTC),
+        funding_start=datetime(2026, 8, 25, 9, tzinfo=UTC),
+    )
+    report = lake.assess(listing_dates={"QQQ": listed})
+    assert report.passed, report.reasons
+
+
+def test_funding_late_after_the_listing_date_still_blocks(tmp_path: Path) -> None:
+    lake = Lake(tmp_path)
+    listed = datetime(2026, 8, 1, tzinfo=UTC)
+    lake.pair(
+        "LATE",
+        futures_start=datetime(2026, 7, 1, tzinfo=UTC),
+        funding_start=listed + timedelta(days=7, hours=1),
+    )
+    pair = by_symbol(lake.assess(listing_dates={"LATE": listed}))["LATE"]
+    assert "B2" in codes(pair)
+    assert "listing date 2026-08-01" in " ".join(pair.blockers)
+
+
+def test_without_a_listing_date_the_first_futures_bar_is_the_bound(tmp_path: Path) -> None:
+    lake = Lake(tmp_path)
+    start = datetime(2026, 8, 1, tzinfo=UTC)
+    lake.pair("NOLIST", futures_start=start, funding_start=start + timedelta(days=20))
+    # Unrelated and unparseable-empty entries do not leak into this pair.
+    pair = by_symbol(lake.assess(listing_dates={"OTHER": datetime(2026, 8, 20, tzinfo=UTC)}))[
+        "NOLIST"
+    ]
+    assert "B2" in codes(pair)
+    assert pair.listing_date is None
+    assert "first futures bar" in " ".join(pair.blockers)
+
+
+def test_listing_symbols_match_case_insensitively(tmp_path: Path) -> None:
+    lake = Lake(tmp_path)
+    listed = datetime(2026, 1, 9, tzinfo=UTC)
+    lake.pair(
+        "kPEPE",
+        futures_start=datetime(2025, 12, 3, tzinfo=UTC),
+        funding_start=datetime(2026, 1, 9, 10, tzinfo=UTC),
+    )
+    assert lake.assess(listing_dates={"KPEPE": listed}).passed
+
+
+def test_a_listing_date_before_the_epoch_is_bounded_by_the_epoch(tmp_path: Path) -> None:
+    lake = Lake(tmp_path)
+    lake.pair(
+        "OLD",
+        futures_start=datetime(2024, 1, 1, tzinfo=UTC),
+        funding_start=FUNDING_EPOCH + timedelta(days=8),
+    )
+    pair = by_symbol(lake.assess(listing_dates={"OLD": datetime(2024, 1, 1, tzinfo=UTC)}))["OLD"]
+    assert "B2" in codes(pair)
+
+
+def test_listing_date_governs_the_recently_listed_grace(tmp_path: Path) -> None:
+    # Old candles, but GMX listed the market 3 days ago and no funding exists yet.
+    lake = Lake(tmp_path)
+    lake.pair("BTC")
+    lake.pair("NEW", futures_start=CUTOFF - timedelta(days=30), funding_end=None)
+    assert "B1" in codes(by_symbol(lake.assess())["NEW"])
+    report = lake.assess(listing_dates={"NEW": CUTOFF - timedelta(days=3)})
+    assert report.passed, report.reasons
+    assert by_symbol(report)["NEW"].pending
+
+
 def test_funding_may_start_at_the_epoch_for_older_listings(tmp_path: Path) -> None:
     lake = Lake(tmp_path)
     lake.pair("BTC", futures_start=datetime(2023, 1, 1, tzinfo=UTC))

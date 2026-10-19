@@ -234,6 +234,44 @@ def _iso(value: datetime | None) -> str | None:
     return None if value is None else value.isoformat()
 
 
+def load_listing_dates(snapshots_dir: Path) -> dict[str, datetime]:
+    """Earliest GMX ``listingDate`` per index symbol, from the newest market snapshot.
+
+    ``snapshots/{date}.parquet`` (``collect_daily_snapshot``) has one row per
+    market, so a symbol with several markets (alt-collateral variants) keeps its
+    earliest listing. Best effort: no usable snapshot, or an unparseable date,
+    yields fewer entries, and the gate then falls back to the first futures bar.
+
+    :param snapshots_dir: ``user_data/data/gmx/snapshots``.
+    :returns: Upper-case symbol -> UTC listing date.
+    """
+    listings: dict[str, datetime] = {}
+    for path in sorted(snapshots_dir.glob("*.parquet"), reverse=True):
+        if path.name.startswith("._"):
+            continue
+        try:
+            frame = pl.read_parquet(path, columns=["symbol", "listing_date"])
+        except Exception:  # noqa: BLE001 - an unreadable snapshot just means "try the previous one"
+            continue
+        for symbol, raw in frame.iter_rows():
+            if not symbol or raw in (None, ""):
+                continue
+            try:
+                when = (
+                    datetime.fromtimestamp(float(raw), tz=UTC)
+                    if isinstance(raw, int | float)
+                    else datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                )
+            except (ValueError, OverflowError, OSError):
+                continue
+            when = when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
+            key = str(symbol).upper()
+            listings[key] = min(when, listings.get(key, when))
+        if listings:
+            break
+    return listings
+
+
 def _pair_json(pair: PairCoverage) -> dict[str, Any]:
     return {
         "tail": pair.tail.value if pair.tail else None,
@@ -254,6 +292,7 @@ def _pair_json(pair: PairCoverage) -> dict[str, Any]:
         "delisted": pair.delisted,
         "pending": pair.pending,
         "pre_epoch": pair.pre_epoch,
+        "listing_date": _iso(pair.listing_date),
         "blockers": list(pair.blockers),
     }
 
@@ -313,6 +352,7 @@ def run_gate(
             export_report=export_report,
             previous=previous,
             thresholds=thresholds,
+            listing_dates=load_listing_dates(gmx_root / "snapshots"),
         )
         passed, reasons = report.passed, report.reasons
         checkpoints, cutoff = dict(report.checkpoints), report.cutoff
