@@ -104,10 +104,9 @@ from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.hypersync_range import exclusive_end
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
+from gmx_historical_data.raw_schema import project_raw_columns, report_legacy_raw_columns
 
 console = Console()
-
-_LEGACY_RAW_COLUMNS_LOGGED: set[Path] = set()
 
 # Retry settings — HyperSync 500 errors can be persistent, use generous retries
 MAX_RETRIES = 15
@@ -805,29 +804,25 @@ def aggregate_hourly_rates(
 def normalize_raw_frame(
     frame: "pl.DataFrame", filepath: Path, record_type: type[FundingFactorRecord]
 ) -> "pl.DataFrame":
-    """Validate and project a raw frame onto its record's current schema."""
+    """Validate and project a raw frame onto its record's current schema.
+
+    :param frame: Raw event rows loaded from parquet.
+    :param filepath: Source parquet path, used in validation errors.
+    :param record_type: Record class that defines the current raw schema.
+    :returns: Raw rows projected onto the record schema, with timestamps as integers.
+    """
     expected = [field.name for field in fields(record_type)]
-    missing = sorted(set(expected) - set(frame.columns))
-    if missing:
-        raise ValueError(
-            f"Raw funding file {filepath} is missing required fields: {', '.join(missing)}"
-        )
-
-    extras = sorted(set(frame.columns) - set(expected))
-    if extras and filepath not in _LEGACY_RAW_COLUMNS_LOGGED:
-        console.print(
-            f"[yellow]Ignoring legacy raw columns {', '.join(extras)} in {filepath}[/yellow]"
-        )
-        _LEGACY_RAW_COLUMNS_LOGGED.add(filepath)
-
+    projected_columns = project_raw_columns(frame.columns, filepath, expected)
     try:
-        frame = frame.select(expected).with_columns(
+        frame = frame.select(projected_columns).with_columns(
             pl.col("block_timestamp").cast(pl.Int64, strict=True)
         )
     except Exception as exc:
         raise ValueError(f"Cannot read required funding fields from {filepath}: {exc}") from exc
-    if frame.filter(pl.col("block_timestamp") <= 0).height:
-        raise ValueError(f"Raw funding file {filepath} contains a non-positive block_timestamp")
+    if frame["block_timestamp"].null_count() or frame.filter(pl.col("block_timestamp") <= 0).height:
+        raise ValueError(
+            f"Raw funding file {filepath} contains a null or non-positive block_timestamp"
+        )
     return frame
 
 
@@ -840,6 +835,7 @@ def append_parquet(
 
     :param df: New data to append.
     :param filepath: Parquet file path.
+    :param raw_record_type: Optional raw record class used to validate and project an existing file.
     """
     filepath.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1347,6 +1343,8 @@ Examples:
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        report_legacy_raw_columns(console)
 
 
 if __name__ == "__main__":
