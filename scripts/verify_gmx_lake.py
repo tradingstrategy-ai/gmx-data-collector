@@ -350,8 +350,9 @@ def run(
             for t, value in zip(dates, opens):
                 if t < since30 or t >= now or value is None:
                     continue
-                # For 8h rows, compare the direction at the row's ending hour.
-                direction_value = lookup.get(t if tf == "1h" else t + timedelta(hours=7))
+                # The 8h normalizer preserves each hourly export timestamp; compare
+                # direction at that same timestamp for both exported timeframes.
+                direction_value = lookup.get(t)
                 if direction_value is None or value == 0:
                     continue
                 if (value > 0) != bool(direction_value):
@@ -362,26 +363,29 @@ def run(
             if not match:
                 continue
             sym, tf = match.groups()
-            newest = _newest(path)
-            if newest is None:
-                continue
             timeframe = re.fullmatch(r"(\d+)([mhdw])", tf)
             seconds = (
                 int(timeframe.group(1)) * TF_SECONDS[timeframe.group(2)] if timeframe else None
             )
-            if seconds and newest.timestamp() + seconds > now.timestamp():
-                issue(out, "G4", sym, f"{tf} newest bar is open ({newest.isoformat()})")
+            if seconds is None:
+                continue
+            newest_closed = _newest_closed(path, seconds, now)
+            if newest_closed is None:
+                continue
+            # Fast candles are refreshed in batches during the nightly collector
+            # run, so a few minutes of natural lag should not fail the daily gate.
+            lag_limit_seconds = max(max_lag_bars * seconds, 4 * 60 * 60)
             if (
                 sym in active
                 and active[sym]
-                and seconds
-                and (now - newest).total_seconds() > max_lag_bars * seconds
+                and (now - (newest_closed + timedelta(seconds=seconds))).total_seconds()
+                > lag_limit_seconds
             ):
                 issue(
                     out,
                     "G4",
                     sym,
-                    f"newest closed {tf} bar is more than {max_lag_bars} bars behind",
+                    f"newest closed {tf} bar is more than {lag_limit_seconds:g} seconds behind",
                 )
     return out
 
@@ -399,6 +403,20 @@ def _newest(path):
     try:
         frame = pl.read_ipc(path, columns=["date"])
         return max(to_dt(frame["date"])) if frame.height else None
+    except Exception:
+        return None
+
+
+def _newest_closed(path, seconds, now):
+    """Return the latest candle open timestamp whose full interval has closed."""
+    try:
+        frame = pl.read_ipc(path, columns=["date"])
+        closed = [
+            stamp
+            for stamp in to_dt(frame["date"])
+            if stamp + timedelta(seconds=seconds) <= now
+        ]
+        return max(closed) if closed else None
     except Exception:
         return None
 

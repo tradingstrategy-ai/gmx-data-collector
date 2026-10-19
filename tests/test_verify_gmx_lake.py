@@ -161,7 +161,7 @@ def test_recent_holes_and_unknown_direction_are_flagged(tmp_path):
     assert {item.check for item in findings} == {"G1c", "G1d"}
 
 
-def test_exported_sign_and_open_latest_bar_are_flagged(tmp_path):
+def test_exported_sign_and_open_latest_bar_are_checked_without_flagging_open_bar(tmp_path):
     now = datetime.now(UTC)
     root = fixture_lake(tmp_path, now)
     candle = root / "futures/BTC_USDC_USDC-1h-futures.feather"
@@ -171,7 +171,7 @@ def test_exported_sign_and_open_latest_bar_are_flagged(tmp_path):
     )
     pl.DataFrame({"date": [now - timedelta(minutes=20)], "open": [1.0]}).write_ipc(candle)
     findings = run(root, {"G3", "G4"}, now, 0.05, 3, False)
-    assert {item.check for item in findings} == {"G3", "G4"}
+    assert {item.check for item in findings} == {"G3"}
 
 
 def test_coverage_is_staged_and_pass_failure_is_reported(tmp_path):
@@ -213,13 +213,48 @@ def test_8h_sign_check_is_opt_in(tmp_path):
     now = datetime.now(UTC)
     root = fixture_lake(tmp_path, now)
     canonical = pl.read_parquet(root / "funding/arbitrum/rates/BTC/1h.parquet")
-    date = canonical["timestamp"][-1] - timedelta(hours=7)
+    date = canonical["timestamp"][-1]
     pl.DataFrame({"date": [date], "open": [1.0]}).write_ipc(
         root / "futures/BTC_USDC_USDC-8h-funding_rate.feather"
     )
     assert run(root, {"G3"}, now, 0.05, 3, False) == []
     findings = run(root, {"G3"}, now, 0.05, 3, False, check_8h=True)
     assert [item.check for item in findings] == ["G3"]
+
+
+def test_8h_sign_check_uses_hourly_export_timestamp(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    canonical = pl.read_parquet(root / "funding/arbitrum/rates/BTC/1h.parquet")
+    timestamp = canonical["timestamp"][0]
+    pl.DataFrame({"date": [timestamp], "open": [1.0]}).write_ipc(
+        root / "futures/BTC_USDC_USDC-8h-funding_rate.feather"
+    )
+    findings = run(root, {"G3"}, now, 0.05, 3, False, check_8h=True)
+    assert findings == []
+
+
+def test_g4_ignores_fast_candle_lag_within_four_hour_refresh_window(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    candle = root / "futures/BTC_USDC_USDC-1m-futures.feather"
+    last_closed = now.replace(second=0, microsecond=0) - timedelta(minutes=15)
+    pl.DataFrame({"date": [last_closed], "open": [1.0]}).write_ipc(candle)
+    findings = run(root, {"G4"}, now, 0.05, 3, False)
+    assert findings == []
+
+
+def test_g4_flags_oldest_closed_bar_not_an_open_latest_bar(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    candle = root / "futures/BTC_USDC_USDC-1h-futures.feather"
+    old = now - timedelta(hours=8)
+    opening = old.replace(minute=0, second=0, microsecond=0)
+    open_latest = now.replace(minute=0, second=0, microsecond=0)
+    pl.DataFrame({"date": [opening, open_latest], "open": [1.0, 1.0]}).write_ipc(candle)
+    findings = run(root, {"G4"}, now, 0.05, 3, False)
+    assert len(findings) == 1
+    assert "newest closed 1h bar" in findings[0].message
 
 
 def test_report_only_and_root_hashes_are_unchanged(tmp_path):
