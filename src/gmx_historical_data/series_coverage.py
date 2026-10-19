@@ -12,7 +12,9 @@ Verdict rules (``B`` = blocks the companions, ``T`` = classified and reported):
 ========  ==============================================================
 ``B0``    funding state is not ``ready`` (never seeded / restore failed)
 ``B1``    active pair has no funding file, or its export failed
-``B2``    funding starts more than the grace after ``max(listing, epoch)``
+``B2``    funding starts more than the grace after ``max(listing, epoch)``, where
+          ``listing`` is GMX's ``listingDate`` (the first futures candle only when
+          none is known: the price API serves candles from before a listing)
 ``B3``    hole, null/unknown-direction or unreconciled hour in the recent window
 ``B4``    pipeline did not reach head: extraction failed, a checkpoint is
           missing/behind, or the newest funding bar of the set is behind
@@ -84,7 +86,8 @@ class SeriesThresholds:
     :param active_candle_hours: A pair is *active* when its newest 1h candle is
         within this many hours of the run.
     :param listing_grace_days: How late after listing/epoch the first funding
-        bar may be; also how young a listing may be before missing funding blocks.
+        bar may be; also how young a listing may be before missing funding blocks
+        (the listing being GMX's ``listingDate``, else the first futures candle).
     :param recent_window_days: Holes inside this trailing window block; older
         holes are reported (a later run cannot repair them).
     :param head_lag_hours: How far behind the run the extraction checkpoints and
@@ -112,6 +115,7 @@ class PairCoverage:
     active: bool = False
     pending: bool = False
     pre_epoch: bool = False
+    listing_date: datetime | None = None
     funding_rows: int = 0
     first_bar: datetime | None = None
     last_bar: datetime | None = None
@@ -283,6 +287,7 @@ def assess_series_coverage(
     export_report: Mapping[str, Any] | None,
     previous: Mapping[str, Any] | None,
     thresholds: SeriesThresholds = SeriesThresholds(),  # noqa: B008 - frozen value object
+    listing_dates: Mapping[str, datetime] | None = None,
 ) -> SeriesCoverageReport:
     """Grade the staged funding and mark companions, pair by pair.
 
@@ -300,6 +305,9 @@ def assess_series_coverage(
     :param previous: The previous release's ``funding_coverage.json``, for the
         went-stale ratchet.
     :param thresholds: See :class:`SeriesThresholds`.
+    :param listing_dates: Earliest GMX ``listingDate`` per index symbol (any case).
+        It, not the first futures candle, bounds ``B2`` and the recently-listed
+        grace; a pair absent from it falls back to its first candle.
     :returns: A :class:`SeriesCoverageReport`.
     """
     now = _utc(now)
@@ -326,6 +334,7 @@ def assess_series_coverage(
     }
     source_hours = report.get("source_hours", {})
     prev_pairs = (previous or {}).get("pairs", {})
+    listings = {k.upper(): _utc(v) for k, v in (listing_dates or {}).items()}
 
     set_blockers: list[str] = []
     if state != "ready":
@@ -354,7 +363,9 @@ def assess_series_coverage(
         active = (not is_delisted) and last_candle >= now - timedelta(
             hours=thresholds.active_candle_hours
         )
-        pending = active and first_candle > cutoff - grace
+        listing = listings.get(symbol.upper())
+        listed_at = listing or first_candle
+        pending = active and listed_at > cutoff - grace
         blockers: list[str] = []
         if symbol in mark_failures:
             blockers.append(f"B5: mark export failed ({mark_failures[symbol]})")
@@ -385,6 +396,7 @@ def assess_series_coverage(
             active=active,
             pending=pending,
             pre_epoch=first_candle < FUNDING_EPOCH,
+            listing_date=listing,
             mark_rows=0 if mark is None else len(mark),
             futures_rows=len(candles),
             datastore_rows=ds_rows,
@@ -417,11 +429,18 @@ def assess_series_coverage(
         first_bar, last_bar = _bar(funding, 0), _bar(funding, -1)
         newest_active_bar = max(newest_active_bar or last_bar, last_bar)
 
-        if first_bar > max(first_candle, FUNDING_EPOCH) + grace:
+        funding_from = max(listed_at, FUNDING_EPOCH)
+        if first_bar > funding_from + grace:
+            if listed_at < FUNDING_EPOCH:
+                origin = f"funding epoch {FUNDING_EPOCH:%Y-%m-%d}"
+            elif listing is not None:
+                origin = f"listing date {listing:%Y-%m-%d}"
+            else:
+                origin = f"first futures bar {first_candle:%Y-%m-%d}"
             blockers.append(
                 f"B2: funding starts {first_bar:%Y-%m-%d %H:%M}, more than "
                 f"{thresholds.listing_grace_days:g}d after "
-                f"{max(first_candle, FUNDING_EPOCH):%Y-%m-%d %H:%M}"
+                f"{funding_from:%Y-%m-%d %H:%M} ({origin})"
             )
 
         holes = _missing_hours(funding)
