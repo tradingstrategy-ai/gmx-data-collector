@@ -78,10 +78,10 @@ def test_existing_steps_are_untouched() -> None:
     """Another change edits Report/upload; this one adds only inputs and steps."""
     extract = _step("Extract funding to chain head")
     assert extract["timeout-minutes"] == 330 and extract["continue-on-error"] is True
-    report = _step("Report catch-up")
-    assert report["if"] == "always()" and report["id"] == "catchup_report"
+    assert _step("Report catch-up")["if"] == "always()"
+    # Upload decides "advanced" with has_advanced(), which also counts backfill progress.
     upload = _step("Upload advanced funding state")
-    assert "steps.catchup_report.outputs.advanced == 'true'" in upload["if"]
+    assert "always()" in upload["if"] and "has_advanced" in upload["run"]
 
 
 # ---------------------------------------------------------------------------
