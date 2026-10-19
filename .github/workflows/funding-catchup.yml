@@ -1,0 +1,145 @@
+name: Funding Catch-up
+
+# Dispatch-only. The daily release extracts funding under a 15-minute cap, which
+# cannot close a months-long gap while HyperSync throttles (#56). This job runs the
+# same `--resume` extraction for up to ~5.5 hours and saves whatever it got through
+# as a new funding state asset, so the next daily release starts from there. It
+# touches neither the consumer bundles nor the release notes: the next release_data
+# run exports and gates as usual. Re-dispatch until the report says head was reached.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Shared with release-data.yml: both read the newest state asset at the start and
+# write a newer one at the end. A running job is never cancelled, and with `queue: max`
+# pending runs are queued and processed sequentially instead of being replaced (up to
+# 100 per group; GitHub changelog 2026-05-07).
+concurrency:
+  group: gmx-funding-state
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  catchup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+          cache-dependency-glob: 'requirements-collector.txt'
+
+      - name: Install Python dependencies
+        run: uv pip install -r requirements-collector.txt
+
+      - name: Resolve newest data release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREVIOUS_TAG=$(bash scripts/funding_state_assets.sh latest-tag)
+          echo "PREVIOUS_TAG=${PREVIOUS_TAG}" >> "$GITHUB_ENV"
+          echo "Newest data release: ${PREVIOUS_TAG:-none}"
+
+      # Same restore the daily release uses: the newest state asset in the newest
+      # release that has one. It records that release as FUNDING_STATE_RELEASE, where
+      # the advanced state is put back.
+      - name: Restore funding state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/funding_state_assets.sh restore
+
+      - name: Preflight funding state
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py state \
+              --gmx-root user_data/data/gmx
+
+      # Nothing to resume from: starting from genesis would take longer than this
+      # job and upload a state that disagrees with the lineage.
+      - name: Require a restored funding state
+        run: |
+          if [ "${FUNDING_STATE:-absent}" != "ready" ] || [ -z "${FUNDING_STATE_RELEASE:-}" ]; then
+            echo "::error::no usable funding state to resume (state=${FUNDING_STATE:-absent}). Seed it with release-data.yml seed_funding_from first."
+            exit 1
+          fi
+
+      - name: Record checkpoints before
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py checkpoints \
+              --gmx-root user_data/data/gmx \
+              --out /tmp/funding-checkpoints-before.json
+
+      # Checkpoints persist per batch (#75), so a timeout still leaves progress.
+      # continue-on-error so the report and upload below always run.
+      - name: Extract funding to chain head
+        id: funding_extract
+        continue-on-error: true
+        timeout-minutes: 330
+        env:
+          JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
+          HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+        run: |
+          PYTHONPATH=src python scripts/extract_unified_funding.py \
+              --network arbitrum \
+              --output-dir user_data/data/gmx/funding \
+              --output parquet \
+              --resume
+
+      - name: Report catch-up
+        id: catchup_report
+        if: always()
+        env:
+          EXTRACT_OUTCOME: ${{ steps.funding_extract.outcome }}
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py catchup-report \
+              --gmx-root user_data/data/gmx \
+              --before /tmp/funding-checkpoints-before.json \
+              --extract-outcome "${EXTRACT_OUTCOME:-skipped}"
+
+      # A NEW stamped asset in the release the state was restored from, whatever
+      # happened to the extraction. Older state assets in that release are deleted
+      # only after the new one is confirmed by size; a failed inspection deletes none.
+      - name: Upload advanced funding state
+        id: state_upload
+        if: ${{ always() && steps.catchup_report.outputs.advanced == 'true' && env.FUNDING_STATE_RELEASE != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/funding_state_assets.sh pack /tmp/
+          STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz 2>/dev/null | sort | tail -1 || true)
+          if [ -z "${STATE_FILE}" ]; then
+            echo "::error::no state archive was packed; progress was NOT saved."
+            exit 1
+          fi
+          bash scripts/funding_state_assets.sh publish "${FUNDING_STATE_RELEASE}" "${STATE_FILE}"
+
+      # Red when the extraction did not finish (progress is already saved above) or
+      # the upload failed, so a half-done catch-up is never read as complete.
+      - name: Fail job if catch-up did not finish
+        if: always()
+        env:
+          EXTRACT_OUTCOME: ${{ steps.funding_extract.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.state_upload.outcome }}
+        run: |
+          if [ "${UPLOAD_OUTCOME}" = "failure" ]; then
+            echo "::error::uploading the advanced funding state failed; progress was NOT saved."
+            exit 1
+          fi
+          if [ "${EXTRACT_OUTCOME}" != "success" ]; then
+            echo "::error::extraction ended '${EXTRACT_OUTCOME}'; progress so far was saved. Re-dispatch to continue."
+            exit 1
+          fi

@@ -2152,11 +2152,6 @@ def generate_report(
         lines.append(f"    {tf}: {tf_counts[tf]} symbols")
 
     # ------------------------------------------------------------------
-    # Funding exports — not collected by this script and not refreshed by
-    # the release, so without a line here a stale, orphaned or missing
-    # funding file is invisible until a downstream backtest fails (#47).
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
     # Data-type coverage — so a type quietly falling out is a reported fact
     # rather than a discovery made weeks later downstream (#47, #48).
     #
@@ -2177,29 +2172,9 @@ def generate_report(
     lines.append("")
     lines.append("## Funding Rate Exports")
     lines.append(
-        "  Not collected by this script — carried forward inside the release "
-        "bundle. Listed so staleness is visible."
+        "  Funding and mark are refreshed and graded by the release; see the "
+        "'Funding & Mark Companions' section below."
     )
-    lines.append(
-        f"- Canonical '{CANONICAL_FUNDING_VARIANT}' export: {funding['canonical_pairs']} pairs"
-    )
-    if funding["canonical_latest"] is not None:
-        newest = funding["canonical_latest"]
-        age_days = (pd.Timestamp(datetime.now(UTC)) - newest).days
-        lines.append(
-            f"- Newest funding bar: {newest.strftime('%Y-%m-%d %H:%M')} UTC ({age_days}d old)"
-        )
-    else:
-        lines.append("- Newest funding bar: none readable")
-    if funding["unreadable"]:
-        lines.append(f"- Unreadable funding exports: {funding['unreadable']}")
-    if funding["orphans"]:
-        lines.append(
-            "- Variants present that nothing regenerates (stale; consumers "
-            f"should read '{CANONICAL_FUNDING_VARIANT}'):"
-        )
-        for variant, pairs in sorted(funding["orphans"].items(), key=lambda kv: -kv[1]):
-            lines.append(f"    {variant}: {pairs} pairs")
 
     funding_warning = _funding_export_warning(funding)
     if funding_warning and os.environ.get("GITHUB_ACTIONS") == "true":

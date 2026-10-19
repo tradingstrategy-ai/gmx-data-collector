@@ -10,6 +10,8 @@ The workflow calls these subcommands; the logic lives in
 * ``gate``   grade the staged files; promote on pass; write ``funding_coverage.json``.
 * ``ensure-verdict`` backstop: no verdict written by this run means WITHHELD.
 * ``notes``  print the release-notes section for a ``funding_coverage.json``.
+* ``checkpoints`` / ``catchup-report``  funding-catchup.yml: snapshot the extraction
+  checkpoints before the run, then report progress and whether the state is worth uploading.
 
 Exit codes: ``seed``/``state``/``export``/``notes`` are fail-soft (0) so the rest of
 the release proceeds; ``gate`` exits 1 when the companions were withheld;
@@ -28,7 +30,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from gmx_historical_data import funding_release
+from gmx_historical_data import funding_catchup, funding_release
 from gmx_historical_data.funding_state import (
     NETWORK,
     SeedError,
@@ -202,6 +204,47 @@ def cmd_notes(args: argparse.Namespace) -> int:
     return 0
 
 
+def _github_output(**values: str) -> None:
+    path = os.environ.get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a") as handle:
+            handle.writelines(f"{k}={v}\n" for k, v in values.items())
+
+
+def cmd_checkpoints(args: argparse.Namespace) -> int:
+    positions = funding_catchup.snapshot(Path(args.gmx_root))
+    Path(args.out).write_text(json.dumps(positions, indent=2))
+    print(f"checkpoints before: {json.dumps(positions)}")
+    return 0
+
+
+def cmd_catchup_report(args: argparse.Namespace) -> int:
+    try:
+        before = json.loads(Path(args.before).read_text())
+    except (OSError, ValueError):
+        before = None
+    if before is None:
+        # Nothing was recorded, so nothing can be shown to have advanced.
+        print("::warning::no checkpoint snapshot from before the run; nothing will be uploaded.")
+        _github_output(advanced="false", head_reached="false")
+        return 0
+    report = funding_catchup.build_report(
+        before,
+        Path(args.gmx_root),
+        now=datetime.now(UTC),
+        extract_outcome=args.extract_outcome,
+    )
+    print(report.markdown)
+    summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary:
+        with open(summary, "a") as handle:
+            handle.write(report.markdown)
+    _github_output(
+        advanced=str(report.advanced).lower(), head_reached=str(report.head_reached).lower()
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -243,6 +286,17 @@ def build_parser() -> argparse.ArgumentParser:
     notes = sub.add_parser("notes", help="print the release-notes section")
     notes.add_argument("--coverage", required=True)
     notes.set_defaults(func=cmd_notes)
+
+    checkpoints = sub.add_parser("checkpoints", help="record the extraction checkpoints")
+    checkpoints.add_argument("--gmx-root", required=True)
+    checkpoints.add_argument("--out", required=True)
+    checkpoints.set_defaults(func=cmd_checkpoints)
+
+    catchup = sub.add_parser("catchup-report", help="summarise a catch-up run")
+    catchup.add_argument("--gmx-root", required=True)
+    catchup.add_argument("--before", required=True)
+    catchup.add_argument("--extract-outcome", required=True)
+    catchup.set_defaults(func=cmd_catchup_report)
     return parser
 
 

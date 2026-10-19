@@ -185,6 +185,33 @@ def read_checkpoint_head(checkpoint_dir: Path, name: str) -> datetime | None:
         return None
 
 
+def check_checkpoint_heads(
+    checkpoint_dir: Path, now: datetime, thresholds: SeriesThresholds
+) -> tuple[dict[str, Any], list[str]]:
+    """Apply the ``B4`` head check to both extraction checkpoints.
+
+    :param checkpoint_dir: ``funding/arbitrum/checkpoints``.
+    :param now: The run time (UTC).
+    :param thresholds: Supplies ``head_lag_hours``.
+    :returns: ``(heads by key as ISO strings or None, B4 blocker messages)``; no
+        blockers means both checkpoints are within ``head_lag_hours`` of ``now``.
+    """
+    heads: dict[str, Any] = {}
+    blockers: list[str] = []
+    for key, name in (("funding_factor", FACTOR_CHECKPOINT), ("fee_per_size", FEE_CHECKPOINT)):
+        head = read_checkpoint_head(checkpoint_dir, name)
+        heads[key] = head.isoformat() if head else None
+        if head is None:
+            blockers.append(f"B4: {key} checkpoint missing or unreadable")
+        elif head < now - timedelta(hours=thresholds.head_lag_hours):
+            lag = (now - head).total_seconds() / 3600
+            blockers.append(
+                f"B4: {key} checkpoint is {lag:.1f}h behind the run "
+                f"(limit {thresholds.head_lag_hours:g}h)"
+            )
+    return heads, blockers
+
+
 def assess_series_coverage(
     *,
     futures_dir: Path,
@@ -242,18 +269,8 @@ def assess_series_coverage(
     if extract_outcome != "success":
         set_blockers.append(f"B4: incremental extraction did not complete ({extract_outcome})")
 
-    checkpoints: dict[str, Any] = {}
-    for key, name in (("funding_factor", FACTOR_CHECKPOINT), ("fee_per_size", FEE_CHECKPOINT)):
-        head = read_checkpoint_head(checkpoint_dir, name)
-        checkpoints[key] = head.isoformat() if head else None
-        if head is None:
-            set_blockers.append(f"B4: {key} checkpoint missing or unreadable")
-        elif head < now - timedelta(hours=thresholds.head_lag_hours):
-            lag = (now - head).total_seconds() / 3600
-            set_blockers.append(
-                f"B4: {key} checkpoint is {lag:.1f}h behind the run "
-                f"(limit {thresholds.head_lag_hours:g}h)"
-            )
+    checkpoints, head_blockers = check_checkpoint_heads(checkpoint_dir, now, thresholds)
+    set_blockers.extend(head_blockers)
 
     pairs: list[PairCoverage] = []
     newest_active_bar: datetime | None = None

@@ -642,6 +642,13 @@ nothing previous ships no companions.
   derives the checkpoints the branch never stored, catches up to now (step timeout 30
   min) and publishes the state asset. It never replaces an existing state. Without a
   seed every run withholds the companions.
+* **Catch-up.** When the daily 15-minute extraction cannot close a long gap (HyperSync
+  throttling), dispatch `funding-catchup.yml`: the same `--resume` extraction for up to
+  330 minutes, then the advanced state is uploaded as a new stamped asset to the release
+  it was restored from (even after a timeout). It shares the `gmx-funding-state`
+  concurrency group with `release-data.yml`, leaves the bundles and notes alone, and its
+  step summary says whether head was reached. Re-dispatch until it is; the next daily
+  release then exports and gates as usual.
 
 ### Funding data contract
 
