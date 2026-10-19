@@ -411,6 +411,10 @@ def _oldest(path):
         return None
 
 
+def _is_within(path: Path, directory: Path) -> bool:
+    return path == directory or path.is_relative_to(directory)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_root", nargs="?", default="user_data/data/gmx")
@@ -428,12 +432,18 @@ def main(argv=None):
         help="also validate externally maintained 8h funding feathers",
     )
     args = parser.parse_args(argv)
+    supplied_root = Path(args.data_root).expanduser().resolve()
+    report_path = args.json_path.expanduser().resolve() if args.json_path is not None else None
+    if report_path is not None and _is_within(report_path, supplied_root):
+        print("VERIFY_LAKE: FAIL G0 - --json path must be outside the data root")
+        print("VERIFY_LAKE: FAIL 1 findings")
+        return 2
     try:
-        root = detect_root(Path(args.data_root))
+        root = detect_root(supplied_root)
     except Exception as e:
         findings = [Finding("G0", "-", str(e))]
     else:
-        if args.json_path is not None and args.json_path.resolve().is_relative_to(root):
+        if report_path is not None and _is_within(report_path, root):
             print("VERIFY_LAKE: FAIL G0 - --json path must be outside the data root")
             print("VERIFY_LAKE: FAIL 1 findings")
             return 2
@@ -457,9 +467,9 @@ def main(argv=None):
         )
     failed = any(f.failed for f in findings)
     print(f"VERIFY_LAKE: {'FAIL' if failed else 'OK'} {len(findings)} findings")
-    if args.json_path:
-        args.json_path.parent.mkdir(parents=True, exist_ok=True)
-        args.json_path.write_text(
+    if report_path is not None and not any(f.check == "G0" for f in findings):
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
             json.dumps(
                 {
                     "root": str(root) if "root" in locals() else args.data_root,

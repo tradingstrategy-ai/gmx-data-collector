@@ -276,3 +276,26 @@ def test_rejected_in_root_json_path_does_not_overwrite_lake_file(tmp_path):
     assert proc.returncode != 0
     assert "--json path must be outside the data root" in proc.stdout
     assert target.read_bytes() == original
+
+
+def test_incomplete_lake_json_path_is_rejected_before_report_write(tmp_path):
+    root = tmp_path / "incomplete-lake"
+    root.mkdir()
+    target = root / "delisted_markets.json"
+    original = b'{"symbols": ["OLD"]}\n'
+    target.write_bytes(original)
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/verify_gmx_lake.py",
+            str(root),
+            "--report-only",
+            "--json",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "--json path must be outside the data root" in proc.stdout
+    assert target.read_bytes() == original
