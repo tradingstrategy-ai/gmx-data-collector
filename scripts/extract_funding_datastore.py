@@ -112,6 +112,7 @@ BLOCKS_PER_HOUR = 14_400
 
 # GMX V2 genesis and V2.2 cutoff on Arbitrum
 GMX_V2_GENESIS_BLOCK = 120_000_000  # ~Aug 2023
+DATASTORE_BACKFILL_ANCHOR_BLOCK = 105_000_000  # 2023-06-26, before the first GMX V2 listing
 GMX_V22_FUNDING_EVENT_START = 370_000_000  # ~Aug 2025
 
 
@@ -1080,9 +1081,11 @@ def extract_funding_hours(
 
 
 def genesis_hour(
-    rpc_config: str, genesis_block: int = GMX_V2_GENESIS_BLOCK, deadline: float | None = None
+    rpc_config: str,
+    genesis_block: int = DATASTORE_BACKFILL_ANCHOR_BLOCK,
+    deadline: float | None = None,
 ) -> int:
-    """First whole hour (epoch seconds) at or before GMX V2's genesis block."""
+    """First whole hour at or before the pre-listing DataStore anchor block."""
     ts = prefetch_block_timestamps(rpc_config, [genesis_block], deadline=deadline)[genesis_block]
     return ts // _HOUR_SECONDS * _HOUR_SECONDS
 
@@ -1168,7 +1171,7 @@ def run_hourly_backfill(
         should_stop=should_stop,
         on_progress=on_progress,
         deadline=deadline,
-        anchor_block=GMX_V2_GENESIS_BLOCK,
+        anchor_block=DATASTORE_BACKFILL_ANCHOR_BLOCK,
     )
 
 

@@ -577,6 +577,23 @@ FROM_HOUR = _epoch(_h(0, 3))
 MARKETS = {MOO: {"symbol": "MOO/USD", "indexToken": "0x1", "isListed": True}}
 
 
+def test_backfill_anchor_precedes_first_market_listing(monkeypatch) -> None:
+    anchor_ts = _epoch(datetime(2023, 6, 26, 5, 34, tzinfo=UTC))
+    requested: list[int] = []
+
+    def timestamps(rpc_config, blocks, **kwargs):
+        requested.extend(blocks)
+        return {block: anchor_ts for block in blocks}
+
+    monkeypatch.setattr(ds, "prefetch_block_timestamps", timestamps)
+
+    first_hour = ds.genesis_hour(RPC)
+    first_listing = _epoch(datetime(2023, 8, 8, tzinfo=UTC))
+
+    assert requested == [105_000_000]
+    assert first_hour <= first_listing
+
+
 def _backfill(tmp_path: Path, **kw):
     kw.setdefault("chunk_hours", 12)
     return ds.run_hourly_backfill(
