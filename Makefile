@@ -113,6 +113,10 @@ SKIP_DOWNLOAD    ?=
         extract-all extract-all-resume \
         fill-gaps-cex refresh-data-cex full-data-cex full-data-nn-cex
 
+.PHONY: verify-lake
+verify-lake:
+	poetry run python scripts/verify_gmx_lake.py "$(if $(DATA),$(DATA),./user_data/data/gmx)" $(ARGS)
+
 # Default target
 help:
 	@echo "GMX Historical Data"

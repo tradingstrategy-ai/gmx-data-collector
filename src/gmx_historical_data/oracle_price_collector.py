@@ -165,6 +165,13 @@ async def retry_with_backoff(
 
             if (is_rate_limit or is_auth_error) and key_rotator is not None:
                 label = "Rate limit" if is_rate_limit else "Auth error (401)"
+                if is_rate_limit and rate_limit_attempt >= max_retries:
+                    logger.error(
+                        "%s rate-limit retry budget exhausted after %d retries",
+                        operation_name,
+                        rate_limit_attempt,
+                    )
+                    raise
                 logger.warning(f"{label} detected, rotating key: {e}")
                 try:
                     key_rotator.rotate()
