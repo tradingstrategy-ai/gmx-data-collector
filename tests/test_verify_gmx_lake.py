@@ -56,6 +56,24 @@ def test_tail_status_and_checkpoints_flag_missing(tmp_path):
     assert {item.check for item in findings} == {"G1e", "G1f"}
 
 
+def test_daily_job_can_configure_checkpoint_and_tail_status_ages(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    checkpoints = root / "funding/arbitrum/checkpoints"
+    checkpoint_time = int((now - timedelta(hours=26)).timestamp())
+    for name in ("funding_factor_checkpoint.json", "fee_per_size_checkpoint.json"):
+        (checkpoints / name).write_text(json.dumps({"last_timestamp": checkpoint_time}))
+    (checkpoints / "funding_datastore_tail_status.json").write_text(
+        json.dumps({"status": "ok", "updated_at": (now - timedelta(hours=40)).isoformat()})
+    )
+
+    strict = run(root, {"G1e", "G1f"}, now, 0.05, 3, True)
+    assert {item.check for item in strict} == {"G1e", "G1f"}
+
+    daily = run(root, {"G1e", "G1f"}, now, 0.05, 3, True, 30, 48)
+    assert daily == []
+
+
 def test_recent_holes_and_unknown_direction_are_flagged(tmp_path):
     now = datetime.now(UTC)
     root = fixture_lake(tmp_path, now)

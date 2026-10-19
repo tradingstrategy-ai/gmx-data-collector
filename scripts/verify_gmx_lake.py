@@ -85,6 +85,8 @@ def run(
     null_share: float,
     max_lag_bars: int,
     tail_expected: bool | None,
+    max_checkpoint_age_hours: float = 6,
+    max_tail_status_age_hours: float = 36,
 ):
     out = []
     net = root / "funding/arbitrum"
@@ -176,8 +178,13 @@ def run(
                 stamp = checkpoint_dt(status.get("updated_at", status.get("generated_at", "")))
                 if status.get("status") == "failed" or status.get("outcome") == "failed":
                     issue(out, "G1e", "-", "tail status failed")
-                elif now - stamp.astimezone(UTC) > timedelta(hours=36):
-                    issue(out, "G1e", "-", "tail status older than 36h")
+                elif now - stamp.astimezone(UTC) > timedelta(hours=max_tail_status_age_hours):
+                    issue(
+                        out,
+                        "G1e",
+                        "-",
+                        f"tail status older than {max_tail_status_age_hours:g}h",
+                    )
             except Exception:
                 issue(out, "G1e", "-", "tail status missing or unreadable")
     if "G1f" in checks:
@@ -186,12 +193,12 @@ def run(
                 data = json.loads((checkpoint / name).read_text())
                 stamp = checkpoint_dt(data["last_timestamp"])
                 lag = now - stamp.astimezone(UTC)
-                if lag > timedelta(hours=6):
+                if lag > timedelta(hours=max_checkpoint_age_hours):
                     issue(
                         out,
                         "G1f",
                         name.removesuffix("_checkpoint.json"),
-                        f"checkpoint {lag.total_seconds() / 3600:.1f}h behind",
+                        f"checkpoint {lag.total_seconds() / 3600:.1f}h behind (limit {max_checkpoint_age_hours:g}h)",
                     )
             except Exception:
                 issue(
@@ -315,6 +322,8 @@ def main(argv=None):
     parser.add_argument("--null-direction-share", type=float, default=0.05)
     parser.add_argument("--max-lag-bars", type=int, default=3)
     parser.add_argument("--tail-fill-expected", action="store_true", default=None)
+    parser.add_argument("--max-checkpoint-age-hours", type=float, default=6)
+    parser.add_argument("--max-tail-status-age-hours", type=float, default=36)
     args = parser.parse_args(argv)
     try:
         root = detect_root(Path(args.data_root))
@@ -327,6 +336,8 @@ def main(argv=None):
             args.null_direction_share,
             args.max_lag_bars,
             args.tail_fill_expected,
+            args.max_checkpoint_age_hours,
+            args.max_tail_status_age_hours,
         )
     except Exception as e:
         findings = [Finding("G0", "-", str(e))]
