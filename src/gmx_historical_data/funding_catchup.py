@@ -13,7 +13,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from gmx_historical_data.datastore_tail import read_backfill_checkpoint
 from gmx_historical_data.funding_state import (
+    BACKFILL_CHECKPOINT,
     FACTOR_CHECKPOINT,
     FEE_CHECKPOINT,
     _read_checkpoint,
@@ -22,6 +24,9 @@ from gmx_historical_data.funding_state import (
 from gmx_historical_data.series_coverage import SeriesThresholds, check_checkpoint_heads
 
 _KEYS = (("funding_factor", FACTOR_CHECKPOINT), ("fee_per_size", FEE_CHECKPOINT))
+#: Checkpoints that exist only when the opt-in ``datastore_backfill`` has run. Their
+#: absence is normal; progress in them counts as progress worth uploading.
+_OPTIONAL_KEYS = (("datastore_backfill", BACKFILL_CHECKPOINT),)
 
 #: ``{key: {"last_block": int, "last_timestamp": int} | None}``
 Positions = dict[str, dict[str, int] | None]
@@ -45,8 +50,10 @@ def snapshot(gmx_root: Path) -> Positions:
     """Read both checkpoints' positions; ``None`` for a missing or unreadable one."""
     checkpoints = funding_network_dir(gmx_root) / "checkpoints"
     positions: Positions = {}
-    for key, name in _KEYS:
+    for key, name in (*_KEYS, *_OPTIONAL_KEYS):
         data = _read_checkpoint(checkpoints / name)
+        if data is None and (key, name) in _OPTIONAL_KEYS:
+            continue
         positions[key] = (
             None
             if data is None
@@ -74,6 +81,12 @@ def has_advanced(before: Positions, after: Positions) -> bool:
         if new["last_block"] < old["last_block"]:
             return False
         moved = moved or new["last_block"] > old["last_block"]
+    for key, _ in _OPTIONAL_KEYS:
+        new, old = after.get(key), before.get(key)
+        if old is not None and (new is None or new["last_block"] < old["last_block"]):
+            return False  # an optional checkpoint that vanished or regressed is not a newer state
+        if new is not None and (old is None or new["last_block"] > old["last_block"]):
+            moved = True
     return moved
 
 
@@ -112,6 +125,9 @@ def build_report(
     rows = "\n".join(
         f"| `{key}` | {_stamp(before.get(key))} | {_stamp(after.get(key))} |" for key, _ in _KEYS
     )
+    for key, _ in _OPTIONAL_KEYS:
+        if before.get(key) is not None or after.get(key) is not None:
+            rows += f"\n| `{key}` | {_stamp(before.get(key))} | {_stamp(after.get(key))} |"
     lines = [
         "## Funding catch-up",
         "",
@@ -125,6 +141,18 @@ def build_report(
         f"- State advanced (uploaded as a new state asset): **{'yes' if advanced else 'no'}**",
     ]
     lines.extend(f"- {blocker}" for blocker in blockers)
+    backfill = read_backfill_checkpoint(funding_network_dir(gmx_root) / "checkpoints")
+    if backfill is not None:
+        target = datetime.fromtimestamp(backfill["target_hour"], tz=UTC)
+        lines.append(
+            "- DataStore backfill: "
+            + (
+                f"**complete** (to {target:%Y-%m-%d %H:%M} UTC)"
+                if backfill["complete"]
+                else f"in progress, at {_stamp(after.get('datastore_backfill'))} "
+                f"of {target:%Y-%m-%d %H:%M} UTC -- re-dispatch with `datastore_backfill` to continue"
+            )
+        )
     if not head_reached:
         lines += ["", "Re-dispatch this workflow to continue; progress is kept in the state asset."]
     return CatchupReport(advanced, head_reached, "\n".join(lines) + "\n")

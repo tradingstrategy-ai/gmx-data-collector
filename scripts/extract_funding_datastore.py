@@ -34,6 +34,15 @@ OPTIONS
     --batch-size     Number of concurrent RPC calls per batch (default: 50)
     --resume         Enable checkpoint-based incremental mode
     --list-markets   List available markets and exit
+
+HOURLY MODE (#47 backfill; also what the daily tail-fill uses, #64)
+-------------------------------------------------------------------
+    --hourly-backfill   Read every market at the first block of each hour from GMX V2
+                        genesis (default) to --to-time (default: the funding epoch,
+                        2025-08-19T12:00Z), resumable with --resume, and persisted and
+                        checkpointed chunk by chunk.
+    --from-time / --to-time   ISO-8601 bounds for --hourly-backfill
+    --max-runtime-minutes / --deadline-epoch   Stop cleanly (exit 3) between chunks
 """
 
 import argparse
@@ -42,7 +51,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -53,6 +62,13 @@ from eth_defi.provider.multi_provider import create_multi_provider_web3
 from web3 import Web3
 
 from gmx_historical_data.atomic_parquet import atomic_write_parquet
+from gmx_historical_data.datastore_tail import (
+    HistoricalStateUnavailable,
+    is_historical_state_error,
+    read_backfill_checkpoint,
+    resolve_hour_blocks,
+    write_backfill_checkpoint,
+)
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 try:
@@ -131,6 +147,22 @@ class LegacyCheckpointError(RuntimeError):
     """Raised when ``--resume`` finds an unversioned (pre-durable) checkpoint."""
 
 
+def _raise_if_state_unavailable(body) -> None:
+    """Raise :class:`HistoricalStateUnavailable` if any response says the node lacks the state.
+
+    A non-archive node answers ``eth_call`` at an old block with "missing trie
+    node" or "historical state ... is not available". That is a property of the
+    node, not a transient failure, so it is neither retried nor read as a value.
+    """
+    items = body if isinstance(body, list) else [body]
+    for item in items:
+        error = item.get("error") if isinstance(item, dict) else None
+        if error:
+            message = error.get("message", "") if isinstance(error, dict) else str(error)
+            if is_historical_state_error(message):
+                raise HistoricalStateUnavailable(message)
+
+
 def _post_batch_with_retry(
     url: str, payload: list[dict], timeout: int, parse: Callable, label: str
 ):
@@ -145,7 +177,11 @@ def _post_batch_with_retry(
         try:
             resp = requests.post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
-            return parse(resp.json())
+            body = resp.json()
+            _raise_if_state_unavailable(body)
+            return parse(body)
+        except HistoricalStateUnavailable:
+            raise  # not transient: the node does not have this state, retrying cannot help
         except Exception as exc:
             if attempt == RPC_MAX_ATTEMPTS - 1:
                 raise FundingExtractionError(
@@ -610,6 +646,12 @@ def aggregate_hourly_rates(
         (-pl.col("funding_rate_hourly")).alias("funding_fee_short"),
     )
 
+    # These rows are chain-state reads, never a carried value: say so in the file.
+    hourly = hourly.with_columns(
+        pl.lit("datastore").alias("source"),
+        pl.lit(False).alias("is_gap_filled"),
+    )
+
     # Rename hour -> timestamp
     hourly = hourly.rename({"hour": "timestamp"})
 
@@ -631,6 +673,8 @@ def aggregate_hourly_rates(
                 "update_count",
                 "symbol",
                 "market",
+                "source",
+                "is_gap_filled",
             ]
         ).cast({"update_count": pl.UInt32})
         result[symbol] = sym_df
@@ -742,8 +786,308 @@ def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -
 
 
 # =============================================================================
+# HOURLY-ALIGNED READS (tail-fill #64, backfill #47)
+# =============================================================================
+
+#: Hours persisted and checkpointed per chunk by the hourly reader.
+HOURLY_CHUNK_HOURS = 48
+
+#: Exit code of ``--hourly-backfill`` when it stopped at its deadline with hours left.
+EXIT_BACKFILL_INCOMPLETE = 3
+#: Exit code when the RPC node has no historical state (not an archive node).
+EXIT_STATE_UNAVAILABLE = 4
+
+_HOUR_SECONDS = 3600
+
+
+def fetch_latest_block(rpc_config: str, timeout: int = 60) -> int:
+    """Return the chain head block number via ``eth_blockNumber``.
+
+    :raises FundingExtractionError: If the node cannot answer after all retries.
+    """
+    url = rpc_config.strip().split()[0]
+    url = url[4:] if url.startswith("mev+") else url
+    payload = [{"id": 0, "jsonrpc": "2.0", "method": "eth_blockNumber", "params": []}]
+
+    def parse(items) -> int:
+        item = {i.get("id"): i for i in items}.get(0)
+        if item is None or item.get("error") or not isinstance(item.get("result"), str):
+            raise ValueError("eth_blockNumber: missing or errored response")
+        return int(item["result"], 16)
+
+    return _post_batch_with_retry(url, payload, timeout, parse, "Latest block")
+
+
+@dataclass
+class HourExtraction:
+    """What :func:`extract_funding_hours` did.
+
+    :ivar requested: Hours asked for.
+    :ivar read: Records persisted (a market-hour the chain had a value for).
+    :ivar stopped: ``None`` when every hour was attempted, else ``"deadline"``
+        or ``"unavailable"`` (the node has no state at that block).
+    :ivar reason: The unavailable error, or why it stopped.
+    :ivar hours_done: Hours attempted and persisted before stopping.
+    :ivar last_hour: Newest hour persisted.
+    :ivar last_block: Block read for ``last_hour``.
+    :ivar skipped_hours: Hours with no block inside them (the clock jumped over the hour).
+    """
+
+    requested: int = 0
+    read: int = 0
+    stopped: str | None = None
+    reason: str | None = None
+    hours_done: int = 0
+    last_hour: int | None = None
+    last_block: int | None = None
+    skipped_hours: list[int] = field(default_factory=list)
+
+    @property
+    def hours_read(self) -> int:
+        """Alias used by the tail-fill status: persisted market-hour records."""
+        return self.read
+
+
+def extract_funding_hours(
+    rpc_config: str,
+    hours: list[int],
+    *,
+    wanted: Callable[[int], list[str]],
+    symbol_of: Callable[[str], str],
+    persist: Callable[[list[FundingDatastoreRecord]], None],
+    chunk_hours: int = HOURLY_CHUNK_HOURS,
+    should_stop: Callable[[], bool] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
+) -> HourExtraction:
+    """Read ``savedFundingFactorPerSecond`` at the first block of each requested hour.
+
+    Per chunk of ``chunk_hours`` hours: resolve each hour boundary to the first
+    block at or after it (header reads only), read every needed market at those
+    blocks with one batch ``eth_call`` per block, keep the ``(hour, market)`` pairs
+    asked for, ``persist`` them, then report progress. Order is chronological, so
+    whatever stops the run leaves a contiguous, persisted prefix.
+
+    A market with no code at the block (not created yet) yields no record; a
+    failed read raises (never a zero); a node without historical state stops the
+    run with ``stopped == "unavailable"`` instead of raising, keeping every chunk
+    already persisted. An hour with no block inside it (the sequencer clock jumped
+    over it) is skipped rather than labelled with a later hour's state.
+
+    :param rpc_config: Space-separated RPC URL(s).
+    :param hours: Hour boundaries as epoch seconds.
+    :param wanted: ``hour -> market addresses`` to keep for that hour.
+    :param symbol_of: ``market address -> symbol`` for the record.
+    :param persist: Durably writes a chunk's records; if it raises nothing after it advances.
+    :param chunk_hours: Hours per chunk.
+    :param should_stop: Checked before each chunk; ``True`` stops with ``"deadline"``.
+    :param on_progress: Called with ``(last_hour, last_block)`` after each persisted chunk.
+    :raises FundingExtractionError: On any read that stays failed after retries.
+    """
+    ordered = sorted(set(hours))
+    result = HourExtraction(requested=len(ordered))
+    if not ordered:
+        return result
+
+    cache: dict[int, int] = {}
+
+    def fetch_ts(blocks: list[int]) -> dict[int, int]:
+        return prefetch_block_timestamps(rpc_config, blocks)
+
+    latest = fetch_latest_block(rpc_config)
+    for start in range(0, len(ordered), chunk_hours):
+        if should_stop is not None and should_stop():
+            result.stopped, result.reason = "deadline", "time budget reached"
+            return result
+        chunk = ordered[start : start + chunk_hours]
+        try:
+            blocks = resolve_hour_blocks(
+                chunk, latest_block=latest, fetch_timestamps=fetch_ts, cache=cache
+            )
+            addresses = sorted({a.lower() for h in chunk for a in wanted(h)})
+            funding = batch_fetch_funding_rates(rpc_config, addresses, sorted(set(blocks.values())))
+        except HistoricalStateUnavailable as exc:
+            result.stopped, result.reason = "unavailable", str(exc)
+            return result
+
+        records: list[FundingDatastoreRecord] = []
+        for hour in chunk:
+            block = blocks[hour]
+            ts = cache[block]
+            if ts // _HOUR_SECONDS * _HOUR_SECONDS != hour:
+                result.skipped_hours.append(hour)
+                continue
+            dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
+            row = {a.lower(): v for a, v in funding[block].items()}
+            for addr in wanted(hour):
+                value = row.get(addr.lower())
+                if value is None:
+                    continue  # not created yet at this block: no observation
+                records.append(
+                    FundingDatastoreRecord(
+                        symbol=symbol_of(addr),
+                        market=addr.lower(),
+                        funding_factor_per_second=str(value),
+                        funding_rate_per_second=value / FUNDING_FACTOR_PRECISION,
+                        longs_pay_shorts=(value > 0),
+                        block_number=block,
+                        block_timestamp=ts,
+                        block_datetime=dt_str,
+                    )
+                )
+        if records:
+            persist(records)
+        result.read += len(records)
+        result.hours_done += len(chunk)
+        result.last_hour, result.last_block = chunk[-1], blocks[chunk[-1]]
+        if on_progress is not None:
+            on_progress(result.last_hour, result.last_block)
+        console.print(
+            f"  Hours {start + len(chunk):,}/{len(ordered):,} read "
+            f"({result.read:,} market-hour records)"
+        )
+    return result
+
+
+def genesis_hour(rpc_config: str, genesis_block: int = GMX_V2_GENESIS_BLOCK) -> int:
+    """First whole hour (epoch seconds) at or before GMX V2's genesis block."""
+    ts = prefetch_block_timestamps(rpc_config, [genesis_block])[genesis_block]
+    return ts // _HOUR_SECONDS * _HOUR_SECONDS
+
+
+def run_hourly_backfill(
+    rpc_config: str,
+    markets: dict[str, dict],
+    output_dir: Path,
+    *,
+    from_hour: int,
+    to_hour: int,
+    resume: bool = True,
+    chunk_hours: int = 168,
+    should_stop: Callable[[], bool] | None = None,
+) -> HourExtraction:
+    """Backfill ``rates/<SYM>/1h_datastore.parquet`` hourly from ``from_hour`` to ``to_hour``.
+
+    Every market with an index token is read at every hour; markets that do not
+    exist yet at a block are skipped by the batch reader (``NOT_DEPLOYED``), so
+    genesis can simply be the earliest market creation. Unlisted (deprecated)
+    markets are included: their history before delisting is real. Each chunk is
+    persisted, then the backfill checkpoint (versioned, atomic) advances, so a run
+    killed by a step timeout loses at most the chunk in flight and ``resume`` continues
+    from the next hour.
+
+    :param output_dir: Base output directory (``.../funding``); data goes under ``arbitrum/``.
+    :param from_hour: First hour (epoch seconds, hour-aligned).
+    :param to_hour: Last hour, inclusive.
+    :param resume: Continue after the checkpointed hour when one exists.
+    :param should_stop: Checked between chunks; ``True`` stops with ``"deadline"``.
+    """
+    checkpoint_dir = Path(output_dir) / "arbitrum" / "checkpoints"
+    start = from_hour
+    if resume:
+        saved = read_backfill_checkpoint(checkpoint_dir)
+        if saved is not None:
+            start = max(from_hour, saved["last_timestamp"] + _HOUR_SECONDS)
+            if start > to_hour:
+                console.print("  Backfill already complete; nothing to read.")
+                return HourExtraction()
+            console.print(
+                f"  Resuming backfill after {datetime.fromtimestamp(saved['last_timestamp'], tz=UTC)}"
+            )
+    addresses = [a for a, info in markets.items() if info.get("indexToken") is not None]
+    hours = list(range(start, to_hour + 1, _HOUR_SECONDS))
+    console.print(f"  Backfill: {len(hours):,} hours x {len(addresses)} markets")
+
+    def persist(batch: list[FundingDatastoreRecord]) -> None:
+        save_parquet(aggregate_hourly_rates(batch), Path(output_dir))
+
+    def on_progress(last_hour: int, last_block: int) -> None:
+        write_backfill_checkpoint(
+            checkpoint_dir,
+            first_hour=from_hour,
+            last_hour=last_hour,
+            last_block=last_block,
+            target_hour=to_hour,
+        )
+
+    return extract_funding_hours(
+        rpc_config,
+        hours,
+        wanted=lambda _hour: addresses,
+        symbol_of=lambda addr: market_symbol(addr, markets),
+        persist=persist,
+        chunk_hours=chunk_hours,
+        should_stop=should_stop,
+        on_progress=on_progress,
+    )
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
+
+
+def _parse_time(value: str) -> int:
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    stamp = stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+    return int(stamp.timestamp()) // _HOUR_SECONDS * _HOUR_SECONDS
+
+
+def _main_hourly_backfill(args, markets: dict[str, dict], output_dir: Path) -> int:
+    """CLI body of ``--hourly-backfill``; returns the process exit code."""
+    from gmx_historical_data.series_coverage import FUNDING_EPOCH
+
+    console.print("\n" + "=" * 70)
+    console.print("GMX V2 FUNDING BACKFILL (hourly DataStore reads)")
+    console.print("=" * 70)
+    try:
+        rpc_config = get_rpc_config()
+    except ValueError as exc:
+        console.print(f"[red]ERROR: {exc}[/red]")
+        return 1
+
+    deadline = args.deadline_epoch
+    if args.max_runtime_minutes is not None:
+        by_runtime = int(time.time() + args.max_runtime_minutes * 60)
+        deadline = by_runtime if deadline is None else min(deadline, by_runtime)
+
+    def should_stop() -> bool:
+        return deadline is not None and time.time() >= deadline
+
+    try:
+        from_hour = _parse_time(args.from_time) if args.from_time else genesis_hour(rpc_config)
+        to_hour = (
+            _parse_time(args.to_time)
+            if args.to_time
+            else int(FUNDING_EPOCH.timestamp()) // _HOUR_SECONDS * _HOUR_SECONDS
+        )
+        result = run_hourly_backfill(
+            rpc_config,
+            markets,
+            output_dir,
+            from_hour=from_hour,
+            to_hour=to_hour,
+            resume=args.resume,
+            should_stop=should_stop,
+        )
+    except FundingExtractionError as exc:
+        console.print(f"[red]ERROR: {exc}[/red]")
+        return 1
+
+    console.print(f"\n  Records written: {result.read:,}")
+    if result.stopped == "unavailable":
+        console.print(
+            f"[red]ERROR: the RPC node has no historical state ({result.reason}); "
+            "the backfill needs an archive node.[/red]"
+        )
+        return EXIT_STATE_UNAVAILABLE
+    if result.stopped == "deadline":
+        console.print(
+            "[yellow]Stopped at the time budget with hours remaining; "
+            "progress is checkpointed -- run again with --resume.[/yellow]"
+        )
+        return EXIT_BACKFILL_INCOMPLETE
+    console.print("\n  Backfill complete.")
+    return 0
 
 
 def main():
@@ -802,6 +1146,30 @@ def main():
         action="store_true",
         help="Force re-fetch of GMX market registry (ignores 24h disk cache)",
     )
+    parser.add_argument(
+        "--hourly-backfill",
+        action="store_true",
+        help=(
+            "Read every market at the first block of each hour from GMX V2 genesis to "
+            "--to-time (default: the funding epoch). Resumable with --resume."
+        ),
+    )
+    parser.add_argument("--from-time", type=str, default=None, help="ISO-8601 start (backfill)")
+    parser.add_argument(
+        "--to-time", type=str, default=None, help="ISO-8601 end, inclusive (backfill)"
+    )
+    parser.add_argument(
+        "--max-runtime-minutes",
+        type=float,
+        default=None,
+        help="Stop cleanly between chunks after this long (exit code 3 if hours remain)",
+    )
+    parser.add_argument(
+        "--deadline-epoch",
+        type=int,
+        default=None,
+        help="Stop cleanly between chunks at this Unix time (exit code 3 if hours remain)",
+    )
 
     args = parser.parse_args()
 
@@ -820,6 +1188,9 @@ def main():
 
     output_dir = Path(args.output_dir)
     checkpoint_dir = output_dir / "arbitrum" / "checkpoints"
+
+    if args.hourly_backfill:
+        sys.exit(_main_hourly_backfill(args, markets, output_dir))
 
     # Resume from checkpoint
     from_block = args.from_block

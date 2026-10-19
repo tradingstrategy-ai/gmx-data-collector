@@ -69,11 +69,13 @@ class TestFundingExportSummary:
         _write_funding_export(tmp_path, "BTC_USDC_USDC", "1h_datastore", last)
         _write_funding_export(tmp_path, "ETH_USDC_USDC", "1h_datastore", last)
         _write_funding_export(tmp_path, "ETH_USDC_USDC", "8h", last)
+        _write_funding_export(tmp_path, "ETH_USDC_USDC", "1h_factor", last)
 
         summary = _funding_export_summary(tmp_path)
 
         assert summary["canonical_pairs"] == 1
-        assert summary["orphans"] == {"1h_datastore": 2, "8h": 1}
+        # 1h_datastore is an exported variant again (#47); only the unproduced ones are orphans.
+        assert summary["orphans"] == {"8h": 1, "1h_factor": 1}
 
     def test_ohlcv_feathers_are_not_mistaken_for_funding(self, tmp_path):
         tmp_path.mkdir(parents=True, exist_ok=True)

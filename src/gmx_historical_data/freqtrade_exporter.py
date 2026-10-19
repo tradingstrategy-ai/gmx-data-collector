@@ -58,6 +58,21 @@ logger = logging.getLogger(__name__)
 # and all of which fail this pattern because of their trailing suffix.
 _FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
 
+#: The DataStore-only funding series is exported as its own variant
+#: (``{PAIR}-1h_datastore-funding_rate``, #47): ``rates/{SYM}/1h_datastore.parquet``
+#: holds signed on-chain reads (the pre-V2.2 backfill and the daily tail-fill /
+#: gap-correction reads), which a consumer such as SigCombo A4 reads by name.
+#: It is not a timeframe -- ``list_funding_timeframes`` still excludes it -- but
+#: it *is* an exported variant, so the orphan check must not call it retired.
+DATASTORE_VARIANT_SUFFIX = "_datastore"
+DATASTORE_TIMEFRAMES = ("1h",)
+
+
+def datastore_variant(timeframe: str) -> str:
+    """The exported variant token of ``timeframe``'s DataStore series (``1h`` -> ``1h_datastore``)."""
+    return f"{timeframe}{DATASTORE_VARIANT_SUFFIX}"
+
+
 #: Matches an exported funding file, e.g.
 #: ``BTC_USDC_USDC-1h_datastore-funding_rate.feather``. The variant token is
 #: whatever sits between the pair and the ``-funding_rate`` suffix, so it
@@ -680,6 +695,7 @@ class FreqtradeExporter:
         available_variants: set[str] = set()
         for symbol in sorted(funding_symbols):
             available_variants.update(self.list_funding_timeframes(symbol))
+            available_variants.update(self.list_datastore_variants(symbol))
         for symbol in export_symbols:
             funding_files = 0
             funding_tfs = set(self.list_funding_timeframes(symbol))
@@ -688,6 +704,15 @@ class FreqtradeExporter:
                 if timeframes
                 else sorted(funding_tfs)
             )
+            # The DataStore series rides along with its timeframe: selecting
+            # ``1h`` (the release's call) exports ``1h`` and ``1h_datastore``.
+            export_tfs += [
+                v
+                for v in self.list_datastore_variants(symbol)
+                if timeframes is None
+                or v in timeframes
+                or v.removesuffix("_datastore") in timeframes
+            ]
             symbol_failed = False
 
             for tf in export_tfs:
@@ -695,6 +720,13 @@ class FreqtradeExporter:
                     funding_df = self._read_funding_rate(symbol, tf)
                     if funding_df is None or funding_df.is_empty():
                         continue
+                    if tf.endswith(DATASTORE_VARIANT_SUFFIX) and "longs_pay_shorts" in (
+                        funding_df.columns
+                    ):
+                        # Signed on-chain values: export them as read. Without a
+                        # direction column the transform passes the rate through
+                        # unchanged (no ``-0.0`` for a genuine zero, no re-derived sign).
+                        funding_df = funding_df.drop("longs_pay_shorts")
                     funding_files += self.export_funding_frame(
                         symbol,
                         tf,
@@ -1220,6 +1252,19 @@ class FreqtradeExporter:
     # ------------------------------------------------------------------
     # Data readers
     # ------------------------------------------------------------------
+
+    def list_datastore_variants(self, symbol: str) -> list[str]:
+        """DataStore-only variants (``1h_datastore``) that have a non-hidden source parquet.
+
+        :param symbol: Token symbol.
+        :returns: Sorted variant tokens, e.g. ``['1h_datastore']``.
+        """
+        symbol_dir = self.funding_dir / symbol
+        return [
+            datastore_variant(tf)
+            for tf in DATASTORE_TIMEFRAMES
+            if (symbol_dir / f"{datastore_variant(tf)}.parquet").is_file()
+        ]
 
     def _read_funding_rate(self, symbol: str, timeframe: str) -> pl.DataFrame | None:
         """Read funding rate parquet for a symbol/timeframe.

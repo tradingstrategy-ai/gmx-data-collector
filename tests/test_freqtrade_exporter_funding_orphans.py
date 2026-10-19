@@ -131,11 +131,24 @@ class TestFindOrphanedFundingVariants:
 
 
 class TestExportFundingWarnsAboutOrphans:
-    def test_export_warns_about_a_retired_variant_on_disk(self, tmp_path, caplog):
-        """The #47 scenario end to end: the source lake still holds
-        ``1h_datastore.parquet``, the output dir still holds last run's
-        ``1h_datastore-funding_rate`` export, but the variant is no longer
-        exportable -- so the run must say so rather than quietly skip it."""
+    def test_export_warns_about_a_variant_on_disk_that_nothing_produces(self, tmp_path, caplog):
+        """The #47 scenario end to end: the output dir holds a funding export for a
+        variant the source lake can no longer produce -- the run must say so
+        rather than quietly skip it. (``1h_datastore`` is produced again, #47, so
+        a retired variant here is one with no source parquet.)"""
+        data_dir = tmp_path / "data"
+        out_dir = tmp_path / "out"
+        _write_funding_source(data_dir, "BTC", "1h")
+        _touch_export(out_dir / "gmx" / "futures", "BTC_USDC_USDC", "1h_datastore")
+
+        exporter = FreqtradeExporter(data_dir, out_dir)
+        with caplog.at_level(logging.WARNING):
+            exporter.export_funding()
+
+        assert "1h_datastore" in caplog.text
+        assert "not produced by this exporter" in caplog.text.lower()
+
+    def test_a_datastore_variant_with_a_source_is_produced_not_orphaned(self, tmp_path, caplog):
         data_dir = tmp_path / "data"
         out_dir = tmp_path / "out"
         _write_funding_source(data_dir, "BTC", "1h")
@@ -146,8 +159,7 @@ class TestExportFundingWarnsAboutOrphans:
         with caplog.at_level(logging.WARNING):
             exporter.export_funding()
 
-        assert "1h_datastore" in caplog.text
-        assert "not produced by this exporter" in caplog.text.lower()
+        assert "not produced by this exporter" not in caplog.text.lower()
 
     def test_recent_external_variant_is_not_called_stale(self, tmp_path, caplog):
         data_dir = tmp_path / "data"
@@ -331,7 +343,7 @@ class TestNothingExportableAtAll:
     def test_warns_once_when_no_canonical_source_exists(self, tmp_path, caplog):
         data_dir = tmp_path / "data"
         out_dir = tmp_path / "out"
-        _write_funding_source(data_dir, "BTC", "1h_datastore")
+        _write_funding_source(data_dir, "BTC", "1h_borrow_rate")
         _write_funding_source(data_dir, "BTC", "1h_factor")
         _touch_export(out_dir / "gmx" / "futures", "BTC_USDC_USDC", "1h_datastore")
         _touch_export(out_dir / "gmx" / "futures", "ETH_USDC_USDC", "1h_factor")

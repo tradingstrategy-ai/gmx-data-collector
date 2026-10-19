@@ -19,6 +19,8 @@ Verdict rules (``B`` = blocks the companions, ``T`` = classified and reported):
 ``B5``    mark missing or not row-for-row equal to the futures candles
 ``B6``    non-finite value in the funding series
 ``B7``    stale tail -- only with ``SeriesThresholds.stale_tail_blocks``
+``B8``    the ``1h_datastore`` variant (#47) failed to export, is unreadable, holds a
+          non-finite value, or has a rejected/unreconciled hour in the recent window
 ``T``     tail age per market: ``CURRENT`` / ``LAGGING`` / ``STALE``
 ========  ==============================================================
 
@@ -26,6 +28,16 @@ A quiet market's tail is *reported*, never forward-filled, and by default does
 not block: that is what keeps a stale quiet market visible without letting it
 withhold every liquid market's funding (and vice versa, since the tail is
 graded per pair, never as one aggregate).
+
+The tail age is taken from the newest funding bar whatever its source: the
+daily DataStore tail-fill (#64) extends a quiet market's series with chain-state
+reads, and such a tail is as ``CURRENT`` as an event-derived one. Only a market
+the tail-fill could not reach (a non-archive RPC, a delisted market) stays
+``LAGGING`` / ``STALE``.
+
+The ``1h_datastore`` variant is a sparse series by construction (the pre-V2.2
+backfill plus the hours the tail-fill read), so it is graded for integrity (B8)
+and not for holes or tail age; the canonical ``1h`` file is the complete series.
 """
 
 from __future__ import annotations
@@ -51,6 +63,9 @@ FUNDING_EPOCH = datetime(2025, 8, 19, 12, tzinfo=UTC)
 _FUTURES_1H = re.compile(r"^(?P<symbol>.+)_USDC_USDC-1h-futures\.feather$")
 _HOUR = timedelta(hours=1)
 
+#: Timeframe token of the DataStore-only funding variant (``...-1h_datastore-funding_rate``).
+DATASTORE_TIMEFRAME = "1h_datastore"
+
 
 class TailStatus(Enum):
     """How far a pair's newest funding bar lags the run's cutoff."""
@@ -74,8 +89,9 @@ class SeriesThresholds:
         holes are reported (a later run cannot repair them).
     :param head_lag_hours: How far behind the run the extraction checkpoints and
         the newest funding bar may be.
-    :param stale_tail_blocks: Make ``STALE`` tails block (``B7``). Off in v1:
-        quiet markets are stale until a DataStore tail-fill exists (#64).
+    :param stale_tail_blocks: Make ``STALE`` tails block (``B7``). Off by default: a
+        market the DataStore tail-fill cannot reach (non-archive RPC, delisted) stays
+        stale and is reported, not blocking.
     """
 
     current_hours: float = 6.0
@@ -107,6 +123,9 @@ class PairCoverage:
     newly_stale: bool = False
     mark_rows: int = 0
     futures_rows: int = 0
+    datastore_rows: int = 0
+    datastore_last_bar: datetime | None = None
+    source_hours: Mapping[str, int] | None = None
     blockers: tuple[str, ...] = ()
 
 
@@ -170,6 +189,46 @@ def _missing_hours(frame: pl.DataFrame) -> list[datetime]:
     first, last = hours[0], hours[-1]
     count = int((last - first) / _HOUR) + 1
     return [first + i * _HOUR for i in range(count) if first + i * _HOUR not in present]
+
+
+def _grade_datastore_variant(
+    companion_dir: Path,
+    symbol: str,
+    failures: Mapping[str, str],
+    rec: Mapping[str, Any],
+    recent_from: datetime,
+) -> tuple[int, datetime | None, list[str]]:
+    """Grade the staged ``1h_datastore`` funding file of one pair (``B8``).
+
+    No source and no file is not a defect (the series is optional until a
+    backfill has run); a file that was meant to be there and is broken is.
+
+    :returns: ``(rows, newest bar, blockers)``.
+    """
+    blockers: list[str] = []
+    if symbol in failures:
+        blockers.append(f"B8: datastore variant export failed ({failures[symbol]})")
+    path = companion_dir / f"{symbol}_USDC_USDC-{DATASTORE_TIMEFRAME}-funding_rate.feather"
+    if not path.is_file():
+        return 0, None, blockers
+    frame = _read_series(path, ["date", "open"])
+    if frame is None:
+        blockers.append("B8: datastore variant file unreadable or empty")
+        return 0, None, blockers
+    if any(v is None or not math.isfinite(v) for v in frame["open"].to_list()):
+        blockers.append("B8: non-finite value in the datastore variant")
+    rejected = [
+        h
+        for h in _parse_hours(rec.get("unknown_direction_hours"))
+        + _parse_hours(rec.get("null_rate_hours"))
+        + _parse_hours(rec.get("missing_hours"))
+        if h >= recent_from
+    ]
+    if rejected:
+        blockers.append(
+            f"B8: {len(set(rejected))} rejected or unreconciled datastore hour(s) in the recent window"
+        )
+    return len(frame), _bar(frame, -1), blockers
 
 
 def _parse_hours(values: list[str] | None) -> list[datetime]:
@@ -259,6 +318,13 @@ def assess_series_coverage(
         if f.get("timeframe", "1h") == "1h"
     }
     recs = report.get("reconciliations", {})
+    ds_recs = report.get("datastore_reconciliations", {})
+    ds_failures: dict[str, str] = {
+        f["symbol"]: f.get("reason", "failed")
+        for f in report.get("failures", [])
+        if f.get("timeframe") == DATASTORE_TIMEFRAME
+    }
+    source_hours = report.get("source_hours", {})
     prev_pairs = (previous or {}).get("pairs", {})
 
     set_blockers: list[str] = []
@@ -305,6 +371,14 @@ def assess_series_coverage(
         funding = _read_series(
             companion_dir / f"{symbol}_USDC_USDC-1h-funding_rate.feather", ["date", "open"]
         )
+        ds_rows, ds_last, ds_blockers = (
+            (0, None, [])
+            if is_delisted or not active
+            else _grade_datastore_variant(
+                companion_dir, symbol, ds_failures, ds_recs.get(symbol, {}), recent_from
+            )
+        )
+        blockers.extend(ds_blockers)
         base = dict(
             symbol=symbol,
             delisted=is_delisted,
@@ -313,6 +387,9 @@ def assess_series_coverage(
             pre_epoch=first_candle < FUNDING_EPOCH,
             mark_rows=0 if mark is None else len(mark),
             futures_rows=len(candles),
+            datastore_rows=ds_rows,
+            datastore_last_bar=ds_last,
+            source_hours=source_hours.get(symbol),
         )
 
         if is_delisted or not active:

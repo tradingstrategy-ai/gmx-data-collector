@@ -22,11 +22,13 @@ from typing import Any
 
 import polars as pl
 
+from gmx_historical_data import datastore_tail
 from gmx_historical_data.atomic_parquet import atomic_write_ipc
 from gmx_historical_data.cadence_gate import load_exempt_symbols
 from gmx_historical_data.freqtrade_exporter import FreqtradeExporter, _drop_rejected_funding_hours
 from gmx_historical_data.funding_state import funding_network_dir
 from gmx_historical_data.series_coverage import (
+    DATASTORE_TIMEFRAME,
     FUNDING_EPOCH,
     PairCoverage,
     SeriesThresholds,
@@ -43,6 +45,11 @@ EXPORT_REPORT = "export_report.json"
 REPORT_HEADER = "## Funding & Mark Companions"
 _FUTURES_1H = re.compile(r"^(?P<symbol>.+)_USDC_USDC-1h-futures\.feather$")
 _COMPANION_KINDS = ("funding_rate", "mark")
+#: Companion files shipped beside the 1h ones: ``funding_rate`` of the DataStore variant (#47).
+_COMPANION_SUFFIXES = tuple(
+    [f"-{TIMEFRAME}-{k}.feather" for k in _COMPANION_KINDS]
+    + [f"-{DATASTORE_TIMEFRAME}-funding_rate.feather"]
+)
 
 
 def companion_dir(stage_root: Path) -> Path:
@@ -82,8 +89,8 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
 
     symbols = _futures_symbols(futures)
     for symbol in symbols:
-        for kind in _COMPANION_KINDS:
-            existing = futures / f"{symbol}_USDC_USDC-{TIMEFRAME}-{kind}.feather"
+        for suffix in _COMPANION_SUFFIXES:
+            existing = futures / f"{symbol}_USDC_USDC{suffix}"
             if existing.is_file():
                 shutil.copy2(existing, staged / existing.name)
 
@@ -107,16 +114,16 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
     # otherwise).
     dropped: dict[str, int] = {}
     for rec in exporter.funding_reconciliations:
-        if rec.timeframe != TIMEFRAME:
+        if rec.timeframe not in (TIMEFRAME, DATASTORE_TIMEFRAME):
             continue
         rejected = set(rec.unknown_direction_hours) | set(rec.null_rate_hours)
-        target = staged / f"{rec.symbol}_USDC_USDC-{TIMEFRAME}-funding_rate.feather"
+        target = staged / f"{rec.symbol}_USDC_USDC-{rec.timeframe}-funding_rate.feather"
         if not rejected or not target.is_file():
             continue
         frame = pl.read_ipc(target, memory_map=False)
         kept, removed = _drop_rejected_funding_hours(frame, rejected)
         removed = max(removed, rec.removed_destination_rows)
-        if removed:
+        if removed and rec.timeframe == TIMEFRAME:
             dropped[rec.symbol] = removed
         if len(kept) != len(frame):
             atomic_write_ipc(kept, target)
@@ -136,18 +143,69 @@ def stage_companions(gmx_root: Path, stage_root: Path) -> dict[str, Any]:
             for f in mark_failures
         ],
         "reconciliations": {
-            r.symbol: {
-                "missing_hours": iso(r.missing_hours),
-                "unknown_direction_hours": iso(r.unknown_direction_hours),
-                "null_rate_hours": iso(r.null_rate_hours),
-                "removed_destination_rows": r.removed_destination_rows,
-            }
+            r.symbol: _reconciliation_json(r, iso)
             for r in exporter.funding_reconciliations
             if r.timeframe == TIMEFRAME
+        },
+        "datastore_reconciliations": {
+            r.symbol: _reconciliation_json(r, iso)
+            for r in exporter.funding_reconciliations
+            if r.timeframe == DATASTORE_TIMEFRAME
+        },
+        "source_hours": {
+            symbol: counts
+            for symbol in symbols
+            if (counts := source_hours(funding_network_dir(gmx_root) / "rates" / symbol))
+            is not None
         },
     }
     (stage_root / EXPORT_REPORT).write_text(json.dumps(report, indent=2))
     return report
+
+
+def _reconciliation_json(rec, iso) -> dict[str, Any]:
+    return {
+        "missing_hours": iso(rec.missing_hours),
+        "unknown_direction_hours": iso(rec.unknown_direction_hours),
+        "null_rate_hours": iso(rec.null_rate_hours),
+        "removed_destination_rows": rec.removed_destination_rows,
+    }
+
+
+def source_hours(symbol_dir: Path) -> dict[str, int] | None:
+    """Hours per provenance in a symbol's canonical ``1h.parquet``.
+
+    ``hypersync`` is an event-derived hour, ``datastore`` a chain-state read at the
+    hour boundary, ``gap_filled`` a carried value, ``other`` anything unlabelled.
+    ``None`` when the file is missing or unreadable.
+    """
+    path = symbol_dir / "1h.parquet"
+    if not path.is_file():
+        return None
+    try:
+        schema = pl.read_parquet_schema(path)
+        columns = [c for c in ("source", "is_gap_filled") if c in schema]
+        frame = pl.read_parquet(path, columns=columns) if columns else None
+        total = pl.scan_parquet(path).select(pl.len()).collect().item()
+    except Exception:  # noqa: BLE001 - counts are a report, never a reason to fail the stage
+        return None
+    if frame is None:
+        return {"hypersync": 0, "datastore": 0, "gap_filled": 0, "other": total}
+    gap = (
+        frame["is_gap_filled"].fill_null(False)
+        if "is_gap_filled" in frame.columns
+        else pl.Series([False] * total)
+    )
+    src = frame["source"] if "source" in frame.columns else pl.Series([None] * total, dtype=pl.Utf8)
+    gap_n = int(gap.sum())
+    datastore = int(((src == "datastore") & ~gap).sum())
+    hypersync = int(((src == "hypersync") & ~gap).sum())
+    return {
+        "hypersync": hypersync,
+        "datastore": datastore,
+        "gap_filled": gap_n,
+        "other": total - hypersync - datastore - gap_n,
+    }
 
 
 def promote_staged(staged: Path, futures_dir: Path) -> int:
@@ -158,7 +216,7 @@ def promote_staged(staged: Path, futures_dir: Path) -> int:
     futures_dir.mkdir(parents=True, exist_ok=True)
     count = 0
     for path in sorted(staged.glob("*.feather")):
-        if not any(path.name.endswith(f"-{TIMEFRAME}-{k}.feather") for k in _COMPANION_KINDS):
+        if not path.name.endswith(_COMPANION_SUFFIXES):
             continue
         tmp = futures_dir / f".{path.name}.tmp"
         shutil.copy2(path, tmp)
@@ -185,6 +243,9 @@ def _pair_json(pair: PairCoverage) -> dict[str, Any]:
         "funding_rows": pair.funding_rows,
         "futures_rows": pair.futures_rows,
         "mark_rows": pair.mark_rows,
+        "datastore_rows": pair.datastore_rows,
+        "datastore_last_bar": _iso(pair.datastore_last_bar),
+        "source_hours": None if pair.source_hours is None else dict(pair.source_hours),
         "holes_recent": pair.holes_recent,
         "holes_older": pair.holes_older,
         "rejected_older": pair.rejected_older,
@@ -315,6 +376,10 @@ def _publish_verdict(
         "funding_epoch": FUNDING_EPOCH.isoformat(),
         "state": state,
         "extract_outcome": extract_outcome,
+        "datastore_tail": datastore_tail.describe_tail_status(
+            datastore_tail.read_tail_status(funding_network_dir(gmx_root) / "checkpoints"),
+            now=now,
+        ),
         "checkpoints": checkpoints,
         "reasons": reasons,
         "thresholds": {k: getattr(thresholds, k) for k in thresholds.__dataclass_fields__},
@@ -409,6 +474,7 @@ def format_report_lines(coverage: dict[str, Any]) -> list[str]:
         f"  Pairs: {summary.get('pairs', 0)} -- CURRENT {summary.get('current', 0)}, "
         f"LAGGING {summary.get('lagging', 0)}, STALE {summary.get('stale', 0)}, "
         f"newly stale {summary.get('newly_stale', 0)}",
+        f"  datastore_tail: {coverage.get('datastore_tail', 'not run')}",
     ]
     for reason in coverage.get("reasons", []):
         lines.append(f"  BLOCKED: {reason}")
@@ -420,6 +486,17 @@ def format_report_lines(coverage: dict[str, Any]) -> list[str]:
             lines.append(
                 f"    {symbol}: {pair['tail']} -- newest bar {_fmt_bar(pair.get('last_bar'))}, "
                 f"{pair.get('tail_age_hours'):.0f}h behind{note}"
+            )
+    counted = [
+        (s, p["source_hours"])
+        for s, p in sorted(coverage.get("pairs", {}).items())
+        if p.get("source_hours")
+    ]
+    if counted:
+        lines.append("  Hours by source per pair (hypersync / datastore / gap_filled):")
+        for symbol, counts in counted:
+            lines.append(
+                f"    {symbol}: {counts['hypersync']} / {counts['datastore']} / {counts['gap_filled']}"
             )
     if not coverage.get("refreshed"):
         lines.append("  Last published bars (previous release's files, unchanged):")
@@ -449,12 +526,22 @@ def write_report_section(report_path: Path, coverage: dict[str, Any]) -> None:
     report_path.write_text("\n".join([*kept, *format_report_lines(coverage)]) + "\n")
 
 
+def _source_totals(coverage: dict[str, Any]) -> dict[str, int] | None:
+    counts = [
+        p["source_hours"] for p in coverage.get("pairs", {}).values() if p.get("source_hours")
+    ]
+    if not counts:
+        return None
+    return {k: sum(c[k] for c in counts) for k in ("hypersync", "datastore", "gap_filled")}
+
+
 def format_release_notes(coverage: dict[str, Any]) -> str:
     """Markdown section for the GitHub release notes."""
     lines = ["### Funding & mark companions", ""]
     if coverage.get("status") == "PASS":
         lines.append(
-            "`futures/*-1h-funding_rate.feather` and `*-1h-mark.feather` were refreshed in this release."
+            "`futures/*-1h-funding_rate.feather`, `*-1h_datastore-funding_rate.feather` "
+            "and `*-1h-mark.feather` were refreshed in this release."
         )
     else:
         lines.append(
@@ -470,12 +557,20 @@ def format_release_notes(coverage: dict[str, Any]) -> str:
                 f"| {symbol} | {_fmt_bar(pair.get('shipped_funding_last_bar'))} | "
                 f"{_fmt_bar(pair.get('shipped_mark_last_bar'))} |"
             )
+    lines += ["", f"DataStore tail-fill: {coverage.get('datastore_tail', 'not run')}"]
+    totals = _source_totals(coverage)
+    if totals:
+        lines.append(
+            f"Funding hours by source: {totals['hypersync']:,} event-derived (hypersync), "
+            f"{totals['datastore']:,} chain-state reads (datastore), "
+            f"{totals['gap_filled']:,} carried (gap-filled)."
+        )
     flagged = _flagged_pairs(coverage)
     if flagged:
         lines += [
             "",
             f"{len(flagged)} market(s) have a lagging or stale funding tail (no on-chain "
-            "event since; the tail is not forward-filled):",
+            "event and no DataStore read since; the tail is not forward-filled):",
             "",
             "| Pair | Tail | Newest funding bar | Behind cutoff |",
             "|---|---|---|---|",

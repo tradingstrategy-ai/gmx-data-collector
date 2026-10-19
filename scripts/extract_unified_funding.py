@@ -16,6 +16,11 @@ Phases:
        by comparing delta sums. Covers full V2 history.
     4. **Merge**: Combines all sources into a single ``1h.parquet`` per symbol
        with correct direction applied to V2.2+ data.
+    5. **DataStore tail-fill** (default when an RPC is configured; fail-soft, #64):
+       reads ``savedFundingFactorPerSecond`` at hourly boundaries for each market's
+       stale tail and for every carried (``is_gap_filled``) hour of the last 30
+       days, writes ``1h_datastore.parquet`` and re-merges. Per hour the merge
+       prefers an event-derived HyperSync hour, then a DataStore read, then a carried value.
 
 QUICK START
 -----------
@@ -41,6 +46,9 @@ OPTIONS
     --market             Filter by market symbol (e.g., "ETH/USD")
     --include-datastore  Include Phase 1 DataStore extraction (~200 batched HTTP requests, requires archive node)
     --skip-direction     Skip Phase 3 direction detection
+    --skip-datastore-tail  Skip the DataStore tail-fill / gap correction
+    --tail-window-days   Trailing days the tail-fill reaches (default: 30)
+    --tail-max-minutes   Time budget of the tail-fill (default: 4); partial work is kept
     --merge-only         Only run merge step, skip all extraction
     --resume             Resume each phase from its checkpoint
     --checkpoint-dir     Override checkpoint directory
@@ -54,13 +62,16 @@ import json
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 from rich.console import Console
 
+from gmx_historical_data import datastore_tail
 from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_parquet
+from gmx_historical_data.cadence_gate import load_exempt_symbols
 
 console = Console()
 
@@ -589,8 +600,21 @@ def merge_symbol(
     if "source" not in unified.columns:
         unified = unified.with_columns(pl.lit("unknown").alias("source"))
 
-    # Deduplicate by timestamp (prefer later source — hypersync appended second)
-    unified = unified.unique(subset=["timestamp"], keep="last")
+    # One row per hour. Precedence: an event-derived HyperSync hour, then a
+    # DataStore read (chain state at the hour boundary), then a carried gap fill.
+    unified = unified.with_columns(
+        pl.when((pl.col("source") == "hypersync") & ~pl.col("is_gap_filled"))
+        .then(0)
+        .when(pl.col("source") == "datastore")
+        .then(1)
+        .otherwise(2)
+        .alias("_precedence")
+    )
+    unified = (
+        unified.sort(["timestamp", "_precedence"], maintain_order=True)
+        .unique(subset=["timestamp"], keep="first", maintain_order=True)
+        .drop("_precedence")
+    )
     unified = unified.sort("timestamp")
 
     # Write unified output
@@ -617,6 +641,7 @@ def merge_unified_rates(
     network_dir: Path,
     market_filter: str | None = None,
     output_format: str = "parquet",
+    only_symbols: set[str] | None = None,
 ) -> None:
     """Merge DataStore, HyperSync Factor, and Direction data into unified rates.
 
@@ -631,6 +656,8 @@ def merge_unified_rates(
     :param network_dir: Network-specific directory (e.g., ``data/funding/arbitrum``).
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
     :param output_format: Output format: ``'parquet'`` or ``'feather'``.
+    :param only_symbols: Merge just these symbols (the DataStore tail-fill re-merges
+        what it touched).
     """
     console.print(f"\n{'=' * 70}")
     console.print("  Phase 4: Merge Unified Rates")
@@ -652,6 +679,8 @@ def merge_unified_rates(
     if market_filter:
         filter_sym = market_symbol_from_filter(market_filter)
         symbols = {s for s in symbols if s == filter_sym}
+    if only_symbols is not None:
+        symbols &= only_symbols
 
     if not symbols:
         console.print("  [yellow]No symbols found to merge[/yellow]")
@@ -672,6 +701,202 @@ def merge_unified_rates(
             )
 
     console.print(f"\n  Merge complete: {merged_count} symbols, {total_rows:,} total hours")
+
+
+# =============================================================================
+# DATASTORE TAIL-FILL (#64)
+# =============================================================================
+
+#: Default time budget of the tail-fill.
+TAIL_MAX_MINUTES = 4.0
+#: The tail-fill never runs past this many minutes after the process started: the
+#: daily release caps the whole extraction at 15 minutes, and a cancelled extraction
+#: withholds every companion (B4), so the optional tail-fill yields first. What it
+#: read is kept and the next run continues.
+TAIL_CEILING_MINUTES = 11.0
+
+
+@dataclass
+class TailFillResult:
+    """Outcome of :func:`tail_fill_datastore`.
+
+    :ivar status: The record written for the gate (``status``: ok / partial /
+        unavailable / failed, plus ``reason`` and hour counts).
+    :ivar touched: Symbols whose ``1h_datastore.parquet`` gained rows.
+    """
+
+    status: dict
+    touched: set[str] = field(default_factory=set)
+
+
+def _load_datastore_script():
+    """Import ``extract_funding_datastore`` (a sibling script, not a package module)."""
+    import importlib
+
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    return importlib.import_module("extract_funding_datastore")
+
+
+def _read_hours(path: Path) -> set[datetime]:
+    if not path.exists():
+        return set()
+    try:
+        return set(pl.read_parquet(path, columns=["timestamp"])["timestamp"].to_list())
+    except Exception:  # noqa: BLE001 - an unreadable datastore file just means "read it again"
+        return set()
+
+
+def tail_fill_datastore(
+    network_dir: Path,
+    *,
+    now: datetime | None = None,
+    rpc_config: str | None = None,
+    market_filter: str | None = None,
+    window_days: int = datastore_tail.TAIL_WINDOW_DAYS,
+    max_minutes: float | None = None,
+    chunk_hours: int = 48,
+    checkpoint_dir: Path | None = None,
+    output_format: str = "parquet",
+) -> TailFillResult:
+    """Extend quiet markets' tails and correct carried hours from the DataStore.
+
+    Run after the HyperSync phases and the first merge, so the canonical
+    ``rates/<SYM>/1h.parquet`` shows each market's last bar and its
+    ``is_gap_filled`` hours. For each market the window is (last bar + 1h ..
+    ``floor(now) - 1h``) plus every carried hour, both limited to the trailing
+    ``window_days``; the DataStore is read at the first block of each hour and the
+    rows are appended to ``1h_datastore.parquet`` (signed, ``source="datastore"``).
+    Markets on the delisted roster are not touched; markets that did not exist yet
+    produce no rows.
+
+    Never raises for an RPC problem: a node without historical state, a missing RPC,
+    a time budget or any other failure is recorded in the status file the gate reports
+    (``datastore_tail: unavailable (<reason>)``), whatever was read is already
+    persisted, and the release carries on with the tails flagged as before.
+
+    :param network_dir: ``<output-dir>/arbitrum``.
+    :param now: Run time (defaults to the current time).
+    :param rpc_config: RPC URL(s); defaults to ``JSON_RPC_ARBITRUM``.
+    :param market_filter: Optional symbol filter (``'ETH/USD'``).
+    :param window_days: Trailing window.
+    :param max_minutes: Time budget; ``None`` means unlimited.
+    :param chunk_hours: Hours persisted per chunk.
+    :param checkpoint_dir: Where the status file goes (default ``network_dir/checkpoints``).
+    :param output_format: Format of the canonical file the touched symbols are re-merged into.
+    :returns: A :class:`TailFillResult`; the symbols it touched are already re-merged.
+    """
+    now = now or datetime.now(UTC)
+    cutoff = datastore_tail.tail_cutoff(now)
+    cp_dir = checkpoint_dir or (network_dir / "checkpoints")
+    result = TailFillResult(status={})
+
+    def record(status: str, reason: str | None = None, **counts) -> TailFillResult:
+        result.status = datastore_tail.write_tail_status(
+            cp_dir,
+            status=status,
+            reason=reason,
+            window_start=cutoff - timedelta(days=window_days),
+            window_end=cutoff,
+            now=now,
+            **counts,
+        )
+        console.print(
+            f"  datastore_tail: {datastore_tail.describe_tail_status(result.status, now=now)}"
+        )
+        return result
+
+    console.print(f"\n{'=' * 70}")
+    console.print("  Phase 5: DataStore Tail-Fill (archive RPC, fail-soft)")
+    console.print(f"{'=' * 70}")
+
+    try:
+        ds = _load_datastore_script()
+    except Exception as exc:  # noqa: BLE001 - e.g. a missing optional dependency
+        return record("unavailable", f"datastore reader unavailable: {type(exc).__name__}: {exc}")
+    if rpc_config is None:
+        try:
+            rpc_config = ds.get_rpc_config()
+        except ValueError:
+            return record("unavailable", "no archive RPC configured (JSON_RPC_ARBITRUM)")
+
+    rates_dir = network_dir / "rates"
+    frames: dict[str, pl.DataFrame] = {}
+    already: dict[str, set[datetime]] = {}
+    filter_sym = market_symbol_from_filter(market_filter) if market_filter else None
+    if rates_dir.exists():
+        for sym_dir in sorted(rates_dir.iterdir()):
+            canonical = sym_dir / "1h.parquet"
+            if not sym_dir.is_dir() or not canonical.exists():
+                continue
+            if filter_sym and sym_dir.name != filter_sym:
+                continue
+            try:
+                frames[sym_dir.name] = pl.read_parquet(canonical)
+            except Exception as exc:  # noqa: BLE001 - one unreadable file must not stop the rest
+                console.print(f"  [yellow]{sym_dir.name}: unreadable 1h.parquet ({exc})[/yellow]")
+                continue
+            already[sym_dir.name] = _read_hours(sym_dir / "1h_datastore.parquet")
+
+    delisted = load_exempt_symbols([network_dir.parent.parent / "delisted_markets.json"])
+    windows = datastore_tail.compute_tail_windows(
+        frames, cutoff=cutoff, delisted=delisted, already_read=already, window_days=window_days
+    )
+    by_hour: dict[int, list[str]] = {}
+    symbol_of: dict[str, str] = {}
+    for window in windows.values():
+        symbol_of[window.market] = window.symbol
+        for hour in window.hours:
+            by_hour.setdefault(int(hour.timestamp()), []).append(window.market)
+    requested = len(by_hour)
+    console.print(
+        f"  Markets with a window: {len(windows)}; hours to read: {requested}; "
+        f"cutoff {cutoff:%Y-%m-%d %H:%M}Z"
+    )
+    if not windows:
+        return record("ok", hours_requested=0, hours_read=0)
+
+    deadline = None if max_minutes is None else time.monotonic() + max_minutes * 60
+
+    def should_stop() -> bool:
+        return deadline is not None and time.monotonic() >= deadline
+
+    def persist(batch) -> None:
+        ds.save_parquet(ds.aggregate_hourly_rates(batch), network_dir.parent)
+        result.touched.update(r.symbol for r in batch)
+
+    try:
+        try:
+            outcome = ds.extract_funding_hours(
+                rpc_config,
+                sorted(by_hour),
+                wanted=lambda hour: by_hour[hour],
+                symbol_of=lambda addr: symbol_of[addr.lower()],
+                persist=persist,
+                chunk_hours=chunk_hours,
+                should_stop=should_stop,
+            )
+        finally:
+            # Whatever was persisted, even by a failed run, belongs in the canonical series.
+            if result.touched:
+                merge_unified_rates(
+                    network_dir, market_filter, output_format, only_symbols=result.touched
+                )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: record it and let the release go on
+        return record(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            hours_requested=requested,
+            hours_read=len(result.touched),
+        )
+
+    counts = {"hours_requested": requested, "hours_read": outcome.read}
+    if outcome.stopped == "unavailable":
+        kind = "partial" if outcome.read else "unavailable"
+        return record(kind, outcome.reason, **counts)
+    if outcome.stopped == "deadline":
+        return record("partial", outcome.reason, **counts)
+    return record("ok", **counts)
 
 
 # =============================================================================
@@ -858,6 +1083,27 @@ Examples:
         help="Skip direction detection phase",
     )
     parser.add_argument(
+        "--skip-datastore-tail",
+        action="store_true",
+        help=(
+            "Skip the DataStore tail-fill / gap correction (it runs whenever an archive RPC "
+            "is configured, never fails the run, and records datastore_tail: unavailable "
+            "when the node has no historical state)"
+        ),
+    )
+    parser.add_argument(
+        "--tail-window-days",
+        type=int,
+        default=datastore_tail.TAIL_WINDOW_DAYS,
+        help="Trailing days the DataStore tail-fill reaches (default: 30)",
+    )
+    parser.add_argument(
+        "--tail-max-minutes",
+        type=float,
+        default=TAIL_MAX_MINUTES,
+        help="Time budget of the DataStore tail-fill; partial work is kept (default: 4)",
+    )
+    parser.add_argument(
         "--merge-only",
         action="store_true",
         help="Only merge existing data, skip all extraction phases",
@@ -950,6 +1196,8 @@ def main():
         if not args.skip_direction:
             phases.append("Direction (HyperSync)")
     phases.append("Merge")
+    if not args.merge_only and not args.skip_datastore_tail and args.network == "arbitrum":
+        phases.append("DataStore Tail-Fill")
     if args.feather_dir:
         phases.append("Feather Export")
 
@@ -983,6 +1231,22 @@ def main():
 
     # Phase 4: Merge all sources into unified rates
     merge_unified_rates(network_dir, args.market, args.output)
+
+    # Phase 5: DataStore tail-fill (fail-soft). Reads what HyperSync cannot see --
+    # the chain state after a quiet market's last event and under carried hours --
+    # then re-merges just the symbols it wrote.
+    if not args.merge_only and not args.skip_datastore_tail and args.network == "arbitrum":
+        elapsed_minutes = (time.monotonic() - t_start) / 60
+        tail_fill_datastore(
+            network_dir,
+            market_filter=args.market,
+            window_days=args.tail_window_days,
+            max_minutes=min(
+                args.tail_max_minutes, max(0.0, TAIL_CEILING_MINUTES - elapsed_minutes)
+            ),
+            checkpoint_dir=cp_dir,
+            output_format=args.output,
+        )
 
     # Phase 5: Feather export (optional)
     if args.feather_dir:
