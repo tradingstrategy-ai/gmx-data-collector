@@ -355,6 +355,18 @@ CONCURRENCY=8
 | `export-freqtrade` | Export OHLCV + funding rate + mark price to Freqtrade feather format |
 | `debug-oracle` | Debug oracle events |
 
+### Host deployment guards
+
+After a host refreshes funding and exports the Freqtrade files, run the read-only lake verifier. It checks the source parquet lake and stages any funding export checks in a system temporary directory:
+
+```sh
+make funding-unified-resume DATA=/srv/gmx
+make export-funding DATA=/srv/gmx
+make verify-lake DATA=/srv/gmx
+```
+
+For a shadow rollout, add `ARGS=--report-only`; the verifier prints findings but exits successfully. To write a JSON report, pass `ARGS='--json /var/tmp/gmx-lake-report.json'` (the report path must remain outside the data root).
+
 ### Common Options
 
 | Option | Description | Default |

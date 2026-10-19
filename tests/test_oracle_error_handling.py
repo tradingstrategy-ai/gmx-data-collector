@@ -137,6 +137,32 @@ async def test_all_keys_exhausted_raises_error():
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_retry_budget_stops_after_progressive_retries():
+    call_count = 0
+    rotator = MagicMock(spec=HyperSyncKeyRotator)
+    rotator.current_key = "key1"
+    rotator.rotate = MagicMock(return_value="key2")
+
+    async def always_rate_limited():
+        nonlocal call_count
+        call_count += 1
+        raise RuntimeError("HTTP 429 too many requests")
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+        with pytest.raises(RuntimeError, match="429"):
+            await retry_with_backoff(
+                always_rate_limited,
+                max_retries=2,
+                operation_name="bounded_rate_limit",
+                key_rotator=rotator,
+            )
+
+    assert call_count == 3  # initial call plus two rate-limit retries
+    assert rotator.rotate.call_count == 2
+    assert sleep.await_count == 2
+
+
+@pytest.mark.asyncio
 async def test_retry_without_key_rotator_backward_compatible():
     """Test that retry works without key_rotator (backward compatibility)."""
     call_count = 0
