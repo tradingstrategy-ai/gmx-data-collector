@@ -149,6 +149,28 @@ def _install(monkeypatch, chain: FakeChain) -> FakeChain:
     return chain
 
 
+def test_invalid_zero_timestamp_fails_without_retry(monkeypatch) -> None:
+    class ZeroTimestamp:
+        posts = 0
+
+        def __call__(self, url, json, timeout):
+            self.posts += 1
+            return _Resp(
+                [
+                    {"id": req["id"], "result": {"number": req["params"][0], "timestamp": "0x0"}}
+                    for req in json
+                ]
+            )
+
+    rpc = ZeroTimestamp()
+    monkeypatch.setattr(ds.requests, "post", rpc)
+
+    with pytest.raises(ds.InvalidBlockTimestamp, match="invalid timestamp 0"):
+        ds.prefetch_block_timestamps(RPC, [0])
+
+    assert rpc.posts == 1
+
+
 # ---------------------------------------------------------------------------
 # A lake with one quiet market
 # ---------------------------------------------------------------------------

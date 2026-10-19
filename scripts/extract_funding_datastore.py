@@ -147,6 +147,10 @@ class FundingExtractionError(RuntimeError):
     """Raised when an RPC batch stays failed/empty/undecodable after all retries."""
 
 
+class InvalidBlockTimestamp(FundingExtractionError):
+    """A deterministic invalid header response that cannot improve on retry."""
+
+
 class LegacyCheckpointError(RuntimeError):
     """Raised when ``--resume`` finds an unversioned (pre-durable) checkpoint."""
 
@@ -252,6 +256,8 @@ def _post_batch_with_retry(
             return parse(body)
         except HistoricalStateUnavailable:
             raise  # not transient: the node does not have this state, retrying cannot help
+        except InvalidBlockTimestamp:
+            raise
         except RpcDeadlineExceeded as exc:
             raise RpcDeadlineExceeded(f"{label}: {exc}") from exc
         except Exception as exc:
@@ -327,7 +333,9 @@ def prefetch_block_timestamps(
                     raise ValueError(f"block {bn}: missing or mismatched block")
                 ts = int(result["timestamp"], 16)
                 if ts <= 0:
-                    raise ValueError(f"block {bn}: invalid timestamp {ts}")
+                    raise InvalidBlockTimestamp(
+                        f"block {bn} has invalid timestamp {ts}; refusing to retry a deterministic header error"
+                    )
                 parsed[bn] = ts
             return parsed
 
@@ -948,6 +956,7 @@ def extract_funding_hours(
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     deadline: float | None = None,
+    anchor_block: int | None = None,
 ) -> HourExtraction:
     """Read ``savedFundingFactorPerSecond`` at the first block of each requested hour.
 
@@ -1015,7 +1024,11 @@ def extract_funding_hours(
         chunk = ordered[start : start + chunk_hours]
         try:
             blocks = resolve_hour_blocks(
-                chunk, latest_block=latest, fetch_timestamps=fetch_ts, cache=cache
+                chunk,
+                latest_block=latest,
+                fetch_timestamps=fetch_ts,
+                cache=cache,
+                anchor_block=anchor_block,
             )
             addresses = sorted({a.lower() for h in chunk for a in wanted(h)})
             funding = batch_fetch_funding_rates(
@@ -1155,6 +1168,7 @@ def run_hourly_backfill(
         should_stop=should_stop,
         on_progress=on_progress,
         deadline=deadline,
+        anchor_block=GMX_V2_GENESIS_BLOCK,
     )
 
 
@@ -1203,10 +1217,9 @@ def _main_hourly_backfill(args, markets: dict[str, dict], output_dir: Path) -> i
         return EXIT_BACKFILL_INCOMPLETE
 
     try:
+        minimum_hour = genesis_hour(rpc_config, deadline=rpc_deadline)
         from_hour = (
-            _parse_time(args.from_time)
-            if args.from_time
-            else genesis_hour(rpc_config, deadline=rpc_deadline)
+            max(_parse_time(args.from_time), minimum_hour) if args.from_time else minimum_hour
         )
         to_hour = (
             _parse_time(args.to_time)
