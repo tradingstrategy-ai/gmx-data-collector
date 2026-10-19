@@ -149,6 +149,28 @@ def _install(monkeypatch, chain: FakeChain) -> FakeChain:
     return chain
 
 
+def test_invalid_zero_timestamp_fails_without_retry(monkeypatch) -> None:
+    class ZeroTimestamp:
+        posts = 0
+
+        def __call__(self, url, json, timeout):
+            self.posts += 1
+            return _Resp(
+                [
+                    {"id": req["id"], "result": {"number": req["params"][0], "timestamp": "0x0"}}
+                    for req in json
+                ]
+            )
+
+    rpc = ZeroTimestamp()
+    monkeypatch.setattr(ds.requests, "post", rpc)
+
+    with pytest.raises(ds.InvalidBlockTimestamp, match="invalid timestamp 0"):
+        ds.prefetch_block_timestamps(RPC, [0])
+
+    assert rpc.posts == 1
+
+
 # ---------------------------------------------------------------------------
 # A lake with one quiet market
 # ---------------------------------------------------------------------------
@@ -553,6 +575,23 @@ def test_reader_stops_at_unavailable_state_and_keeps_earlier_chunks(monkeypatch)
 EPOCH_HOUR = _epoch(_h(20, 5))
 FROM_HOUR = _epoch(_h(0, 3))
 MARKETS = {MOO: {"symbol": "MOO/USD", "indexToken": "0x1", "isListed": True}}
+
+
+def test_backfill_anchor_precedes_first_market_listing(monkeypatch) -> None:
+    anchor_ts = _epoch(datetime(2023, 6, 26, 5, 34, tzinfo=UTC))
+    requested: list[int] = []
+
+    def timestamps(rpc_config, blocks, **kwargs):
+        requested.extend(blocks)
+        return {block: anchor_ts for block in blocks}
+
+    monkeypatch.setattr(ds, "prefetch_block_timestamps", timestamps)
+
+    first_hour = ds.genesis_hour(RPC)
+    first_listing = _epoch(datetime(2023, 8, 8, tzinfo=UTC))
+
+    assert requested == [105_000_000]
+    assert first_hour <= first_listing
 
 
 def _backfill(tmp_path: Path, **kw):

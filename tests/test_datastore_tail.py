@@ -204,6 +204,40 @@ def test_an_hour_after_the_chain_head_is_an_error_not_a_guess() -> None:
         dt.resolve_hour_blocks([beyond], latest_block=chain.latest, fetch_timestamps=chain.fetch)
 
 
+def test_resolver_uses_positive_anchor_and_never_queries_block_zero() -> None:
+    queried: list[int] = []
+
+    def fetch(blocks: list[int]) -> dict[int, int]:
+        queried.extend(blocks)
+        return {block: 0 if block == 0 else 1_700_000_000 + block for block in blocks}
+
+    anchor, head = 10, 10_000
+    target = 1_700_005_000
+    got = dt.resolve_hour_blocks(
+        [target], latest_block=head, fetch_timestamps=fetch, anchor_block=anchor
+    )
+
+    assert got[target] >= anchor
+    assert queried and 0 not in queried
+
+
+def test_hours_before_anchor_timestamp_clamp_to_anchor_block() -> None:
+    anchor, anchor_ts, head = 120_000_000, 1_690_000_000, 120_100_000
+    queried: list[int] = []
+
+    def fetch(blocks: list[int]) -> dict[int, int]:
+        queried.extend(blocks)
+        return {block: anchor_ts + (block - anchor) // 4 for block in blocks}
+
+    early = anchor_ts - 86_400
+    got = dt.resolve_hour_blocks(
+        [early], latest_block=head, fetch_timestamps=fetch, anchor_block=anchor
+    )
+
+    assert got[early] == anchor
+    assert set(queried) == {anchor, head}
+
+
 # ---------------------------------------------------------------------------
 # Historical-state errors
 # ---------------------------------------------------------------------------

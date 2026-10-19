@@ -112,6 +112,7 @@ BLOCKS_PER_HOUR = 14_400
 
 # GMX V2 genesis and V2.2 cutoff on Arbitrum
 GMX_V2_GENESIS_BLOCK = 120_000_000  # ~Aug 2023
+DATASTORE_BACKFILL_ANCHOR_BLOCK = 105_000_000  # 2023-06-26, before the first GMX V2 listing
 GMX_V22_FUNDING_EVENT_START = 370_000_000  # ~Aug 2025
 
 
@@ -145,6 +146,10 @@ RPC_MAX_ATTEMPTS = 5
 
 class FundingExtractionError(RuntimeError):
     """Raised when an RPC batch stays failed/empty/undecodable after all retries."""
+
+
+class InvalidBlockTimestamp(FundingExtractionError):
+    """A deterministic invalid header response that cannot improve on retry."""
 
 
 class LegacyCheckpointError(RuntimeError):
@@ -252,6 +257,8 @@ def _post_batch_with_retry(
             return parse(body)
         except HistoricalStateUnavailable:
             raise  # not transient: the node does not have this state, retrying cannot help
+        except InvalidBlockTimestamp:
+            raise
         except RpcDeadlineExceeded as exc:
             raise RpcDeadlineExceeded(f"{label}: {exc}") from exc
         except Exception as exc:
@@ -327,7 +334,9 @@ def prefetch_block_timestamps(
                     raise ValueError(f"block {bn}: missing or mismatched block")
                 ts = int(result["timestamp"], 16)
                 if ts <= 0:
-                    raise ValueError(f"block {bn}: invalid timestamp {ts}")
+                    raise InvalidBlockTimestamp(
+                        f"block {bn} has invalid timestamp {ts}; refusing to retry a deterministic header error"
+                    )
                 parsed[bn] = ts
             return parsed
 
@@ -948,6 +957,7 @@ def extract_funding_hours(
     should_stop: Callable[[], bool] | None = None,
     on_progress: Callable[[int, int, int], None] | None = None,
     deadline: float | None = None,
+    anchor_block: int | None = None,
 ) -> HourExtraction:
     """Read ``savedFundingFactorPerSecond`` at the first block of each requested hour.
 
@@ -1015,7 +1025,11 @@ def extract_funding_hours(
         chunk = ordered[start : start + chunk_hours]
         try:
             blocks = resolve_hour_blocks(
-                chunk, latest_block=latest, fetch_timestamps=fetch_ts, cache=cache
+                chunk,
+                latest_block=latest,
+                fetch_timestamps=fetch_ts,
+                cache=cache,
+                anchor_block=anchor_block,
             )
             addresses = sorted({a.lower() for h in chunk for a in wanted(h)})
             funding = batch_fetch_funding_rates(
@@ -1067,9 +1081,11 @@ def extract_funding_hours(
 
 
 def genesis_hour(
-    rpc_config: str, genesis_block: int = GMX_V2_GENESIS_BLOCK, deadline: float | None = None
+    rpc_config: str,
+    genesis_block: int = DATASTORE_BACKFILL_ANCHOR_BLOCK,
+    deadline: float | None = None,
 ) -> int:
-    """First whole hour (epoch seconds) at or before GMX V2's genesis block."""
+    """First whole hour at or before the pre-listing DataStore anchor block."""
     ts = prefetch_block_timestamps(rpc_config, [genesis_block], deadline=deadline)[genesis_block]
     return ts // _HOUR_SECONDS * _HOUR_SECONDS
 
@@ -1155,6 +1171,7 @@ def run_hourly_backfill(
         should_stop=should_stop,
         on_progress=on_progress,
         deadline=deadline,
+        anchor_block=DATASTORE_BACKFILL_ANCHOR_BLOCK,
     )
 
 
@@ -1203,10 +1220,9 @@ def _main_hourly_backfill(args, markets: dict[str, dict], output_dir: Path) -> i
         return EXIT_BACKFILL_INCOMPLETE
 
     try:
+        minimum_hour = genesis_hour(rpc_config, deadline=rpc_deadline)
         from_hour = (
-            _parse_time(args.from_time)
-            if args.from_time
-            else genesis_hour(rpc_config, deadline=rpc_deadline)
+            max(_parse_time(args.from_time), minimum_hour) if args.from_time else minimum_hour
         )
         to_hour = (
             _parse_time(args.to_time)

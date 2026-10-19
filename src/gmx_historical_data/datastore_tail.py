@@ -218,6 +218,7 @@ def resolve_hour_blocks(
     fetch_timestamps: Callable[[list[int]], dict[int, int]],
     cache: dict[int, int] | None = None,
     max_rounds: int = 80,
+    anchor_block: int | None = None,
 ) -> dict[int, int]:
     """Map each hour boundary (epoch seconds) to the first block at or after it.
 
@@ -238,6 +239,22 @@ def resolve_hour_blocks(
         search does not converge.
     """
     cache = {} if cache is None else cache
+    # Block zero is a valid chain header but has timestamp zero, which is not a
+    # usable timestamp for this resolver. Backfill callers supply the GMX V2
+    # genesis block; recent tail callers retain a positive floor without an
+    # extra anchor RPC.
+    use_anchor = anchor_block is not None and anchor_block <= latest_block
+    anchor_block = 1 if anchor_block is None else anchor_block
+    if not use_anchor:
+        # A test chain or a pre-launch network can have no GMX V2 range yet;
+        # block 1 is still a valid positive search floor.
+        anchor_block = 1
+    if anchor_block <= 0:
+        raise BlockResolutionError("hour resolution requires a positive anchor block")
+    if use_anchor and anchor_block not in cache:
+        cache.update(fetch_timestamps([anchor_block]))
+    anchor_ts = cache.get(anchor_block) if use_anchor else None
+    requested_hours = list(hours)
     if latest_block not in cache:
         cache.update(fetch_timestamps([latest_block]))
     head_ts = cache[latest_block]
@@ -247,11 +264,13 @@ def resolve_hour_blocks(
             f"hour {late[0]} is after block {latest_block} (timestamp {head_ts})"
         )
 
-    unresolved = sorted(set(hours))
-    resolved: dict[int, int] = {}
+    unresolved = sorted({h for h in requested_hours if anchor_ts is None or h > anchor_ts})
+    resolved: dict[int, int] = {
+        h: anchor_block for h in requested_hours if anchor_ts is not None and h <= anchor_ts
+    }
     for round_no in range(max_rounds):
         if not unresolved:
-            return {h: resolved[h] for h in hours}
+            return {h: resolved[h] for h in requested_hours}
         blocks = sorted(cache)
         stamps = [cache[b] for b in blocks]
         probes: set[int] = set()
@@ -263,12 +282,12 @@ def resolve_hour_blocks(
             if lo is not None and hi - lo == 1:
                 resolved[hour] = hi
                 continue
-            if hi == 0:
-                resolved[hour] = 0
-                continue
             if lo is None:
+                # The anchor is the known lower bracket, so this branch only
+                # occurs when the caller supplied a cache with no usable lower
+                # point. Never probe before the GMX V2 search floor.
                 guess = hi - int((stamps[i] - hour) * _BRACKET_BLOCKS_PER_SECOND) - 1
-                guess = min(max(guess, 0), hi - 1)
+                guess = min(max(guess, anchor_block), hi - 1)
             else:
                 width = hi - lo
                 if round_no % 2 or width <= _BISECT_BELOW:
@@ -283,7 +302,7 @@ def resolve_hour_blocks(
         if probes:
             cache.update(fetch_timestamps(sorted(probes)))
     if not unresolved:
-        return {h: resolved[h] for h in hours}
+        return {h: resolved[h] for h in requested_hours}
     raise BlockResolutionError(f"{len(unresolved)} hour(s) did not resolve in {max_rounds} rounds")
 
 
