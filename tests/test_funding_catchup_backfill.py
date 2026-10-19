@@ -208,7 +208,7 @@ def test_widening_the_range_is_progress_even_though_the_last_block_goes_down(
         cp,
         first_hour=0,
         last_hour=89 * h,
-        last_block=800,  # lower: the new chunks are earlier history
+        last_block=9_000,  # the extractor never lets this move back
         target_hour=100 * h,
         covered=[[0, 89 * h], [90 * h, 100 * h]],
     )
@@ -217,3 +217,55 @@ def test_widening_the_range_is_progress_even_though_the_last_block_goes_down(
     assert after["datastore_backfill"]["covered_hours"] == 101
     assert funding_catchup.has_advanced(before, after)
     assert not funding_catchup.has_advanced(after, before)
+
+
+def _write(gmx_root: Path, covered: list[list[int]], last_block: int = 9_000) -> dict:
+    datastore_tail.write_backfill_checkpoint(
+        funding_network_dir(gmx_root) / "checkpoints",
+        first_hour=covered[0][0],
+        last_hour=covered[-1][1],
+        last_block=last_block,
+        target_hour=1_000 * 3600,
+        covered=covered,
+    )
+    return funding_catchup.snapshot(gmx_root)
+
+
+def test_replacing_covered_ranges_with_equally_many_other_hours_is_rejected(
+    tmp_path: Path,
+) -> None:
+    h = 3600
+    gmx_root = _gmx_root(tmp_path)
+    before = _write(gmx_root, [[100 * h, 200 * h]])
+
+    after = _write(
+        gmx_root, [[150 * h, 250 * h]], last_block=9_500
+    )  # later, same size, lost 100h-149h
+
+    assert (
+        before["datastore_backfill"]["covered_hours"]
+        == after["datastore_backfill"]["covered_hours"]
+    )
+    assert not funding_catchup.has_advanced(before, after)
+
+
+def test_a_superset_of_the_covered_ranges_is_an_advance(tmp_path: Path) -> None:
+    h = 3600
+    gmx_root = _gmx_root(tmp_path)
+    before = _write(gmx_root, [[100 * h, 200 * h]])
+
+    after = _write(gmx_root, [[100 * h, 250 * h]], last_block=9_500)
+    assert funding_catchup.has_advanced(before, after)
+
+    wider = _write(gmx_root, [[50 * h, 200 * h]], last_block=9_000)  # earlier prefix, same block
+    assert funding_catchup.has_advanced(before, wider)
+
+
+def test_a_regressed_last_block_is_rejected_even_for_a_superset(tmp_path: Path) -> None:
+    h = 3600
+    gmx_root = _gmx_root(tmp_path)
+    before = _write(gmx_root, [[100 * h, 200 * h]], last_block=9_000)
+
+    after = _write(gmx_root, [[50 * h, 200 * h]], last_block=8_000)
+
+    assert not funding_catchup.has_advanced(before, after)

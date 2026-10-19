@@ -13,6 +13,7 @@ themselves live in ``scripts/extract_funding_datastore.py``.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from bisect import bisect_left
@@ -47,6 +48,8 @@ __all__ = [
     "write_backfill_checkpoint",
     "write_tail_status",
 ]
+
+logger = logging.getLogger(__name__)
 
 HOUR = timedelta(hours=1)
 HOUR_SECONDS = 3600
@@ -419,7 +422,7 @@ def write_backfill_checkpoint(
         "version": CHECKPOINT_VERSION,
         "symbol": "funding_datastore_backfill",
         "last_block": last_block,
-        "last_timestamp": last_hour,
+        "last_timestamp": max(r[1] for r in ranges),
         "first_hour": first_hour,
         "target_hour": target_hour,
         "covered": ranges,
@@ -432,19 +435,40 @@ def write_backfill_checkpoint(
 
 
 def read_backfill_checkpoint(checkpoint_dir: Path) -> dict[str, Any] | None:
-    """The backfill checkpoint, or ``None`` if missing, unreadable or unversioned."""
+    """The backfill checkpoint, or ``None`` if missing or invalid.
+
+    A checkpoint that is unreadable, unversioned or has no valid ``covered`` ranges is
+    invalid: a warning is logged and coverage restarts from scratch, which is safe because
+    DataStore reads are idempotent and merge by hour.
+    """
+    path = Path(checkpoint_dir) / BACKFILL_CHECKPOINT
     try:
-        data = json.loads((Path(checkpoint_dir) / BACKFILL_CHECKPOINT).read_text())
-    except (OSError, ValueError):
+        data = json.loads(path.read_text())
+    except OSError:
         return None
-    if (
-        not isinstance(data, dict)
-        or data.get("version") != CHECKPOINT_VERSION
-        or not isinstance(data.get("last_timestamp"), int)
-    ):
+    except ValueError:
+        logger.warning("%s is not valid JSON; restarting backfill coverage from scratch", path)
         return None
-    if "covered" not in data:  # no ranges recorded: treat as one contiguous run
-        data["covered"] = [[data.get("first_hour", data["last_timestamp"]), data["last_timestamp"]]]
-    data["covered"] = merge_ranges(data["covered"])
+    covered = data.get("covered") if isinstance(data, dict) else None
+    valid = (
+        isinstance(data, dict)
+        and data.get("version") == CHECKPOINT_VERSION
+        and isinstance(data.get("last_block"), int)
+        and isinstance(covered, list)
+        and bool(covered)
+        and all(
+            isinstance(r, list) and len(r) == 2 and all(isinstance(x, int) for x in r)
+            for r in covered
+        )
+    )
+    if not valid:
+        logger.warning(
+            "%s has no valid covered ranges; restarting backfill coverage from scratch "
+            "(reads are idempotent and merge by hour)",
+            path,
+        )
+        return None
+    data["covered"] = merge_ranges(covered)
     data["covered_hours"] = covered_hour_count(data["covered"])
+    data["last_timestamp"] = max(r[1] for r in data["covered"])
     return data

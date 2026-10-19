@@ -10,7 +10,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import threading
+import time
 from datetime import UTC, datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import polars as pl
@@ -31,6 +34,7 @@ def _load(name: str):
     return module
 
 
+_REAL_SLEEP = time.sleep  # the autouse fixture silences time.sleep; the drip server needs it
 ds = _load("extract_funding_datastore")
 uni = _load("extract_unified_funding")
 
@@ -688,6 +692,8 @@ class SlowChain:
         self.timeouts: list[tuple[float, float]] = []  # (clock at call, timeout given)
 
     def __call__(self, url, json, timeout):
+        # The worker passes (connect, read); only the read timeout limits a slow reply.
+        timeout = timeout[1] if isinstance(timeout, tuple) else timeout
         self.timeouts.append((self.clock.now, timeout))
         if self.down:
             raise requests.exceptions.ConnectionError("rpc down")
@@ -800,6 +806,7 @@ def test_widening_a_bounded_backfill_reads_the_new_prefix(tmp_path, monkeypatch)
     )
     cp_dir = tmp_path / "arbitrum" / "checkpoints"
     assert dt.read_backfill_checkpoint(cp_dir)["covered"] == [[first, last]]
+    block_before = dt.read_backfill_checkpoint(cp_dir)["last_block"]
     chain.call_blocks.clear()
 
     result = ds.run_hourly_backfill(
@@ -814,6 +821,7 @@ def test_widening_a_bounded_backfill_reads_the_new_prefix(tmp_path, monkeypatch)
     assert checkpoint["covered"] == [[FROM_HOUR, last]]
     assert checkpoint["complete"] is True
     assert checkpoint["covered_hours"] == 101
+    assert checkpoint["last_block"] >= block_before  # catch-up compares it: never moves back
 
 
 def test_a_gap_in_the_covered_range_is_filled(tmp_path, monkeypatch) -> None:
@@ -845,3 +853,84 @@ def test_a_fully_covered_request_reads_nothing(tmp_path, monkeypatch) -> None:
     result = _backfill(tmp_path)
 
     assert chain.posts == posts and result.stopped is None and result.requested == 0
+
+
+# ---------------------------------------------------------------------------
+# requests' timeout is per-socket-read, not total: a dripping server must still be cut off
+# ---------------------------------------------------------------------------
+
+
+class _DripHandler(BaseHTTPRequestHandler):
+    """Answers, but one byte every 50 ms -- never idle long enough for a read timeout."""
+
+    drip_headers = False
+
+    def do_POST(self):  # noqa: N802 - http.server API
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        body = json.dumps([{"id": 0, "result": "0x1"}]).ljust(80).encode()
+        head = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+            + f"Content-Length: {len(body)}\r\n\r\n".encode()
+        )
+        try:
+            if self.drip_headers:
+                for byte in head:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    _REAL_SLEEP(0.05)
+            else:
+                self.wfile.write(head)
+                self.wfile.flush()
+            for byte in body:
+                self.wfile.write(bytes([byte]))
+                self.wfile.flush()
+                _REAL_SLEEP(0.05)
+        except OSError:
+            pass  # the client gave up -- exactly what the test wants
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def drip_server():
+    servers = []
+
+    def start(drip_headers: bool) -> str:
+        handler = type("H", (_DripHandler,), {"drip_headers": drip_headers})
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        servers.append(server)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    yield start
+    for server in servers:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("drip_headers", [False, True], ids=["body", "headers"])
+def test_a_dripping_server_is_cut_off_at_the_total_deadline(drip_server, drip_headers) -> None:
+    url = drip_server(drip_headers)
+    payload = [{"id": 0, "jsonrpc": "2.0", "method": "eth_blockNumber", "params": []}]
+    started = time.monotonic()
+
+    with pytest.raises(dt.RpcDeadlineExceeded):
+        ds._post_batch_with_retry(
+            url,
+            payload,
+            60,  # a generous read timeout: the drip never trips it
+            lambda items: items,
+            "drip",
+            deadline=time.monotonic() + 0.3,
+        )
+
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0, f"returned after {elapsed:.2f}s against a 0.3s deadline"
+
+
+def test_without_a_deadline_the_same_server_is_simply_slow(drip_server) -> None:
+    url = drip_server(False)
+    payload = [{"id": 0, "jsonrpc": "2.0", "method": "eth_blockNumber", "params": []}]
+    body = ds._post_batch_with_retry(url, payload, 60, lambda items: items, "drip")
+    assert body == [{"id": 0, "result": "0x1"}]

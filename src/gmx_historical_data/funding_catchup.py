@@ -69,11 +69,17 @@ def snapshot(gmx_root: Path) -> Positions:
             positions[key]["covered_hours"] = (
                 checkpoint["covered_hours"] if checkpoint is not None else 0
             )
+            positions[key]["covered"] = checkpoint["covered"] if checkpoint is not None else []
     return positions
 
 
 def _progress(position: dict[str, int]) -> tuple[int, int]:
     return (position.get("covered_hours", 0), position["last_block"])
+
+
+def _covers(new: list[list[int]], old: list[list[int]]) -> bool:
+    """Whether every hour range in ``old`` lies inside some range of ``new``."""
+    return all(any(a <= first and last <= b for a, b in new) for first, last in old)
 
 
 def has_advanced(before: Positions, after: Positions) -> bool:
@@ -94,8 +100,15 @@ def has_advanced(before: Positions, after: Positions) -> bool:
         moved = moved or new["last_block"] > old["last_block"]
     for key, _ in _OPTIONAL_KEYS:
         new, old = after.get(key), before.get(key)
-        if old is not None and (new is None or _progress(new) < _progress(old)):
-            return False  # an optional checkpoint that vanished or regressed is not a newer state
+        if old is not None:
+            # A newer state must contain everything the older one had: replacing
+            # [100h,200h] with [150h,250h] has as many hours but loses 100h-149h.
+            if (
+                new is None
+                or new["last_block"] < old["last_block"]
+                or not _covers(new.get("covered", []), old.get("covered", []))
+            ):
+                return False
         if new is not None and (old is None or _progress(new) > _progress(old)):
             moved = True
     return moved

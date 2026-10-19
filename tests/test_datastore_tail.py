@@ -329,7 +329,10 @@ def test_checkpoint_covers_ranges_and_completeness_follows_the_requested_start(
     assert data["covered_hours"] == 11
 
 
-def test_a_checkpoint_without_ranges_reads_as_one_contiguous_run(tmp_path: Path) -> None:
+def test_a_checkpoint_without_ranges_is_invalid_and_coverage_restarts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The first-commit format (first_hour/last_timestamp, no ranges) never shipped: not migrated."""
     (tmp_path / dt.BACKFILL_CHECKPOINT).write_text(
         json.dumps(
             {
@@ -341,4 +344,14 @@ def test_a_checkpoint_without_ranges_reads_as_one_contiguous_run(tmp_path: Path)
             }
         )
     )
-    assert dt.read_backfill_checkpoint(tmp_path)["covered"] == [[0, 7200]]
+    with caplog.at_level("WARNING"):
+        assert dt.read_backfill_checkpoint(tmp_path) is None
+    assert "no valid covered ranges" in caplog.text
+
+
+@pytest.mark.parametrize("covered", [[], [[1]], [[1, "x"]], "nope", [[1, 2, 3]]])
+def test_malformed_ranges_are_invalid(tmp_path: Path, covered) -> None:
+    (tmp_path / dt.BACKFILL_CHECKPOINT).write_text(
+        json.dumps({"version": 2, "last_block": 5, "last_timestamp": 7200, "covered": covered})
+    )
+    assert dt.read_backfill_checkpoint(tmp_path) is None

@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -171,6 +172,56 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
+#: Connect timeout used when a deadline is set (capped further to the time left).
+_CONNECT_TIMEOUT_SECONDS = 10
+
+
+def _http_post_json(url: str, payload: list[dict], timeout: float, deadline: float | None):
+    """POST ``payload`` and return the decoded JSON, never waiting past ``deadline``.
+
+    ``requests``' ``timeout`` limits *inactivity* on the socket, not total time: a server
+    that drips one byte every 50 ms satisfies any read timeout while the call runs on for
+    minutes. With a ``deadline`` the exchange (connect, headers, body) therefore runs in a
+    worker thread that the caller waits on only until the deadline; the connect/read
+    timeouts are also capped to the time left, so a stalled socket ends on its own, and
+    on expiry the call is abandoned (its daemon thread ends at its capped socket timeouts or
+    when the server finishes). Not ``signal.alarm``: this may not run on the main thread.
+
+    :raises RpcDeadlineExceeded: If the exchange is not finished by ``deadline``.
+    """
+    if deadline is None:
+        resp = requests.post(url, json=payload, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    remaining = deadline - _monotonic()
+    if remaining <= 0:
+        raise RpcDeadlineExceeded("time budget reached")
+    outcome: dict = {}
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                timeout=(min(_CONNECT_TIMEOUT_SECONDS, remaining), min(timeout, remaining)),
+            )
+            resp.raise_for_status()
+            outcome["body"] = resp.json()
+        except BaseException as exc:  # noqa: BLE001 - handed to the waiting caller
+            outcome["error"] = exc
+        finally:
+            done.set()
+
+    threading.Thread(target=work, name="rpc-post", daemon=True).start()
+    if not done.wait(timeout=remaining):
+        raise RpcDeadlineExceeded("time budget reached during an RPC call")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["body"]
+
+
 def _post_batch_with_retry(
     url: str,
     payload: list[dict],
@@ -184,28 +235,25 @@ def _post_batch_with_retry(
     ``parse`` receives the decoded JSON and must raise on a missing, errored or
     undecodable item — a bad response is never converted into a value.
 
-    With a ``deadline`` (a :func:`_monotonic` instant) no call, retry or backoff sleep
-    is started that could run past it: each attempt's HTTP timeout is capped to the time
-    left, and a retry whose backoff would cross the deadline is not made.
+    With a ``deadline`` (a :func:`_monotonic` instant) the *total* time is bounded: no
+    call, retry or backoff sleep is started that could run past it, each call is abandoned
+    at the deadline however slowly the server drips (see :func:`_http_post_json`), and a
+    retry whose backoff would cross the deadline is not made.
 
     :raises FundingExtractionError: If every attempt fails.
     :raises RpcDeadlineExceeded: If the deadline is reached before a call succeeds.
     """
     for attempt in range(RPC_MAX_ATTEMPTS):
-        attempt_timeout = timeout
-        if deadline is not None:
-            remaining = deadline - _monotonic()
-            if remaining <= 0:
-                raise RpcDeadlineExceeded(f"{label}: time budget reached")
-            attempt_timeout = min(timeout, remaining)
+        if deadline is not None and deadline - _monotonic() <= 0:
+            raise RpcDeadlineExceeded(f"{label}: time budget reached")
         try:
-            resp = requests.post(url, json=payload, timeout=attempt_timeout)
-            resp.raise_for_status()
-            body = resp.json()
+            body = _http_post_json(url, payload, timeout, deadline)
             _raise_if_state_unavailable(body)
             return parse(body)
         except HistoricalStateUnavailable:
             raise  # not transient: the node does not have this state, retrying cannot help
+        except RpcDeadlineExceeded as exc:
+            raise RpcDeadlineExceeded(f"{label}: {exc}") from exc
         except Exception as exc:
             if attempt == RPC_MAX_ATTEMPTS - 1:
                 raise FundingExtractionError(
@@ -1062,10 +1110,12 @@ def run_hourly_backfill(
     """
     checkpoint_dir = Path(output_dir) / "arbitrum" / "checkpoints"
     covered: list[list[int]] = []
+    highest_block = 0
     if resume:
         saved = read_backfill_checkpoint(checkpoint_dir)
         if saved is not None:
             covered = saved["covered"]
+            highest_block = saved["last_block"]
     hours = uncovered_hours(covered, from_hour, to_hour)
     if not hours:
         console.print("  Backfill already complete; nothing to read.")
@@ -1083,13 +1133,14 @@ def run_hourly_backfill(
     def on_progress(first_hour: int, last_hour: int, last_block: int) -> None:
         # A chunk holds consecutive *uncovered* hours, so everything between its first
         # and last hour is covered once it is persisted.
-        nonlocal covered
+        nonlocal covered, highest_block
         covered = merge_ranges([*covered, [first_hour, last_hour]])
+        highest_block = max(highest_block, last_block)  # never moves back (catch-up compares)
         write_backfill_checkpoint(
             checkpoint_dir,
             first_hour=from_hour,
             last_hour=last_hour,
-            last_block=last_block,
+            last_block=highest_block,
             target_hour=to_hour,
             covered=covered,
         )
