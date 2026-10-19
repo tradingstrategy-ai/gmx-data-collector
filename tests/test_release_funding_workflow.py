@@ -107,7 +107,8 @@ def test_withheld_runs_publish_but_turn_the_job_red() -> None:
     assert "exit 1" in step["run"]
     release = _step("Create GitHub Release")["run"]
     assert "gmx-funding-state-*.tar.gz" in _step("Package tarballs")["run"] or True
-    assert "delete-asset" in release
+    assert "funding_state_assets.sh publish" in release
+    assert "delete-asset" in Path("scripts/funding_state_assets.sh").read_text()
     assert "release_funding_companions.py notes" in release
     assert "funding_coverage.json" in release
 
@@ -137,9 +138,13 @@ def _run_step(
     for link in ("src", "scripts"):
         if not (cwd / link).exists():
             (cwd / link).symlink_to(REPO / link)
-    script = script.replace("sleep $((attempt * 10))", "sleep 0")
     (cwd / "out").mkdir(exist_ok=True)
-    env = {**os.environ, **(env_extra or {})}
+    env = {
+        **os.environ,
+        "GITHUB_REPOSITORY": "owner/repo",
+        "RESTORE_RETRY_SECONDS": "0",
+        **(env_extra or {}),
+    }
     env["PATH"] = f"{Path(sys.executable).parent}:{env['PATH']}"
     if extra_path:
         env["PATH"] = f"{extra_path}:{env['PATH']}"
@@ -236,7 +241,8 @@ case "$1 $2" in
       *'select(.name=='*)
         name=$(echo "$*" | sed -n 's/.*select(.name=="\([^"]*\)").*/\1/p')
         grep "^$name " "$(reg "$tag")" | cut -d' ' -f2 ;;
-      *) cut -d' ' -f1 "$(reg "$tag")" 2>/dev/null ;;
+      *) [ -e "$FAKE_GH/view_fail_names" ] && exit 1
+         cut -d' ' -f1 "$(reg "$tag")" 2>/dev/null ;;
     esac ;;
   "release download")
     tag="$3"; dest=""; pattern=""
