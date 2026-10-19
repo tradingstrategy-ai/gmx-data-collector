@@ -365,7 +365,7 @@ make export-funding DATA=/srv/gmx
 make verify-lake DATA=/srv/gmx ARGS='--max-checkpoint-age-hours 30 --max-tail-status-age-hours 48'
 ```
 
-The age limits default to 6 hours for checkpoints and 36 hours for tail status. A daily job should allow for the elapsed time before its own resume, for example 30 hours for checkpoints; choose the tail-status limit to match the expected tail-fill cadence. For a shadow rollout, add `--report-only` to `ARGS`; the verifier prints findings but exits successfully. To write a JSON report, pass `--json /var/tmp/gmx-lake-report.json` in `ARGS` (the report path must remain outside the data root).
+The age limits default to 6 hours for checkpoints and 36 hours for tail status. A daily job should allow for the elapsed time before its own resume, for example 30 hours for checkpoints; choose the tail-status limit to match the expected tail-fill cadence. The 8h sign check is opt-in with `--check-8h` because the orchestrator normalizer maintains those files. For a shadow rollout, add `--report-only` to `ARGS`; the verifier prints findings but exits successfully. To write a JSON report, pass `--json /var/tmp/gmx-lake-report.json` in `ARGS` (the report path must remain outside the data root).
 
 ### Common Options
 

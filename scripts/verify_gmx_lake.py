@@ -87,6 +87,7 @@ def run(
     tail_expected: bool | None,
     max_checkpoint_age_hours: float = 6,
     max_tail_status_age_hours: float = 36,
+    check_8h: bool = False,
 ):
     out = []
     net = root / "funding/arbitrum"
@@ -97,6 +98,11 @@ def run(
     active = {}
     frames = {}
     since30, since7 = now - timedelta(days=30), now - timedelta(days=7)
+    listing_dates = {}
+    if "G1c" in checks or "G2" in checks:
+        from gmx_historical_data.funding_release import load_listing_dates
+
+        listing_dates = load_listing_dates(root / "snapshots")
     for candle in sorted(futures.glob("*-1h-futures.feather")):
         match = re.match(r"(.+)_USDC_USDC-1h-futures\.feather$", candle.name)
         if match:
@@ -106,7 +112,14 @@ def run(
                 and _newest(candle) is not None
                 and _newest(candle) >= now - timedelta(hours=72)
             )
-            if "G1c" in checks and active[symbol] and not (rates / symbol / "1h.parquet").is_file():
+            listing_date = listing_dates.get(symbol.upper()) or _oldest(candle)
+            in_listing_grace = listing_date is not None and now - listing_date <= timedelta(days=7)
+            if (
+                "G1c" in checks
+                and active[symbol]
+                and not in_listing_grace
+                and not (rates / symbol / "1h.parquet").is_file()
+            ):
                 issue(out, "G1c", symbol, "active market has no canonical 1h series")
     for path in canonical:
         sym = path.parent.name
@@ -134,7 +147,10 @@ def run(
                     sym,
                     f"canonical timestamps {'duplicate' if dup else ''}{' and ' if dup and unsorted else ''}{'unsorted' if unsorted else ''}",
                 )
-        if "G1c" in checks and active[sym]:
+        candle = futures / f"{sym}_USDC_USDC-1h-futures.feather"
+        listing_date = listing_dates.get(sym.upper()) or _oldest(candle)
+        in_listing_grace = listing_date is not None and now - listing_date <= timedelta(days=7)
+        if "G1c" in checks and active[sym] and not in_listing_grace:
             recent = sorted(t for t in ts if since30 <= t < now)
             if recent:
                 expected = int((recent[-1] - max(since30, recent[0])).total_seconds() // 3600) + 1
@@ -211,7 +227,11 @@ def run(
         try:
             from gmx_historical_data.funding_release import companion_dir, stage_companions
             from gmx_historical_data.funding_state import assess_funding_state
-            from gmx_historical_data.series_coverage import assess_series_coverage
+            from gmx_historical_data.series_coverage import (
+                SeriesThresholds,
+                TailStatus,
+                assess_series_coverage,
+            )
 
             with tempfile.TemporaryDirectory(prefix="verify-gmx-lake-") as temp:
                 report = stage_companions(root, Path(temp) / "stage")
@@ -226,9 +246,11 @@ def run(
                     extract_outcome="success",
                     export_report=report,
                     previous=None,
+                    thresholds=SeriesThresholds(head_lag_hours=max_checkpoint_age_hours),
+                    listing_dates=listing_dates,
                 )
                 for pair in coverage.pairs:
-                    if pair.tail == "STALE":
+                    if pair.tail is TailStatus.STALE:
                         issue(out, "G2", pair.symbol, "STALE funding tail", failed=False)
                 if not coverage.passed:
                     for reason in coverage.reasons:
@@ -236,9 +258,10 @@ def run(
         except Exception as e:
             issue(out, "G2", "-", f"coverage staging/assessment failed: {e}")
     if "G3" in checks:
-        for path in sorted(futures.glob("*-1h-funding_rate.feather")) + sorted(
-            futures.glob("*-8h-funding_rate.feather")
-        ):
+        funding_paths = sorted(futures.glob("*-1h-funding_rate.feather"))
+        if check_8h:
+            funding_paths += sorted(futures.glob("*-8h-funding_rate.feather"))
+        for path in funding_paths:
             m = re.match(r"(.+)_USDC_USDC-(1h|8h)-funding_rate\.feather$", path.name)
             if not m:
                 continue
@@ -313,6 +336,14 @@ def _newest(path):
         return None
 
 
+def _oldest(path):
+    try:
+        frame = pl.read_ipc(path, columns=["date"])
+        return min(to_dt(frame["date"])) if frame.height else None
+    except Exception:
+        return None
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_root", nargs="?", default="user_data/data/gmx")
@@ -324,23 +355,35 @@ def main(argv=None):
     parser.add_argument("--tail-fill-expected", action="store_true", default=None)
     parser.add_argument("--max-checkpoint-age-hours", type=float, default=6)
     parser.add_argument("--max-tail-status-age-hours", type=float, default=36)
+    parser.add_argument(
+        "--check-8h",
+        action="store_true",
+        help="also validate externally maintained 8h funding feathers",
+    )
     args = parser.parse_args(argv)
     try:
         root = detect_root(Path(args.data_root))
-        if args.json_path is not None and args.json_path.resolve().is_relative_to(root):
-            raise ValueError("--json path must be outside the data root")
-        findings = run(
-            root,
-            set(args.checks),
-            utc_now(),
-            args.null_direction_share,
-            args.max_lag_bars,
-            args.tail_fill_expected,
-            args.max_checkpoint_age_hours,
-            args.max_tail_status_age_hours,
-        )
     except Exception as e:
         findings = [Finding("G0", "-", str(e))]
+    else:
+        if args.json_path is not None and args.json_path.resolve().is_relative_to(root):
+            print("VERIFY_LAKE: FAIL G0 - --json path must be outside the data root")
+            print("VERIFY_LAKE: FAIL 1 findings")
+            return 2
+        try:
+            findings = run(
+                root,
+                set(args.checks),
+                utc_now(),
+                args.null_direction_share,
+                args.max_lag_bars,
+                args.tail_fill_expected,
+                args.max_checkpoint_age_hours,
+                args.max_tail_status_age_hours,
+                args.check_8h,
+            )
+        except Exception as e:
+            findings = [Finding("G0", "-", str(e))]
     for item in findings:
         print(
             f"VERIFY_LAKE: {'STALE' if not item.failed and item.check == 'G2' else 'FAIL'} {item.check} {item.symbol} {item.message}"

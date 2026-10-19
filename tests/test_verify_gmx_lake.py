@@ -3,6 +3,7 @@ import json
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import polars as pl
 
@@ -74,9 +75,37 @@ def test_daily_job_can_configure_checkpoint_and_tail_status_ages(tmp_path):
     assert daily == []
 
 
+def test_listing_grace_exempts_new_active_market_without_funding(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    (root / "funding/arbitrum/rates/BTC/1h.parquet").unlink()
+    futures = root / "futures/BTC_USDC_USDC-1h-futures.feather"
+    pl.DataFrame(
+        {
+            "date": [now - timedelta(days=4), now - timedelta(hours=1)],
+            "open": [1.0, 1.0],
+        }
+    ).write_ipc(futures)
+    (root / "snapshots").mkdir()
+    pl.DataFrame({"symbol": ["BTC"], "listing_date": [now - timedelta(days=4)]}).write_parquet(
+        root / "snapshots/current.parquet"
+    )
+    assert run(root, {"G1c"}, now, 0.05, 3, False) == []
+
+    pl.DataFrame({"symbol": ["BTC"], "listing_date": [now - timedelta(days=10)]}).write_parquet(
+        root / "snapshots/current.parquet"
+    )
+    findings = run(root, {"G1c"}, now, 0.05, 3, False)
+    assert [item.check for item in findings] == ["G1c"]
+
+
 def test_recent_holes_and_unknown_direction_are_flagged(tmp_path):
     now = datetime.now(UTC)
     root = fixture_lake(tmp_path, now)
+    (root / "snapshots").mkdir()
+    pl.DataFrame({"symbol": ["BTC"], "listing_date": [now - timedelta(days=20)]}).write_parquet(
+        root / "snapshots/current.parquet"
+    )
     path = root / "funding/arbitrum/rates/BTC/1h.parquet"
     pl.DataFrame(
         {
@@ -108,6 +137,46 @@ def test_coverage_is_staged_and_pass_failure_is_reported(tmp_path):
     findings = run(root, {"G2"}, now, 0.05, 3, False)
     assert findings
     assert all(item.check == "G2" for item in findings)
+
+
+def test_coverage_uses_listing_dates_checkpoint_threshold_and_stale_enum(tmp_path, monkeypatch):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    from gmx_historical_data import funding_release, funding_state, series_coverage
+
+    listing = {"BTC": now - timedelta(days=20)}
+    monkeypatch.setattr(funding_release, "load_listing_dates", lambda _path: listing)
+    monkeypatch.setattr(funding_release, "stage_companions", lambda *_args: {})
+    monkeypatch.setattr(
+        funding_state, "assess_funding_state", lambda _root: SimpleNamespace(value="ready")
+    )
+    pair = SimpleNamespace(symbol="BTC", tail=series_coverage.TailStatus.STALE)
+    seen = {}
+
+    def assess(**kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(pairs=[pair], passed=True, reasons=[])
+
+    monkeypatch.setattr(series_coverage, "assess_series_coverage", assess)
+    findings = run(root, {"G2"}, now, 0.05, 3, False, 30, 48)
+    assert len(findings) == 1
+    assert (findings[0].check, findings[0].symbol, findings[0].failed) == ("G2", "BTC", False)
+    assert findings[0].message == "STALE funding tail"
+    assert seen["listing_dates"] == listing
+    assert seen["thresholds"].head_lag_hours == 30
+
+
+def test_8h_sign_check_is_opt_in(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    canonical = pl.read_parquet(root / "funding/arbitrum/rates/BTC/1h.parquet")
+    date = canonical["timestamp"][-1] - timedelta(hours=7)
+    pl.DataFrame({"date": [date], "open": [1.0]}).write_ipc(
+        root / "futures/BTC_USDC_USDC-8h-funding_rate.feather"
+    )
+    assert run(root, {"G3"}, now, 0.05, 3, False) == []
+    findings = run(root, {"G3"}, now, 0.05, 3, False, check_8h=True)
+    assert [item.check for item in findings] == ["G3"]
 
 
 def test_report_only_and_root_hashes_are_unchanged(tmp_path):
@@ -142,3 +211,25 @@ def test_report_only_and_root_hashes_are_unchanged(tmp_path):
     assert "VERIFY_LAKE: FAIL 1 findings" in proc.stdout
     assert json.loads(report_path.read_text())["failed"] is True
     assert hashes() == before
+
+
+def test_rejected_in_root_json_path_does_not_overwrite_lake_file(tmp_path):
+    root = fixture_lake(tmp_path, datetime.now(UTC))
+    target = root / "futures/BTC_USDC_USDC-1h-futures.feather"
+    original = target.read_bytes()
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "scripts/verify_gmx_lake.py",
+            str(root),
+            "--checks",
+            "G1a",
+            "--json",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode != 0
+    assert "--json path must be outside the data root" in proc.stdout
+    assert target.read_bytes() == original
