@@ -168,7 +168,8 @@ class FetchBoundaryCalculator:
         Logic:
         1. Use AdaptiveGapDetector to check existing data status
         2. If NO_GAP: Skip all fetching
-        3. If NORMAL_GAP: Fetch only from our_latest + interval to now
+        3. If NORMAL_GAP: Fetch only from our_latest (re-fetching the last
+           refetch_overlap_bars stored bars) to now
         4. If DATA_LOSS_GAP: Fetch from api_earliest (lost data) to now
         5. If NO_EXISTING_DATA: Fall back to full collection
         6. If STALE_DENSITY: Timestamps are current but the recent window is
@@ -211,7 +212,7 @@ class FetchBoundaryCalculator:
 
                 # GMX API: Only fetch recent data
                 gmx_needed = True
-                gmx_start = gap_result.fetch_start  # our_latest + interval
+                gmx_start = gap_result.fetch_start  # our_latest, minus overlap bars
                 gmx_end = now
 
                 # Chainlink: Check if we need older historical data

@@ -41,6 +41,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -99,12 +100,62 @@ GMX_V22_FUNDING_EVENT_START = 370_000_000  # ~Aug 2025
 # (Paris = pre-Shanghai; no PUSH0 — required for Arbitrum blocks before ArbOS 20 ~block 174M)
 # NOT deployed — used exclusively via eth_call with to=null:
 #   data = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(["address[]"], [markets])
-# Returns: abi_decode(["int256[]"], result)[0]
-FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b50604051610683380380610683833981810160405281019061003291906103de565b600073fd70de6b91282d8017aa4e741e9ae325cab992d89050600060405160200161005c90610484565b60405160208183030381529060405280519060200120905060008351905060008167ffffffffffffffff8111156100965761009561023d565b5b6040519080825280602002602001820160405280156100c45781602001602082028036833780820191505090505b50905060005b828110156101e6576000848783815181106100e8576100e76104a4565b5b60200260200101516040516020016101019291906104fb565b6040516020818303038152906040528051906020012090508573ffffffffffffffffffffffffffffffffffffffff1663dc97d962826040518263ffffffff1660e01b81526004016101529190610524565b602060405180830381865afa92505050801561018c57506040513d601f19601f820116820180604052508101906101899190610575565b60015b6101b65760008383815181106101a5576101a46104a4565b5b6020026020010181815250506101d8565b808484815181106101ca576101c96104a4565b5b602002602001018181525050505b5080806001019150506100ca565b506000816040516020016101fa9190610660565b6040516020818303038152906040529050805160208201f35b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b6102758261022c565b810181811067ffffffffffffffff821117156102945761029361023d565b5b80604052505050565b60006102a7610213565b90506102b3828261026c565b919050565b600067ffffffffffffffff8211156102d3576102d261023d565b5b602082029050602081019050919050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b6000610314826102e9565b9050919050565b61032481610309565b811461032f57600080fd5b50565b6000815190506103418161031b565b92915050565b600061035a610355846102b8565b61029d565b9050808382526020820190506020840283018581111561037d5761037c6102e4565b5b835b818110156103a657806103928882610332565b84526020840193505060208101905061037f565b5050509392505050565b600082601f8301126103c5576103c4610227565b5b81516103d5848260208601610347565b91505092915050565b6000602082840312156103f4576103f361021d565b5b600082015167ffffffffffffffff81111561041257610411610222565b5b61041e848285016103b0565b91505092915050565b600082825260208201905092915050565b7f53415645445f46554e44494e475f464143544f525f5045525f5345434f4e4400600082015250565b600061046e601f83610427565b915061047982610438565b602082019050919050565b6000602082019050818103600083015261049d81610461565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b6000819050919050565b6104e6816104d3565b82525050565b6104f581610309565b82525050565b600060408201905061051060008301856104dd565b61051d60208301846104ec565b9392505050565b600060208201905061053960008301846104dd565b92915050565b6000819050919050565b6105528161053f565b811461055d57600080fd5b50565b60008151905061056f81610549565b92915050565b60006020828403121561058b5761058a61021d565b5b600061059984828501610560565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b6105d78161053f565b82525050565b60006105e983836105ce565b60208301905092915050565b6000602082019050919050565b600061060d826105a2565b61061781856105ad565b9350610622836105be565b8060005b8381101561065357815161063a88826105dd565b9750610645836105f5565b925050600181019050610626565b5085935050505092915050565b6000602082019050818103600083015261067a8184610602565b90509291505056fe"
+# Returns: abi_decode(["int256[]", "uint8[]"], result) -> (values, statuses); see
+# READ_OK / READ_NOT_DEPLOYED / READ_FAILED below.  Rebuild with `forge build` in
+# contracts/ and paste out/.../GMXFundingRateBatchRequest.json "bytecode.object".
+FUNDING_BATCH_BYTECODE = "0x608060405234801561001057600080fd5b506040516108223803806108228339818101604052810190610032919061049d565b600073fd70de6b91282d8017aa4e741e9ae325cab992d89050600060405160200161005c90610543565b60405160208183030381529060405280519060200120905060008351905060008167ffffffffffffffff811115610096576100956102fc565b5b6040519080825280602002602001820160405280156100c45781602001602082028036833780820191505090505b50905060008267ffffffffffffffff8111156100e3576100e26102fc565b5b6040519080825280602002602001820160405280156101115781602001602082028036833780820191505090505b50905060005b838110156102a357600087828151811061013457610133610563565b5b602002602001015173ffffffffffffffffffffffffffffffffffffffff163b0361018657600182828151811061016d5761016c610563565b5b602002602001019060ff16908160ff1681525050610296565b60008588838151811061019c5761019b610563565b5b60200260200101516040516020016101b59291906105ba565b6040516020818303038152906040528051906020012090508673ffffffffffffffffffffffffffffffffffffffff1663dc97d962826040518263ffffffff1660e01b815260040161020691906105e3565b602060405180830381865afa92505050801561024057506040513d601f19601f8201168201806040525081019061023d9190610634565b60015b61027257600283838151811061025957610258610563565b5b602002602001019060ff16908160ff1681525050610294565b8085848151811061028657610285610563565b5b602002602001018181525050505b505b8080600101915050610117565b50600082826040516020016102b99291906107ea565b6040516020818303038152906040529050805160208201f35b6000604051905090565b600080fd5b600080fd5b600080fd5b6000601f19601f8301169050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052604160045260246000fd5b610334826102eb565b810181811067ffffffffffffffff82111715610353576103526102fc565b5b80604052505050565b60006103666102d2565b9050610372828261032b565b919050565b600067ffffffffffffffff821115610392576103916102fc565b5b602082029050602081019050919050565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006103d3826103a8565b9050919050565b6103e3816103c8565b81146103ee57600080fd5b50565b600081519050610400816103da565b92915050565b600061041961041484610377565b61035c565b9050808382526020820190506020840283018581111561043c5761043b6103a3565b5b835b81811015610465578061045188826103f1565b84526020840193505060208101905061043e565b5050509392505050565b600082601f830112610484576104836102e6565b5b8151610494848260208601610406565b91505092915050565b6000602082840312156104b3576104b26102dc565b5b600082015167ffffffffffffffff8111156104d1576104d06102e1565b5b6104dd8482850161046f565b91505092915050565b600082825260208201905092915050565b7f53415645445f46554e44494e475f464143544f525f5045525f5345434f4e4400600082015250565b600061052d601f836104e6565b9150610538826104f7565b602082019050919050565b6000602082019050818103600083015261055c81610520565b9050919050565b7f4e487b7100000000000000000000000000000000000000000000000000000000600052603260045260246000fd5b6000819050919050565b6105a581610592565b82525050565b6105b4816103c8565b82525050565b60006040820190506105cf600083018561059c565b6105dc60208301846105ab565b9392505050565b60006020820190506105f8600083018461059c565b92915050565b6000819050919050565b610611816105fe565b811461061c57600080fd5b50565b60008151905061062e81610608565b92915050565b60006020828403121561064a576106496102dc565b5b60006106588482850161061f565b91505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b610696816105fe565b82525050565b60006106a8838361068d565b60208301905092915050565b6000602082019050919050565b60006106cc82610661565b6106d6818561066c565b93506106e18361067d565b8060005b838110156107125781516106f9888261069c565b9750610704836106b4565b9250506001810190506106e5565b5085935050505092915050565b600081519050919050565b600082825260208201905092915050565b6000819050602082019050919050565b600060ff82169050919050565b6107618161074b565b82525050565b60006107738383610758565b60208301905092915050565b6000602082019050919050565b60006107978261071f565b6107a1818561072a565b93506107ac8361073b565b8060005b838110156107dd5781516107c48882610767565b97506107cf8361077f565b9250506001810190506107b0565b5085935050505092915050565b6000604082019050818103600083015261080481856106c1565b90508181036020830152610818818461078c565b9050939250505056fe"
 
 # =============================================================================
 # DATA CLASSES & HELPERS
 # =============================================================================
+
+# Per-market status codes returned by the batch reader (contracts/GMXFundingRateBatch.sol)
+READ_OK = 0  # value is a genuine DataStore reading (zero included)
+READ_NOT_DEPLOYED = 1  # market token has no code at this block: not created yet
+READ_FAILED = 2  # getInt reverted: a failed read, never a zero
+
+# Version of the durable checkpoint format.  Version 2 means "last_block is the
+# last sample block whose data has been persisted".  Unversioned (legacy)
+# checkpoints were advanced before any data was written and cannot be trusted.
+CHECKPOINT_VERSION = 2
+
+# Attempts per JSON-RPC batch before the extraction fails (backoff: 1s, 4s, 16s, 60s)
+RPC_MAX_ATTEMPTS = 5
+
+
+class FundingExtractionError(RuntimeError):
+    """Raised when an RPC batch stays failed/empty/undecodable after all retries."""
+
+
+class LegacyCheckpointError(RuntimeError):
+    """Raised when ``--resume`` finds an unversioned (pre-durable) checkpoint."""
+
+
+def _post_batch_with_retry(
+    url: str, payload: list[dict], timeout: int, parse: Callable, label: str
+):
+    """POST a JSON-RPC batch and parse it, retrying the whole batch on any failure.
+
+    ``parse`` receives the decoded JSON and must raise on a missing, errored or
+    undecodable item — a bad response is never converted into a value.
+
+    :raises FundingExtractionError: If every attempt fails.
+    """
+    for attempt in range(RPC_MAX_ATTEMPTS):
+        try:
+            resp = requests.post(url, json=payload, timeout=timeout)
+            resp.raise_for_status()
+            return parse(resp.json())
+        except Exception as exc:
+            if attempt == RPC_MAX_ATTEMPTS - 1:
+                raise FundingExtractionError(
+                    f"{label} failed after {RPC_MAX_ATTEMPTS} attempts: {exc}"
+                ) from exc
+            delay = min(4**attempt, 60)
+            console.print(
+                f"  [yellow]{label} error (attempt {attempt + 1}/{RPC_MAX_ATTEMPTS}): {exc} — retry in {delay}s[/yellow]"
+            )
+            time.sleep(delay)
 
 
 def prefetch_block_timestamps(
@@ -127,6 +178,7 @@ def prefetch_block_timestamps(
     :param batch_size: Max requests per HTTP batch (default: 200).
     :param timeout: Per-request timeout in seconds (default: 60).
     :returns: Dict mapping block number → Unix timestamp.
+    :raises FundingExtractionError: If any block's timestamp stays unavailable.
     """
     # Parse: strip mev+ prefix (those are transaction endpoints, not suitable for eth_call)
     raw_urls = rpc_config.strip().split()
@@ -148,31 +200,56 @@ def prefetch_block_timestamps(
             for j, bn in enumerate(chunk)
         ]
         url = call_urls[i % len(call_urls)]
-        # Retry with exponential backoff on transient connection errors
-        for attempt in range(5):
-            try:
-                resp = requests.post(url, json=payload, timeout=timeout)
-                resp.raise_for_status()
-                break
-            except Exception as exc:
-                if attempt == 4:
-                    raise
-                delay = min(4**attempt, 60)
-                console.print(
-                    f"  [yellow]Timestamp batch {i} error (attempt {attempt + 1}/5): {exc} — retry in {delay}s[/yellow]"
-                )
-                time.sleep(delay)
-        for item in resp.json():
-            result = item.get("result")
-            if result:
-                bn = int(result["number"], 16)
+
+        def parse_timestamps(items, chunk=chunk) -> dict[int, int]:
+            by_id = {item.get("id"): item for item in items}
+            parsed: dict[int, int] = {}
+            for j, bn in enumerate(chunk):
+                item = by_id.get(j)
+                if item is None or item.get("error"):
+                    raise ValueError(f"block {bn}: missing or errored response")
+                result = item.get("result")
+                if not result or int(result["number"], 16) != bn:
+                    raise ValueError(f"block {bn}: missing or mismatched block")
                 ts = int(result["timestamp"], 16)
-                timestamps[bn] = ts
+                if ts <= 0:
+                    raise ValueError(f"block {bn}: invalid timestamp {ts}")
+                parsed[bn] = ts
+            return parsed
+
+        timestamps.update(
+            _post_batch_with_retry(url, payload, timeout, parse_timestamps, f"Timestamp batch {i}")
+        )
         fetched += len(chunk)
         if fetched % 2000 == 0 or fetched == total:
             console.print(f"  Timestamps: {fetched:,}/{total:,} ({fetched / total * 100:.0f}%)")
 
     return timestamps
+
+
+def _decode_funding_row(
+    data: bytes, market_addresses: list[str], label: str
+) -> dict[str, int | None]:
+    """Decode one batch-reader result into ``{market: value}``.
+
+    The value is ``None`` for a market with no code at that block.
+
+    :raises ValueError: On a length mismatch, an unknown status or a failed read.
+    """
+    values, statuses = abi_decode(["int256[]", "uint8[]"], data)
+    if len(values) != len(market_addresses) or len(statuses) != len(market_addresses):
+        raise ValueError(
+            f"{label}: expected {len(market_addresses)} values, got {len(values)}/{len(statuses)}"
+        )
+    row: dict[str, int | None] = {}
+    for addr, value, status in zip(market_addresses, values, statuses):
+        if status == READ_OK:
+            row[addr] = value
+        elif status == READ_NOT_DEPLOYED:
+            row[addr] = None
+        else:
+            raise ValueError(f"{label}: DataStore read failed for {addr} (status {status})")
+    return row
 
 
 def batch_fetch_funding_rates(
@@ -181,7 +258,7 @@ def batch_fetch_funding_rates(
     block_numbers: list[int],
     batch_size: int = 130,
     timeout: int = 120,
-) -> dict[int, dict[str, int]]:
+) -> dict[int, dict[str, int | None]]:
     """Batch-fetch ``savedFundingFactorPerSecond`` for all markets across many blocks.
 
     Sends groups of ``eth_call`` requests (using ``GMXFundingRateBatchRequest``
@@ -195,7 +272,12 @@ def batch_fetch_funding_rates(
     :param block_numbers: Ordered list of block numbers to query.
     :param batch_size: ``eth_call`` requests per HTTP batch (default: 130).
     :param timeout: Per-request timeout in seconds (default: 120).
-    :returns: Dict mapping block number → {market address → int256 value}.
+    :returns: Dict mapping block number → {market address → int256 value}.  A
+        successful read of ``0`` is a valid value.  The value is ``None`` when
+        the market has no code at that block (not created yet), so it must be
+        skipped.  Failed reads (reverted ``getInt``, RPC error, empty or
+        undecodable response) are retried and never converted to zero.
+    :raises FundingExtractionError: If any batch stays failed after all retries.
     """
     raw_urls = rpc_config.strip().split()
     call_urls = [u[4:] if u.startswith("mev+") else u for u in raw_urls]
@@ -210,7 +292,6 @@ def batch_fetch_funding_rates(
     results: dict[int, dict[str, int]] = {}
     total = len(block_numbers)
     fetched = 0
-    errors = 0
 
     for i, chunk_start in enumerate(range(0, total, batch_size)):
         chunk = block_numbers[chunk_start : chunk_start + batch_size]
@@ -224,28 +305,29 @@ def batch_fetch_funding_rates(
             for j, bn in enumerate(chunk)
         ]
         url = call_urls[i % len(call_urls)]
-        resp = requests.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
 
-        for item in resp.json():
-            bn = chunk[item["id"]]
-            raw = item.get("result", "")
-            if raw and raw != "0x":
-                try:
-                    values = abi_decode(["int256[]"], bytes.fromhex(raw[2:]))[0]
-                    results[bn] = dict(zip(market_addresses, values))
-                except Exception:
-                    results[bn] = {addr: 0 for addr in market_addresses}
-                    errors += 1
-            else:
-                # Block before GMX V2 or RPC error — all zeros
-                results[bn] = {addr: 0 for addr in market_addresses}
+        def parse_funding(items, chunk=chunk) -> dict[int, dict[str, int | None]]:
+            by_id = {item.get("id"): item for item in items}
+            parsed: dict[int, dict[str, int | None]] = {}
+            for j, bn in enumerate(chunk):
+                item = by_id.get(j)
+                if item is None or item.get("error"):
+                    raise ValueError(f"block {bn}: missing or errored response")
+                raw = item.get("result")
+                if not isinstance(raw, str) or raw in ("", "0x"):
+                    raise ValueError(f"block {bn}: empty result")
+                row = _decode_funding_row(bytes.fromhex(raw[2:]), market_addresses, f"block {bn}")
+                parsed[bn] = row
+            return parsed
+
+        results.update(
+            _post_batch_with_retry(url, payload, timeout, parse_funding, f"DataStore batch {i}")
+        )
 
         fetched += len(chunk)
         if fetched % 2000 == 0 or fetched == total:
             console.print(
-                f"  DataStore reads: {fetched:,}/{total:,} "
-                f"({fetched / total * 100:.0f}%)" + (f" [{errors} decode errors]" if errors else "")
+                f"  DataStore reads: {fetched:,}/{total:,} ({fetched / total * 100:.0f}%)"
             )
 
     return results
@@ -267,15 +349,20 @@ def read_all_markets_bytecode(
     :param w3: Web3 instance (any provider).
     :param market_addresses: Market contract addresses to query.
     :param block_number: Block to query at.
-    :returns: Dict of market address → signed int256 value (0 on failure).
+    :returns: Dict of market address → signed int256 value.  Markets with no code
+        at ``block_number`` are omitted.
+    :raises FundingExtractionError: If a DataStore read fails.
     """
     calldata = bytes.fromhex(FUNDING_BATCH_BYTECODE[2:]) + abi_encode(
         ["address[]"],
         [[Web3.to_checksum_address(a) for a in market_addresses]],
     )
     result = w3.eth.call({"data": calldata}, block_identifier=block_number)
-    values: tuple[int, ...] = abi_decode(["int256[]"], result)[0]
-    return dict(zip(market_addresses, values))
+    try:
+        row = _decode_funding_row(result, market_addresses, f"block {block_number}")
+    except ValueError as exc:
+        raise FundingExtractionError(str(exc)) from exc
+    return {addr: value for addr, value in row.items() if value is not None}
 
 
 @dataclass
@@ -337,22 +424,19 @@ def extract_funding_rates(
     market_filter: str | None = None,
     checkpoint_dir: Path | None = None,
     checkpoint_interval: int = 500,
+    persist: Callable[[list[FundingDatastoreRecord]], None] | None = None,
 ) -> list[FundingDatastoreRecord]:
     """Extract historical funding rates via fully-batched JSON-RPC requests.
 
-    Three-phase approach — all I/O is batched upfront, record construction
-    is pure CPU:
+    Per chunk of sample blocks:
 
-    1. **Timestamp batch**: ``eth_getBlockByNumber`` for all sample blocks
-       in groups of 200, reducing N round-trips to ``ceil(N/200)``.
+    1. **Timestamp batch**: ``eth_getBlockByNumber`` in groups of 50.
     2. **DataStore batch**: ``eth_call`` with ``GMXFundingRateBatchRequest``
-       bytecode for all sample blocks in groups of 130, reducing N round-trips
-       to ``ceil(N/130)``.  All market keys computed on-chain; no pre-computation
-       needed.
-    3. **Record construction**: pure CPU loop over pre-fetched data — no RPC.
+       bytecode in groups of 130.  All market keys computed on-chain.
+    3. **Record construction**, then ``persist`` and checkpoint.
 
-    Total HTTP requests: ``ceil(N/200) + ceil(N/130)`` ≈ 221 for a full run
-    (vs. ~17,000 sequential calls in the old approach).
+    Failed, empty or undecodable responses are retried and then raise; they are
+    never recorded as zero.  A successful zero reading is kept.
 
     :param w3: Web3 instance (used only for ``is_connected()`` check).
     :param rpc_config: Space-separated RPC URL(s); round-robin across providers.
@@ -361,9 +445,17 @@ def extract_funding_rates(
     :param markets: Market address → info dict.
     :param interval_blocks: Block interval between samples (default: ~1 hour).
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
-    :param checkpoint_dir: Optional directory for periodic checkpoint saves.
-    :param checkpoint_interval: Save checkpoint every N sample blocks.
-    :returns: List of :class:`FundingDatastoreRecord` objects.
+    :param checkpoint_dir: Optional directory for checkpoint saves.  Checkpoints
+        are written only when ``persist`` is given, and only after ``persist``
+        has returned for the records they cover.
+    :param checkpoint_interval: Sample blocks fetched, persisted and checkpointed
+        per chunk.
+    :param persist: Callback that durably writes a list of records.  Called once
+        per chunk (in block order); if it raises, no checkpoint is advanced.
+    :returns: List of :class:`FundingDatastoreRecord` objects, including valid
+        zero readings.  A market is omitted for sample blocks before it exists
+        (no code at that block); the sample grid itself is unchanged.
+    :raises FundingExtractionError: If an RPC batch cannot be fully read.
     """
     # Filter markets: exclude swap-only (no index token) and deprecated (isListed=False)
     target_markets = {}
@@ -394,52 +486,65 @@ def extract_funding_rates(
         f"  HTTP batches:  {ts_batches} timestamp + {ds_batches} DataStore = {ts_batches + ds_batches} total"
     )
 
-    # --- Phase 1: batch-fetch all block timestamps upfront ---
-    console.print(f"\n  Pre-fetching {total_samples:,} block timestamps in batches of 50...")
-    t_ts = time.monotonic()
-    block_timestamps = prefetch_block_timestamps(rpc_config, sample_blocks)
-    console.print(f"  Timestamps ready in {time.monotonic() - t_ts:.1f}s")
-
-    # --- Phase 2: batch-fetch all DataStore values upfront ---
-    console.print(
-        f"\n  Batch-fetching DataStore values for {total_samples:,} blocks in batches of 130..."
-    )
-    t_ds = time.monotonic()
-    block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, sample_blocks)
-    console.print(f"  DataStore reads ready in {time.monotonic() - t_ds:.1f}s")
-
-    # --- Phase 3: build records (pure CPU — no more RPC calls) ---
+    # Process the sample blocks in chunks: fetch -> build records -> persist ->
+    # checkpoint.  A checkpoint only ever covers data ``persist`` has written.
     records: list[FundingDatastoreRecord] = []
+    pending: list[FundingDatastoreRecord] = []  # built, not yet persisted
+    t_start = time.monotonic()
 
-    for i, block_num in enumerate(sample_blocks):
-        ts = block_timestamps.get(block_num, 0)
-        dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
-        market_values = block_funding.get(block_num, {})
-        for addr, value in market_values.items():
-            if value == 0:
-                continue
-            rate = value / FUNDING_FACTOR_PRECISION
-            sym = market_symbol(addr, markets)
-            records.append(
-                FundingDatastoreRecord(
-                    symbol=sym,
-                    market=addr.lower(),
-                    funding_factor_per_second=str(value),
-                    funding_rate_per_second=rate,
-                    longs_pay_shorts=(value > 0),
-                    block_number=block_num,
-                    block_timestamp=ts,
-                    block_datetime=dt_str,
+    def flush(batch: list[FundingDatastoreRecord]) -> None:
+        if not batch:
+            return
+        if persist is not None:
+            persist(batch)
+            if checkpoint_dir:
+                save_checkpoint(checkpoint_dir, max(r.block_number for r in batch), len(records))
+
+    for chunk_start in range(0, total_samples, checkpoint_interval):
+        chunk_blocks = sample_blocks[chunk_start : chunk_start + checkpoint_interval]
+        block_timestamps = prefetch_block_timestamps(rpc_config, chunk_blocks)
+        block_funding = batch_fetch_funding_rates(rpc_config, market_addrs, chunk_blocks)
+
+        chunk_records: list[FundingDatastoreRecord] = []
+        for block_num in chunk_blocks:
+            ts = block_timestamps[block_num]
+            dt_str = datetime.fromtimestamp(ts, tz=UTC).isoformat()
+            for addr, value in block_funding[block_num].items():
+                if value is None:
+                    continue  # market not created yet at this block: no observation
+                chunk_records.append(
+                    FundingDatastoreRecord(
+                        symbol=market_symbol(addr, markets),
+                        market=addr.lower(),
+                        funding_factor_per_second=str(value),
+                        funding_rate_per_second=value / FUNDING_FACTOR_PRECISION,
+                        longs_pay_shorts=(value > 0),
+                        block_number=block_num,
+                        block_timestamp=ts,
+                        block_datetime=dt_str,
+                    )
                 )
-            )
-        if checkpoint_dir and (i + 1) % checkpoint_interval == 0:
-            save_checkpoint(checkpoint_dir, block_num, len(records))
+        chunk_records.sort(key=lambda r: (r.block_number, r.symbol))
+        records.extend(chunk_records)
+        pending.extend(chunk_records)
 
-    records.sort(key=lambda r: (r.block_number, r.symbol))
+        console.print(
+            f"  Fetched {chunk_start + len(chunk_blocks):,}/{total_samples:,} sample blocks"
+        )
+
+        # Hold back the newest hour: a sub-hour ``interval`` could split it
+        # across chunks, and hourly aggregates are written per hour.
+        if pending and chunk_start + checkpoint_interval < total_samples:
+            last_hour = pending[-1].block_timestamp // 3600
+            flush([r for r in pending if r.block_timestamp // 3600 < last_hour])
+            pending = [r for r in pending if r.block_timestamp // 3600 >= last_hour]
+        else:
+            flush(pending)
+            pending = []
 
     console.print(
-        f"\n  Extraction complete in {time.monotonic() - t_ts:.1f}s total: "
-        f"{len(records):,} non-zero readings from {total_samples:,} sampled blocks"
+        f"\n  Extraction complete in {time.monotonic() - t_start:.1f}s total: "
+        f"{len(records):,} readings from {total_samples:,} sampled blocks"
     )
 
     return records
@@ -488,7 +593,6 @@ def aggregate_hourly_rates(
             pl.col("funding_rate_per_second").mean().alias("funding_rate"),
             pl.col("funding_rate_per_second").min().alias("funding_rate_min"),
             pl.col("funding_rate_per_second").max().alias("funding_rate_max"),
-            pl.col("longs_pay_shorts").last().alias("longs_pay_shorts"),
             pl.len().alias("update_count"),
         )
         .sort(["symbol", "hour"])
@@ -498,14 +602,12 @@ def aggregate_hourly_rates(
     hourly = hourly.with_columns(
         (pl.col("funding_rate") * 3600).alias("funding_rate_hourly"),
         (pl.col("funding_rate") * 3600 * 8760).alias("funding_rate_annualized"),
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * 3600)
-        .otherwise(pl.col("funding_rate") * -3600)
-        .alias("funding_fee_long"),
-        pl.when(pl.col("longs_pay_shorts"))
-        .then(pl.col("funding_rate") * -3600)
-        .otherwise(pl.col("funding_rate") * 3600)
-        .alias("funding_fee_short"),
+        (pl.col("funding_rate") > 0).alias("longs_pay_shorts"),
+    ).with_columns(
+        # funding_rate is already signed (positive = longs pay), so the signed
+        # fees are derived from it once: long = +rate, short = -rate.
+        pl.col("funding_rate_hourly").alias("funding_fee_long"),
+        (-pl.col("funding_rate_hourly")).alias("funding_fee_short"),
     )
 
     # Rename hour -> timestamp
@@ -585,17 +687,39 @@ def save_json(records: list[FundingDatastoreRecord], output_dir: Path) -> None:
 
 
 def load_checkpoint(checkpoint_dir: Path) -> int | None:
-    """Load the last processed block from checkpoint file.
+    """Load the last persisted sample block from the checkpoint file.
 
     :param checkpoint_dir: Directory containing checkpoint file.
-    :returns: Last processed block number, or ``None`` if no checkpoint.
+    :returns: Last persisted block number, or ``None`` if no checkpoint.
+    :raises LegacyCheckpointError: If the checkpoint is unversioned/legacy.
     """
     filepath = checkpoint_dir / "funding_datastore_checkpoint.json"
     if not filepath.exists():
         return None
     with open(filepath) as f:
         data = json.load(f)
+    if data.get("version") != CHECKPOINT_VERSION:
+        raise LegacyCheckpointError(
+            f"{filepath} is a legacy (unversioned) checkpoint written before data was "
+            f"durably persisted; resuming from block {data.get('last_block')} could skip "
+            "unwritten observations.  Delete the checkpoint file (or run without --resume) "
+            "to restart; existing hourly parquet rows are merged by timestamp."
+        )
     return data.get("last_block")
+
+
+def resume_block(checkpoint_dir: Path, interval_blocks: int, default_block: int) -> int:
+    """Return the first sample block to fetch when resuming.
+
+    The checkpoint holds the last *persisted* sample block, so the next sample
+    on the same grid is ``last_block + interval_blocks``.
+
+    :param checkpoint_dir: Directory containing the checkpoint file.
+    :param interval_blocks: Sampling interval in blocks.
+    :param default_block: Start block when no checkpoint exists.
+    """
+    last = load_checkpoint(checkpoint_dir)
+    return default_block if last is None else last + interval_blocks
 
 
 def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -> None:
@@ -608,6 +732,7 @@ def save_checkpoint(checkpoint_dir: Path, last_block: int, total_records: int) -
     filepath = checkpoint_dir / "funding_datastore_checkpoint.json"
     filepath.parent.mkdir(parents=True, exist_ok=True)
     data = {
+        "version": CHECKPOINT_VERSION,
         "last_block": last_block,
         "total_records": total_records,
         "updated_at": datetime.now(tz=UTC).isoformat(),
@@ -699,9 +824,12 @@ def main():
     # Resume from checkpoint
     from_block = args.from_block
     if args.resume:
-        last = load_checkpoint(checkpoint_dir)
-        if last is not None:
-            from_block = last + 1
+        try:
+            from_block = resume_block(checkpoint_dir, args.interval, args.from_block)
+        except LegacyCheckpointError as exc:
+            console.print(f"[red]ERROR: {exc}[/red]")
+            sys.exit(1)
+        if from_block != args.from_block:
             console.print(f"  Resuming from checkpoint: block {from_block:,}")
 
     console.print("\n" + "=" * 70)
@@ -724,7 +852,11 @@ def main():
         sys.exit(1)
     console.print(f"  Connected. Latest block: {w3.eth.block_number:,}")
 
-    # Extract
+    def persist(batch: list[FundingDatastoreRecord]) -> None:
+        save_parquet(aggregate_hourly_rates(batch), output_dir)
+
+    # Extract.  Parquet output is persisted (and checkpointed) chunk by chunk;
+    # JSON is a single file written after extraction.
     records = extract_funding_rates(
         w3=w3,
         rpc_config=rpc_config,
@@ -734,23 +866,18 @@ def main():
         interval_blocks=args.interval,
         market_filter=args.market,
         checkpoint_dir=checkpoint_dir,
+        persist=persist if args.output == "parquet" else None,
     )
 
     if not records:
-        console.print("\n[yellow]No non-zero funding rates found in range.[/yellow]")
+        console.print("\n[yellow]No funding readings found in range.[/yellow]")
         sys.exit(0)
 
-    # Save
-    console.print(f"\nSaving {len(records):,} records...")
     if args.output == "json":
+        console.print(f"\nSaving {len(records):,} records...")
         save_json(records, output_dir)
-    else:
-        hourly = aggregate_hourly_rates(records)
-        save_parquet(hourly, output_dir)
-
-    # Save checkpoint
-    max_block = max(r.block_number for r in records)
-    save_checkpoint(checkpoint_dir, max_block, len(records))
+        # Checkpoint only after the JSON file is written
+        save_checkpoint(checkpoint_dir, max(r.block_number for r in records), len(records))
 
     # Summary
     symbols = set(r.symbol for r in records)

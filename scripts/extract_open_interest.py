@@ -529,12 +529,65 @@ def load_checkpoint(path: Path) -> dict | None:
         return None
 
 
+def checkpoint_last_values(checkpoint: dict | None) -> dict[tuple[str, str, str, bool], int]:
+    """Restore combo-level OI state from a checkpoint, tolerating old formats.
+
+    :param checkpoint: Loaded checkpoint mapping, or ``None`` if absent.
+    :return: State keyed by (symbol, market, collateralToken, isLong).
+    """
+    values = {}
+    for item in (checkpoint or {}).get("last_values", []):
+        try:
+            key = (
+                str(item["symbol"]),
+                str(item["market"]).lower(),
+                str(item["collateral"]).lower(),
+                bool(item["is_long"]),
+            )
+            values[key] = int(item["value"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return values
+
+
+def resolve_resume_state(
+    checkpoint: dict | None, requested_from_block: int | None
+) -> tuple[int, dict[tuple[str, str, str, bool], int], bool]:
+    """Choose the resume start and safe carried state for a checkpoint.
+
+    :param checkpoint: Loaded checkpoint mapping, or ``None`` if absent.
+    :param requested_from_block: Explicit start block, if supplied.
+    :return: (start block, combo state, legacy-checkpoint flag).
+    """
+    if checkpoint is None:
+        start_block = (
+            requested_from_block if requested_from_block is not None else GMX_V2_GENESIS_BLOCK
+        )
+        return start_block, {}, False
+
+    if "last_values" not in checkpoint:
+        return GMX_V2_GENESIS_BLOCK, {}, True
+
+    last_block = int(checkpoint["last_block"])
+    start_block = requested_from_block
+    if start_block is None:
+        start_block = last_block + 1
+
+    # State at a later checkpoint cannot be carried backward over an explicit
+    # replay range; those days must be computed from the replay's own events.
+    values = checkpoint_last_values(checkpoint)
+    if requested_from_block is not None and requested_from_block <= last_block:
+        values = {}
+    return start_block, values, False
+
+
 def save_checkpoint(
     path: Path,
     last_block: int,
     last_timestamp: int,
     total_events: int,
     markets_seen: int,
+    last_values: dict[tuple[str, str, str, bool], int] | None = None,
 ) -> None:
     """Save checkpoint to JSON file.
 
@@ -543,6 +596,8 @@ def save_checkpoint(
     :param last_timestamp: Last processed block timestamp
     :param total_events: Total events processed so far
     :param markets_seen: Number of unique markets seen
+    :param last_values: Latest USD OI value for each symbol/market/collateral/side
+        combination, persisted for snapshot carry-forward on resume.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     checkpoint = {
@@ -552,6 +607,18 @@ def save_checkpoint(
         "total_events": total_events,
         "last_updated": datetime.now(tz=UTC).isoformat(),
         "metadata": {"markets_seen": markets_seen},
+        # Store combo-level state: aggregate snapshots alone cannot restore a
+        # silent market/collateral/side when an incremental run resumes.
+        "last_values": [
+            {
+                "symbol": symbol,
+                "market": market,
+                "collateral": collateral,
+                "is_long": is_long,
+                "value": value,
+            }
+            for (symbol, market, collateral, is_long), value in sorted((last_values or {}).items())
+        ],
     }
     with open(path, "w") as f:
         json.dump(checkpoint, f, indent=2)
@@ -1002,7 +1069,10 @@ async def extract_oi_events(
 # =============================================================================
 
 
-def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISnapshot]:
+def compute_daily_snapshots(
+    records: list[OpenInterestRecord],
+    last_values: dict[tuple[str, str, str, bool], int] | None = None,
+) -> list[DailyOISnapshot]:
     """Compute end-of-day OI snapshots per market.
 
     For each (symbol, date), takes the last ``nextValueUsd`` per
@@ -1010,10 +1080,15 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
     collateral tokens for long/short totals.
 
     :param records: List of OpenInterestRecord objects
+    :param last_values: Mutable combo state carried across batches/runs, keyed by
+        (symbol, market, collateralToken, isLong). Updated in place.
     :return: List of DailyOISnapshot objects sorted by (symbol, date)
     """
     if not records:
         return []
+
+    if last_values is None:
+        last_values = {}
 
     # Group by (symbol, date_utc)
     by_symbol_date: dict[tuple[str, str], list[OpenInterestRecord]] = defaultdict(list)
@@ -1030,12 +1105,11 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
         day_records.sort(key=lambda r: (r.blockNumber, r.logIndex))
 
         # Find last nextValueUsd per (market, collateralToken, isLong)
-        last_values: dict[tuple[str, str, bool], int] = {}
         for r in day_records:
             # Only use USD records (eventType == OpenInterestUpdated)
             if r.eventType != "OpenInterestUpdated":
                 continue
-            key = (r.market.lower(), r.collateralToken.lower(), r.isLong)
+            key = (symbol, r.market.lower(), r.collateralToken.lower(), r.isLong)
             try:
                 last_values[key] = int(r.nextValueUsd)
             except (ValueError, TypeError):
@@ -1044,7 +1118,9 @@ def compute_daily_snapshots(records: list[OpenInterestRecord]) -> list[DailyOISn
         # Sum long and short across all (market, collateralToken) combinations
         long_total_raw = 0
         short_total_raw = 0
-        for (market, collateral, is_long), value in last_values.items():
+        for (state_symbol, market, collateral, is_long), value in last_values.items():
+            if state_symbol != symbol:
+                continue
             if is_long:
                 long_total_raw += value
             else:
@@ -1298,22 +1374,26 @@ async def async_main(args: argparse.Namespace) -> None:
     )
     checkpoint_path = checkpoint_dir / "oi_checkpoint.json"
 
-    # Determine starting block
-    from_block = args.from_block
-
-    if args.resume and from_block is None:
-        # Load checkpoint
-        checkpoint = load_checkpoint(checkpoint_path)
-        if checkpoint:
-            from_block = checkpoint["last_block"] + 1
-            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
-        else:
-            from_block = GMX_V2_GENESIS_BLOCK
+    # Determine starting block and restore only state valid for that range.
+    checkpoint = load_checkpoint(checkpoint_path) if args.resume else None
+    if args.resume:
+        from_block, last_values, legacy_checkpoint = resolve_resume_state(
+            checkpoint, args.from_block
+        )
+        if legacy_checkpoint:
+            console.print(
+                "[yellow]Warning: checkpoint has no combo-level OI state; "
+                f"restarting from genesis block {GMX_V2_GENESIS_BLOCK:,} to rebuild snapshots.[/yellow]"
+            )
+        elif checkpoint is None:
             console.print(
                 f"  No checkpoint found. Starting from genesis: [cyan]{from_block:,}[/cyan]"
             )
-    elif from_block is None:
-        from_block = GMX_V2_GENESIS_BLOCK
+        elif args.from_block is None:
+            console.print(f"  Resuming from checkpoint: block [cyan]{from_block:,}[/cyan]")
+    else:
+        from_block = args.from_block if args.from_block is not None else GMX_V2_GENESIS_BLOCK
+        last_values = {}
 
     with console.status("Fetching GMX market registry..."):
         markets = _fetch_markets_cached(args.network, force_refresh=args.refresh_markets)
@@ -1362,8 +1442,9 @@ async def async_main(args: argparse.Namespace) -> None:
 
     _resume_base_total = 0
     if args.resume:
-        _prior = load_checkpoint(checkpoint_path)
-        _resume_base_total = _prior["total_events"] if _prior else 0
+        _resume_base_total = (
+            checkpoint.get("total_events", 0) if checkpoint and "last_values" in checkpoint else 0
+        )
 
     flush_state: dict = {
         "total_events": 0,
@@ -1382,7 +1463,7 @@ async def async_main(args: argparse.Namespace) -> None:
         )
         save_raw_per_symbol(batch, output_dir)
         with console.status("Computing daily snapshots..."):
-            batch_snapshots = compute_daily_snapshots(batch)
+            batch_snapshots = compute_daily_snapshots(batch, last_values)
         save_snapshots_per_symbol(batch_snapshots, output_dir)
 
         flush_state["total_events"] += len(batch)
@@ -1399,6 +1480,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=flush_state["last_timestamp"],
                 total_events=_resume_base_total + flush_state["total_events"],
                 markets_seen=len({r.symbol for r in batch}),
+                last_values=last_values,
             )
 
     use_flush = args.output in STREAMABLE_OUTPUTS
@@ -1426,13 +1508,14 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=int(time.time()),
                 total_events=0,
                 markets_seen=0,
+                last_values=last_values,
             )
         return
 
     if records:
         # Aggregate and save any remaining in-memory records
         with console.status("Computing daily snapshots..."):
-            snapshots = compute_daily_snapshots(records)
+            snapshots = compute_daily_snapshots(records, last_values)
 
         console.print()
         if args.output == "parquet":
@@ -1459,6 +1542,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 last_timestamp=last_timestamp,
                 total_events=_resume_base_total + flush_state["total_events"] + len(records),
                 markets_seen=unique_markets,
+                last_values=last_values,
             )
 
         print_summary(records, snapshots)

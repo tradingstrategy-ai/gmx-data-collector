@@ -17,6 +17,14 @@ on:
         description: 'Re-fetch MAX_CANDLE_LIMIT candles and merge to fill interior 1m holes (2026-09-08 02:17). Off on the daily cron.'
         required: false
         default: 'false'
+      repair_timeframes:
+        description: 'With repair_ohlcv=true: comma-separated timeframes to re-fetch (e.g. 1d,4h). Empty = all timeframes.'
+        required: false
+        default: ''
+      seed_funding_from:
+        description: 'One-off: seed the raw funding state from this branch (data/full-history) when no funding state exists yet. Leave empty on every other run.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -24,9 +32,15 @@ permissions:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+# Shared with funding-catchup.yml: both read the newest funding state asset at
+# the start and write a newer one at the end, so running together would lose
+# one side's progress. A running job is never cancelled, and with `queue: max` pending
+# runs are queued and processed sequentially instead of being replaced (up to 100 per
+# group; GitHub changelog 2026-05-07).
 concurrency:
-  group: gmx-daily-data-release
+  group: gmx-funding-state
   cancel-in-progress: false
+  queue: max
 
 jobs:
   release:
@@ -115,6 +129,39 @@ jobs:
           fi
           rm -rf "${TMPDIR}"
 
+      # The raw funding state (raw events, rebuilt rates, direction, checkpoints)
+      # is what lets `extract_unified_funding.py --resume` be incremental; without
+      # its checkpoints it walks from genesis, which takes longer than this whole
+      # job. It travels in its own asset so it does not eat gmx-full's 2 GiB cap.
+      #
+      # Fail-soft like the ticks (#48): an absent or unrestorable state never stops
+      # the release, it only means the funding companions are withheld by the gate
+      # below. The newest retained release that carries the asset is used, so one
+      # run that published without it does not lose the state. The archive is
+      # unpacked beside the tree and moved in whole, so a failed restore can never
+      # leave a half-restored funding/ directory that would then be re-published.
+      # The shell is shared with funding-catchup.yml (scripts/funding_state_assets.sh).
+      - name: Restore funding state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/funding_state_assets.sh restore
+
+      # One-off, workflow_dispatch only: copy the raw funding sources from the
+      # data/full-history branch and derive the checkpoints the branch never
+      # stored. Never replaces a restored state (that is newer than any seed).
+      - name: Seed funding state
+        if: ${{ github.event.inputs.seed_funding_from != '' }}
+        env:
+          SEED_REF: ${{ github.event.inputs.seed_funding_from }}
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py seed \
+              --gmx-root user_data/data/gmx --ref "${SEED_REF}"
+
+      - name: Preflight funding state
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py state \
+              --gmx-root user_data/data/gmx
+
       # A delisted market (e.g. OM) keeps the history it accumulated while it was
       # live -- collection stops at delisting and the series simply freezes there.
       # Its files are NOT removed: they ride the release lineage so consumers keep
@@ -162,7 +209,7 @@ jobs:
               for symbol in sorted(previous & live):
                   print(f"relisted, resuming validation: {symbol}")
           except Exception as exc:  # noqa: BLE001 - never block a release on registry flakiness
-              print(f"WARNING: registry unreachable ({exc}); reusing previous roster.")
+              print(f"::warning::registry unreachable ({exc}); reusing previous roster.")
               roster = sorted(previous)
 
           # The roster below is rewritten *before* collection, and a market
@@ -238,13 +285,25 @@ jobs:
         env:
           JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
           HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+          REPAIR_TIMEFRAMES: ${{ github.event.inputs.repair_timeframes }}
         run: |
-          REPAIR_FLAG=""
+          ARGS=(--output-dir ./user_data --prune-report /tmp/gmx-prune-report.json)
           if [ "${{ github.event.inputs.repair_ohlcv }}" = "true" ]; then
-            REPAIR_FLAG="--repair-ohlcv"
+            ARGS+=(--repair-ohlcv)
             echo "repair_ohlcv=true: filling interior holes with MAX_CANDLE_LIMIT"
+            # Free-text input: drop whitespace, then allow only [0-9a-z,] so it
+            # stays one plain argument and can never inject an option.
+            TIMEFRAMES="${REPAIR_TIMEFRAMES//[[:space:]]/}"
+            if [ -n "$TIMEFRAMES" ]; then
+              if ! [[ "$TIMEFRAMES" =~ ^[0-9a-z,]+$ ]]; then
+                echo "ERROR: repair_timeframes must look like 1d,4h (got: $REPAIR_TIMEFRAMES)" >&2
+                exit 1
+              fi
+              ARGS+=(--repair-timeframes "$TIMEFRAMES")
+              echo "repair_timeframes=$TIMEFRAMES"
+            fi
           fi
-          PYTHONPATH=src python scripts/collect_daily_snapshot.py --output-dir ./user_data $REPAIR_FLAG
+          PYTHONPATH=src python scripts/collect_daily_snapshot.py "${ARGS[@]}"
 
       - name: Validate candle history integrity
         run: |
@@ -261,6 +320,10 @@ jobs:
               sys.exit(1)
 
           baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          prune_path = Path("/tmp/gmx-prune-report.json")
+          pruned = (
+              json.loads(prune_path.read_text(encoding="utf-8")) if prune_path.exists() else {}
+          )
           futures_dir = Path("./user_data/data/gmx/futures")
           current = {}
 
@@ -288,7 +351,10 @@ jobs:
               after = current.get(name)
               if not after:
                   continue
-              if after["rows"] < before["rows"]:
+              # The collector never stores a bar that has not closed yet and records
+              # every open row it prunes; tolerate exactly those rows, nothing else.
+              tolerated = len(pruned.get(name, []))
+              if after["rows"] < before["rows"] - tolerated:
                   regressions.append(
                       f"{name} row count shrank from {before['rows']} to {after['rows']}"
                   )
@@ -499,6 +565,111 @@ jobs:
           print(f"Saved {len(df)} markets -> {out}")
           EOF
 
+      # `generate_report` (the "Collect daily snapshot" step above) runs
+      # before this job's own volume fetch, so it always writes placeholder
+      # volume fields into data_report.txt (see the `volume_count,
+      # volume_data = 0, {}` comment in collect_daily_snapshot.main). This
+      # patches the already-written report with what the step above just
+      # saved to volumes/{date}.parquet, so the *shipped* report never says
+      # "Volume entries: 0 markets" on a day volume was actually collected.
+      #
+      # `if: always()`: if "Collect 24h volume snapshot" itself raises
+      # (rather than exiting 0 with no rows, which it already handles), the
+      # default `success()` condition would skip this step entirely and the
+      # report would still ship the fabricated placeholder. With no
+      # volumes/{date}.parquet on disk either way, refresh_volume_report_section
+      # reports "not collected" -- an honest fail-soft answer, not another zero.
+      - name: Refresh report with 24h volume data
+        if: always()
+        run: |
+          PYTHONPATH=src:scripts python - <<'EOF'
+          from datetime import datetime, UTC
+          from pathlib import Path
+          from collect_daily_snapshot import refresh_volume_report_section
+
+          date_str = datetime.now(UTC).strftime("%Y-%m-%d")
+          refresh_volume_report_section(
+              report_path=Path("data_report.txt"),
+              volumes_dir=Path("./user_data/data/gmx/volumes"),
+              snapshots_dir=Path("./user_data/data/gmx/snapshots"),
+              date_str=date_str,
+          )
+          EOF
+
+      # Hourly funding + mark companions (#56). Contract, mirroring the #48 tick
+      # phase: fail-closed for *publishing* the companions, fail-soft for the rest
+      # of the release.
+      #
+      #   extract -> stage -> gate -> promote
+      #
+      # The new files are built in user_data/.companion-stage, graded per pair, and
+      # copied over futures/ only on a pass. On a fail futures/ keeps the companions
+      # it was restored with (the last ones that passed), funding_coverage.json
+      # says WITHHELD, and the last step below turns the job red -- but the release
+      # still publishes. Nothing here ever deletes or edits funding/ state.
+      - name: Extract funding (incremental)
+        id: funding_extract
+        if: ${{ env.FUNDING_STATE == 'ready' }}
+        continue-on-error: true
+        timeout-minutes: ${{ github.event.inputs.seed_funding_from != '' && 30 || 15 }}
+        env:
+          JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
+          HYPERSYNC_API_TOKEN: ${{ secrets.HYPERSYNC_API_TOKEN }}
+        run: |
+          PYTHONPATH=src python scripts/extract_unified_funding.py \
+              --network arbitrum \
+              --output-dir user_data/data/gmx/funding \
+              --output parquet \
+              --resume
+
+      - name: Stage funding and mark companions
+        id: funding_stage
+        if: ${{ env.FUNDING_STATE == 'ready' && steps.funding_extract.outcome == 'success' }}
+        continue-on-error: true
+        run: |
+          PYTHONPATH=src python scripts/release_funding_companions.py export \
+              --gmx-root user_data/data/gmx \
+              --stage-dir user_data/.companion-stage
+
+      - name: Gate and promote funding companions
+        if: always()
+        env:
+          EXTRACT_OUTCOME: ${{ steps.funding_extract.outcome }}
+          STAGE_OUTCOME: ${{ steps.funding_stage.outcome }}
+        run: |
+          # A partial staging directory must never be graded as if it were whole.
+          if [ "${STAGE_OUTCOME}" != "success" ]; then
+            rm -rf user_data/.companion-stage
+          fi
+          RUN_START="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
+          RC=0
+          PYTHONPATH=src python scripts/release_funding_companions.py gate \
+              --gmx-root user_data/data/gmx \
+              --stage-dir user_data/.companion-stage \
+              --state "${FUNDING_STATE:-absent}" \
+              --extract-outcome "${EXTRACT_OUTCOME:-skipped}" \
+              --run-start "${RUN_START}" \
+              --report data_report.txt || RC=$?
+          # Whatever the gate did (an uncaught exception also exits 1, like a
+          # legitimate WITHHELD): unless it wrote a verdict stamped with this
+          # run's start, the verdict restored from the previous release must not
+          # stand. Replace it with WITHHELD / NOT refreshed. futures/ is untouched
+          # either way: promotion only happens inside a passing gate.
+          PYTHONPATH=src python scripts/release_funding_companions.py ensure-verdict \
+              --gmx-root user_data/data/gmx \
+              --state "${FUNDING_STATE:-absent}" \
+              --extract-outcome "${EXTRACT_OUTCOME:-skipped}" \
+              --run-start "${RUN_START}" \
+              --exit-code "${RC}" \
+              --report data_report.txt || {
+            if [ "${RC}" -gt 1 ] || [ ! -f user_data/data/gmx/funding_coverage.json ]; then
+              rm -f user_data/data/gmx/funding_coverage.json
+              echo "FUNDING_GATE=fail" >> "$GITHUB_ENV"
+            fi
+          }
+          rm -rf user_data/.companion-stage
+          exit 0
+
       # Every data type the bundle is supposed to carry, checked before it
       # ships. The release reports "success" from step exit codes alone, so
       # without this a phase that produced nothing still publishes a bundle
@@ -563,28 +734,53 @@ jobs:
           mkdir -p user_data/data/gmx/tick_volume
           mkdir -p user_data/data/gmx/ticks
 
-          tar -czf /tmp/gmx-full.tar.gz user_data/data/gmx/
+          # The raw funding state ships as its own asset (gmx-funding-state-*), not
+          # in gmx-full: it is ~0.6 GiB of parquet that does not compress and
+          # would eat the 2 GiB asset cap. gmx-full keeps only the derived
+          # futures/*-1h-funding_rate and *-1h-mark feathers and the coverage
+          # record. The state is packaged exactly as it is on disk, whatever the
+          # gate decided -- a withheld day still carries it forward.
+          tar -czf /tmp/gmx-full.tar.gz \
+              --exclude='user_data/data/gmx/funding' \
+              user_data/data/gmx/
+          # Unique name per run: the release step uploads it beside any older
+          # state asset and deletes those only once this one is confirmed.
+          bash scripts/funding_state_assets.sh pack /tmp/
+
           # The light bundle carries per-symbol volume (small aggregates) but
           # not the raw tick tape, which is per-fill and grows without bound.
-          tar -czf /tmp/gmx-light.tar.gz \
-              user_data/data/gmx/apy/ \
-              user_data/data/gmx/snapshots/ \
-              user_data/data/gmx/tickers/ \
-              user_data/data/gmx/volumes/ \
-              user_data/data/gmx/tick_volume/
+          # It never carried OHLCV, so it still has no candles and no mark (mark
+          # is derived from them): full is the backtest bundle. It does carry the
+          # small hourly funding_rate feathers and the coverage record, which are
+          # useful without candles. Both come from futures/, so a withheld day
+          # ships the previous release's funding files here as well.
+          LIGHT_LIST=$(mktemp)
+          for d in apy snapshots tickers volumes tick_volume; do
+            printf '%s\0' "user_data/data/gmx/${d}/" >> "$LIGHT_LIST"
+          done
+          find user_data/data/gmx/futures -maxdepth 1 -name '*-1h-funding_rate.feather' -print0 >> "$LIGHT_LIST"
+          if [ -f user_data/data/gmx/funding_coverage.json ]; then
+            printf '%s\0' user_data/data/gmx/funding_coverage.json >> "$LIGHT_LIST"
+          fi
+          tar -czf /tmp/gmx-light.tar.gz --null -T "$LIGHT_LIST"
+          rm -f "$LIGHT_LIST"
 
           PYTHONPATH=src python -m gmx_historical_data.tick_release build \
               --root user_data/data/gmx --output /tmp
 
           ls -lh /tmp/gmx-*.tar.gz
 
-          # Asset size guardrails
-          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz /tmp/gmx-ticks.tar.gz; do
+          # Asset size guardrails: warn from 1.8 GiB, refuse at the 2 GiB cap.
+          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz /tmp/gmx-ticks.tar.gz /tmp/gmx-funding-state-*.tar.gz; do
+            [ -f "$tarball" ] || continue
             size=$(stat -c %s "$tarball")
+            warn=$((1800 * 1024 * 1024))
             limit=$((2 * 1024 * 1024 * 1024))  # 2 GB
             if [ "$size" -ge "$limit" ]; then
               echo "ERROR: $tarball is ${size} bytes — exceeds 2 GB GitHub asset cap" >&2
               exit 1
+            elif [ "$size" -ge "$warn" ]; then
+              echo "::warning::$tarball is ${size} bytes — within 10% of the 2 GB GitHub asset cap"
             fi
           done
 
@@ -597,14 +793,17 @@ jobs:
           TAG="data-${DATE}"
           COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
 
-          # Preserve immutable existing assets on same-date reruns. The new tick
-          # revision may be newer than full/light; its own manifest is authoritative.
-          if gh release view "${TAG}" --repo ${{ github.repository }} >/dev/null 2>&1; then
-            echo "Preserving existing ${TAG} full/light/report assets; publishing additive ticks only."
-            PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
-                --repo ${{ github.repository }} --release "${TAG}" \
-                --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
-            exit 0
+          # Same-date reruns preserve all consumer assets and append only the
+          # verified funding-state successor and immutable tick revision. Never
+          # delete/recreate the release or clobber full/light/report/tick assets.
+          MODE=create
+          if ! TAGS=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName \
+              --jq '.[].tagName'); then
+            echo "ERROR: could not inspect releases; refusing to publish into an unknown tag state." >&2
+            exit 1
+          elif printf '%s\n' "${TAGS}" | grep -qx "${TAG}"; then
+            MODE=in_place
+            echo "${TAG} already exists; preserving its consumer assets and adding funding/tick assets only."
           fi
 
           NOTES_FILE=$(mktemp)
@@ -614,8 +813,9 @@ jobs:
           **Generated:** ${TIMESTAMP} UTC
 
           Contents (${COUNT} files total):
-          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, futures/
-          - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/ (no futures/)
+          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, ticks/, checkpoints/, futures/ (OHLCV + 1h funding_rate + 1h mark + _cadence_manifest.json), funding_coverage.json, delisted_markets.json. The backtest bundle.
+          - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, futures/*-1h-funding_rate.feather, funding_coverage.json (no OHLCV, no mark)
+          - \`gmx-funding-state-<timestamp>.tar.gz\` — raw funding state carried between daily runs; not a consumer artifact
           - \`gmx-ticks[.rN].tar.gz\` + matching manifest — Arbitrum execution tape, volume and coverage/checksums; same-date tick revisions may be newer than full/light
           - \`data_report.txt\` — collection summary
 
@@ -630,21 +830,52 @@ jobs:
           printf '\n' >> "$NOTES_FILE"
           cat /tmp/gmx-coverage-table.md >> "$NOTES_FILE"
 
-          ASSETS=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
-          if [ -f data_report.txt ]; then
-            ASSETS+=(data_report.txt)
+          # Always say whether funding was refreshed, and list every lagging or
+          # stale market -- never leave a consumer to infer it.
+          printf '\n' >> "$NOTES_FILE"
+          PYTHONPATH=src python scripts/release_funding_companions.py notes \
+              --coverage user_data/data/gmx/funding_coverage.json >> "$NOTES_FILE"
+
+          CONSUMER=()
+          if [ "${MODE}" = "create" ]; then
+            CONSUMER=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
+            if [ -f data_report.txt ]; then
+              CONSUMER+=(data_report.txt)
+            fi
+          fi
+          STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz 2>/dev/null | sort | tail -1 || true)
+          STATE_ARGS=()
+          if [ -n "${STATE_FILE}" ]; then
+            STATE_ARGS=("${STATE_FILE}")
           fi
 
-          gh release create "${TAG}" \
+          FAILED=0
+          update_in_place() {
+            # Existing consumer assets and the original release body are
+            # immutable on a same-date rerun. Only the uniquely named state
+            # successor and numbered tick pair may be appended.
+            if [ -n "${STATE_FILE}" ]; then
+              bash scripts/funding_state_assets.sh publish "${TAG}" "${STATE_FILE}" \
+                  || FAILED=1
+            fi
+          }
+
+          if [ "${MODE}" = "in_place" ]; then
+            update_in_place
+          elif ! gh release create "${TAG}" \
               --repo ${{ github.repository }} \
               --title "GMX Data ${DATE}" \
               --notes-file "$NOTES_FILE" \
               --latest \
-              "${ASSETS[@]}"
+              "${CONSUMER[@]}" "${STATE_ARGS[@]}"; then
+            FAILED=1
+          fi
 
-          PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
-              --repo ${{ github.repository }} --release "${TAG}" \
-              --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
+          if [ "${FAILED}" = "0" ]; then
+            PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
+                --repo ${{ github.repository }} --release "${TAG}" \
+                --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
+          fi
 
           rm -f "$NOTES_FILE"
 
@@ -652,6 +883,11 @@ jobs:
           echo "=== Release assets ==="
           gh release view "${TAG}" --repo ${{ github.repository }} \
               --json assets --jq '.assets[] | "\(.name)  \(.size / 1024 / 1024 | floor)MB"'
+
+          if [ "${FAILED}" != "0" ]; then
+            echo "::error::one or more release uploads failed; see above."
+            exit 1
+          fi
 
       - name: Prune old releases
         env:
@@ -661,6 +897,29 @@ jobs:
           CUTOFF=$(date -u -d "${RETENTION_DAYS} days ago" +%Y-%m-%d)
           echo "Pruning data-* releases with tag date older than ${CUTOFF}..."
 
+          # The newest release that carries a funding state asset is the only
+          # resumable copy of the state, however old it is. It is kept unless a
+          # newer release carries one (then that one is kept), i.e. unless a
+          # replacement was published successfully. If any inspection fails the
+          # answer is "unknown", never "no state": nothing is pruned this run.
+          KEEP=""
+          if ! RELS=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName \
+              --jq '[.[].tagName | select(test("^data-[0-9]{4}-[0-9]{2}-[0-9]{2}$"))] | sort | reverse | .[]'); then
+            echo "::warning::could not list releases; skipping ALL pruning this run."
+            exit 0
+          fi
+          for T in ${RELS}; do
+            if ! NAMES=$(gh release view "${T}" --repo ${{ github.repository }} --json assets \
+                --jq '.assets[].name'); then
+              echo "::warning::could not inspect ${T} for the funding state; skipping ALL pruning this run."
+              exit 0
+            fi
+            if printf '%s\n' "${NAMES}" | grep -qE '^gmx-funding-state-[0-9]{8}T[0-9]{6}Z\.tar\.gz$'; then
+              KEEP="${T}"
+              break
+            fi
+          done
+
           # List releases, filter data-YYYY-MM-DD tags, drop ones older than cutoff
           gh release list --repo ${{ github.repository }} --limit 100 \
               --json tagName --jq '.[].tagName' | \
@@ -668,11 +927,28 @@ jobs:
               while read -r TAG; do
                   TAG_DATE="${TAG#data-}"
                   if [ "$TAG_DATE" \< "$CUTOFF" ]; then
+                      if [ "$TAG" = "$KEEP" ]; then
+                          echo "  Keeping ${TAG}: newest release carrying the funding state"
+                          continue
+                      fi
                       echo "  Deleting ${TAG} (date: ${TAG_DATE})"
                       gh release delete "${TAG}" --repo ${{ github.repository }} --yes --cleanup-tag
                   fi
               done
           echo "Prune complete."
+
+      # Published-but-red, like the cadence step below: the release (OHLCV and
+      # everything else) has shipped, and the funding/mark companions in it are
+      # either freshly graded or the previous release's, as funding_coverage.json
+      # and the release notes state. A gate that never ran counts as a fail.
+      - name: Fail job if funding companions were withheld
+        if: always()
+        run: |
+          if [ "${FUNDING_GATE:-fail}" != "pass" ]; then
+            echo "ERROR: funding/mark companions were withheld this run; see funding_coverage.json" >&2
+            echo "and the 'Funding & Mark Companions' section of data_report.txt." >&2
+            exit 1
+          fi
 
       # Deliberately the LAST step in the job. By the time it runs, the
       # annotated manifest has already shipped inside gmx-full.tar.gz and the

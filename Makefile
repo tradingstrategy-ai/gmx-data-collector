@@ -458,6 +458,8 @@ funding-unified-merge:
 		--merge-only \
 		$(if $(MARKET),--market $(MARKET),)
 
+# Shares the signed hourly transform and guarded merge writer with export-funding
+# (FreqtradeExporter.export_funding_frame); never truncates an existing destination.
 funding-feather:
 	@echo "Exporting to FreqTrade feather format..."
 	@echo "  Source:     $(UNIFIED_OUTPUT_DIR)"
@@ -467,7 +469,6 @@ funding-feather:
 	$(NICE) poetry run python scripts/extract_unified_funding.py \
 		--network $(NETWORK) \
 		--output-dir "$(UNIFIED_OUTPUT_DIR)" \
-		--output feather \
 		--feather-dir "$(FEATHER_DIR)" \
 		--merge-only \
 		$(if $(MARKET),--market $(MARKET),)

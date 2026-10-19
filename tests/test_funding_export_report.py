@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pyarrow.feather as feather
 
-from scripts.collect_daily_snapshot import _funding_export_summary
+from scripts.collect_daily_snapshot import _funding_export_summary, _funding_export_warning
 
 
 def _write_funding_export(futures_dir, pair: str, variant: str, last: datetime, rows: int = 5):
@@ -175,3 +175,131 @@ class TestTimezoneRobustness:
 
         assert summary["canonical_latest"] is None
         assert summary["unreadable"] == 1
+
+
+class TestFundingExportWarning:
+    """Issue #47 is still open: the canonical export has 0 pairs today, and
+    that fact must surface as a GitHub Actions ``::warning::`` in the Actions
+    UI rather than silently sitting in the report body only -- the whole
+    reason the incident went unnoticed for 19 hours."""
+
+    def test_zero_canonical_pairs_produces_a_warning(self):
+        funding = {
+            "canonical_pairs": 0,
+            "canonical_latest": None,
+            "orphans": {},
+            "unreadable": 0,
+        }
+
+        warning = _funding_export_warning(funding)
+
+        assert warning is not None
+        assert warning.startswith("::warning::")
+        assert "0 pairs" in warning
+
+    def test_no_readable_newest_bar_produces_a_warning_even_with_pairs(self):
+        """A canonical export can exist but have no bar this run could read
+        as current (e.g. every date failed to parse) -- also a real gap."""
+        funding = {
+            "canonical_pairs": 3,
+            "canonical_latest": None,
+            "orphans": {},
+            "unreadable": 3,
+        }
+
+        warning = _funding_export_warning(funding)
+
+        assert warning is not None
+        assert warning.startswith("::warning::")
+
+    def test_healthy_export_produces_no_warning(self):
+        funding = {
+            "canonical_pairs": 42,
+            "canonical_latest": pd.Timestamp(datetime(2026, 9, 27, tzinfo=UTC)),
+            "orphans": {},
+            "unreadable": 0,
+        }
+
+        assert _funding_export_warning(funding) is None
+
+
+class TestFundingWarningEmittedFromReport:
+    """The warning is only useful printed to stdout as a plain, unstyled
+    line inside GitHub Actions -- the rich console would otherwise wrap or
+    style the ``::warning::`` marker and GitHub would never recognise it."""
+
+    def test_warning_printed_in_github_actions_when_canonical_is_empty(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        from scripts.collect_daily_snapshot import generate_report
+
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+                "symbol": ["BTC"],
+            }
+        )
+        generate_report(
+            date_str="2026-09-27",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=tmp_path / "report.txt",
+            ohlcv_coverage=None,
+            skipped=None,
+        )
+
+        out = capsys.readouterr().out
+        assert "::warning::" in out
+
+    def test_warning_not_printed_outside_github_actions(self, tmp_path, capsys, monkeypatch):
+        from scripts.collect_daily_snapshot import generate_report
+
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        markets_df = pd.DataFrame(
+            {
+                "name": ["BTC/USD"],
+                "is_swap_only": [False],
+                "is_listed": [True],
+                "open_interest_long": ["0"],
+                "open_interest_short": ["0"],
+                "market_token": ["0x0"],
+                "symbol": ["BTC"],
+            }
+        )
+        generate_report(
+            date_str="2026-09-27",
+            markets_df=markets_df,
+            candle_count=0,
+            failed_symbols=[],
+            ticker_count=0,
+            apy_count=0,
+            volume_count=0,
+            volume_data={},
+            futures_dir=tmp_path,
+            snapshots_dir=tmp_path,
+            tickers_dir=tmp_path,
+            apy_dir=tmp_path,
+            volumes_dir=tmp_path,
+            report_path=tmp_path / "report.txt",
+            ohlcv_coverage=None,
+            skipped=None,
+        )
+
+        out = capsys.readouterr().out
+        assert "::warning::funding" not in out

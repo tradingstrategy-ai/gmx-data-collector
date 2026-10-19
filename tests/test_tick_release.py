@@ -249,7 +249,13 @@ def test_workflow_preserves_existing_release_and_builds_ticks():
     assert "gh release delete" not in create
     assert "git push origin --delete" not in create
     assert "tick_release publish" in create
-    assert create.index("gh release view") < create.index("gh release create")
+    assert create.index("gh release list") < create.index("gh release create")
+    assert 'MODE=in_place' in create
+    assert 'CONSUMER=()' in create
+    assert "--clobber" not in create
+    assert "funding_state_assets.sh publish" in create
+    assert "gmx-ticks.tar.gz /tmp/gmx-funding-state-*.tar.gz" in text
+    assert "queue: max" in text
     assert "tick_release build" in text
     assert "--root user_data/data/gmx --output /tmp" in text
 
