@@ -34,12 +34,13 @@ env:
 
 # Shared with funding-catchup.yml: both read the newest funding state asset at
 # the start and write a newer one at the end, so running together would lose
-# one side's progress. A running job is never cancelled, but the group holds only one
-# pending run: a newer queued run cancels an older pending one, so do not queue a
-# catch-up while a daily release is waiting.
+# one side's progress. A running job is never cancelled, and with `queue: max` pending
+# runs are queued and processed sequentially instead of being replaced (up to 100 per
+# group; GitHub changelog 2026-05-07).
 concurrency:
   group: gmx-funding-state
   cancel-in-progress: false
+  queue: max
 
 jobs:
   release:

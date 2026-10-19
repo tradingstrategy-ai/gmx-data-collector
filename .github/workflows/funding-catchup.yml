@@ -16,12 +16,13 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Shared with release-data.yml: both read the newest state asset at the start and
-# write a newer one at the end. A running job is never cancelled, but the group holds
-# only one pending run: a newer queued run cancels an older pending one, so dispatch a
-# catch-up only when no gmx-funding-state run is queued.
+# write a newer one at the end. A running job is never cancelled, and with `queue: max`
+# pending runs are queued and processed sequentially instead of being replaced (up to
+# 100 per group; GitHub changelog 2026-05-07).
 concurrency:
   group: gmx-funding-state
   cancel-in-progress: false
+  queue: max
 
 jobs:
   catchup:

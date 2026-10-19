@@ -56,11 +56,13 @@ def _normalised(run: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_both_workflows_share_one_non_cancelling_concurrency_group() -> None:
+def test_both_workflows_share_one_non_cancelling_queueing_concurrency_group() -> None:
     groups = []
     for path in (CATCHUP, RELEASE_WORKFLOW):
         concurrency = _doc(path)["concurrency"]
         assert concurrency["cancel-in-progress"] is False, path
+        # Pending runs queue and run in turn instead of replacing each other.
+        assert concurrency["queue"] == "max", path
         groups.append(concurrency["group"])
     assert groups[0] == groups[1] == "gmx-funding-state"
 
