@@ -85,7 +85,7 @@ import os
 import sys
 import time
 from collections import defaultdict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -118,6 +118,8 @@ from gmx_historical_data.hypersync_range import exclusive_end
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
 
 console = Console()
+
+_LEGACY_RAW_COLUMNS_LOGGED: set[Path] = set()
 
 # Retry settings — HyperSync 500 errors can be persistent, use generous retries
 MAX_RETRIES = 15
@@ -801,7 +803,40 @@ def aggregate_hourly_direction(
 # =============================================================================
 
 
-def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
+def normalize_raw_frame(
+    frame: "pl.DataFrame", filepath: Path, record_type: type[FundingFeePerSizeRecord]
+) -> "pl.DataFrame":
+    """Validate and project a raw frame onto its record's current schema."""
+    expected = [field.name for field in fields(record_type)]
+    missing = sorted(set(expected) - set(frame.columns))
+    if missing:
+        raise ValueError(
+            f"Raw funding file {filepath} is missing required fields: {', '.join(missing)}"
+        )
+
+    extras = sorted(set(frame.columns) - set(expected))
+    if extras and filepath not in _LEGACY_RAW_COLUMNS_LOGGED:
+        console.print(
+            f"[yellow]Ignoring legacy raw columns {', '.join(extras)} in {filepath}[/yellow]"
+        )
+        _LEGACY_RAW_COLUMNS_LOGGED.add(filepath)
+
+    try:
+        frame = frame.select(expected).with_columns(
+            pl.col("block_timestamp").cast(pl.Int64, strict=True)
+        )
+    except Exception as exc:
+        raise ValueError(f"Cannot read required funding fields from {filepath}: {exc}") from exc
+    if frame.filter(pl.col("block_timestamp") <= 0).height:
+        raise ValueError(f"Raw funding file {filepath} contains a non-positive block_timestamp")
+    return frame
+
+
+def append_parquet(
+    df: "pl.DataFrame",
+    filepath: Path,
+    raw_record_type: type[FundingFeePerSizeRecord] | None = None,
+) -> None:
     """Append DataFrame to existing Parquet file, deduplicating.
 
     :param df: New data to append.
@@ -811,6 +846,8 @@ def append_parquet(df: "pl.DataFrame", filepath: Path) -> None:
 
     existing = pl.read_parquet(filepath) if filepath.exists() else None
     if existing is not None:
+        if raw_record_type is not None:
+            existing = normalize_raw_frame(existing, filepath, raw_record_type)
         for col in existing.columns:
             if col in df.columns and existing[col].dtype != df[col].dtype:
                 df = df.with_columns(pl.col(col).cast(existing[col].dtype))
@@ -843,7 +880,7 @@ def save_raw_per_symbol(records: list[FundingFeePerSizeRecord], output_dir: Path
     for symbol, sym_records in sorted(by_symbol.items()):
         filepath = output_dir / "raw" / "fee_per_size" / symbol / "data.parquet"
         df = pl.DataFrame([asdict(r) for r in sym_records])
-        append_parquet(df, filepath)
+        append_parquet(df, filepath, FundingFeePerSizeRecord)
         console.print(
             f"  Raw: [cyan]{len(sym_records):,}[/cyan] events -> [green]{filepath}[/green]"
         )
@@ -889,7 +926,9 @@ def rebuild_direction_from_raw(
             (pl.col("block_timestamp") >= start) & (pl.col("block_timestamp") < start + 3600)
             for start in touched_hours
         ]
-        raw_events = pl.read_parquet(raw_path).filter(pl.any_horizontal(hour_predicates))
+        raw_events = normalize_raw_frame(
+            pl.read_parquet(raw_path), raw_path, FundingFeePerSizeRecord
+        ).filter(pl.any_horizontal(hour_predicates))
         records.extend(FundingFeePerSizeRecord(**row) for row in raw_events.to_dicts())
     if records:
         hourly = aggregate_hourly_direction(records)
