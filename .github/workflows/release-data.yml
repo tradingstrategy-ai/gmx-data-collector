@@ -34,7 +34,9 @@ env:
 
 # Shared with funding-catchup.yml: both read the newest funding state asset at
 # the start and write a newer one at the end, so running together would lose
-# one side's progress. Queued, never cancelled: a cancelled release publishes nothing.
+# one side's progress. A running job is never cancelled, but the group holds only one
+# pending run: a newer queued run cancels an older pending one, so do not queue a
+# catch-up while a daily release is waiting.
 concurrency:
   group: gmx-funding-state
   cancel-in-progress: false

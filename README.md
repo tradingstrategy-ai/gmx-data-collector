@@ -648,7 +648,9 @@ nothing previous ships no companions.
   it was restored from (even after a timeout). It shares the `gmx-funding-state`
   concurrency group with `release-data.yml`, leaves the bundles and notes alone, and its
   step summary says whether head was reached. Re-dispatch until it is; the next daily
-  release then exports and gates as usual.
+  release then exports and gates as usual. A concurrency group keeps only one pending run,
+  so dispatch a catch-up only when no `gmx-funding-state` run is queued; otherwise a pending
+  daily release can be cancelled.
 
 ### Funding data contract
 

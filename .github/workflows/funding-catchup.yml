@@ -16,7 +16,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 # Shared with release-data.yml: both read the newest state asset at the start and
-# write a newer one at the end. Queued, never cancelled.
+# write a newer one at the end. A running job is never cancelled, but the group holds
+# only one pending run: a newer queued run cancels an older pending one, so dispatch a
+# catch-up only when no gmx-funding-state run is queued.
 concurrency:
   group: gmx-funding-state
   cancel-in-progress: false
@@ -70,7 +72,7 @@ jobs:
       - name: Require a restored funding state
         run: |
           if [ "${FUNDING_STATE:-absent}" != "ready" ] || [ -z "${FUNDING_STATE_RELEASE:-}" ]; then
-            echo "::error::no usable funding state to resume (state=${FUNDING_STATE:-absent}). Seed it with release-data.yml seed_funding_from first." >&2
+            echo "::error::no usable funding state to resume (state=${FUNDING_STATE:-absent}). Seed it with release-data.yml seed_funding_from first."
             exit 1
           fi
 
@@ -117,7 +119,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/funding_state_assets.sh pack /tmp/
-          STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz | sort | tail -1)
+          STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz 2>/dev/null | sort | tail -1 || true)
+          if [ -z "${STATE_FILE}" ]; then
+            echo "::error::no state archive was packed; progress was NOT saved."
+            exit 1
+          fi
           bash scripts/funding_state_assets.sh publish "${FUNDING_STATE_RELEASE}" "${STATE_FILE}"
 
       # Red when the extraction did not finish (progress is already saved above) or
@@ -129,10 +135,10 @@ jobs:
           UPLOAD_OUTCOME: ${{ steps.state_upload.outcome }}
         run: |
           if [ "${UPLOAD_OUTCOME}" = "failure" ]; then
-            echo "::error::uploading the advanced funding state failed; progress was NOT saved." >&2
+            echo "::error::uploading the advanced funding state failed; progress was NOT saved."
             exit 1
           fi
           if [ "${EXTRACT_OUTCOME}" != "success" ]; then
-            echo "::error::extraction ended '${EXTRACT_OUTCOME}'; progress so far was saved. Re-dispatch to continue." >&2
+            echo "::error::extraction ended '${EXTRACT_OUTCOME}'; progress so far was saved. Re-dispatch to continue."
             exit 1
           fi
