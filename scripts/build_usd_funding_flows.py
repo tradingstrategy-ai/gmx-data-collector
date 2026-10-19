@@ -54,7 +54,7 @@ from rich.table import Table
 
 from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.market_registry import fetch_markets
-from gmx_historical_data.raw_schema import project_raw_columns
+from gmx_historical_data.raw_schema import project_raw_columns, report_legacy_raw_columns
 
 try:
     import polars as pl
@@ -75,6 +75,17 @@ _RAW_EVENT_COLUMNS = (
     "transaction_hash",
     "log_index",
 )
+_RAW_EVENT_CASTS = {
+    "symbol": pl.String,
+    "market": pl.String,
+    "collateral_token": pl.String,
+    "is_long": pl.Boolean,
+    "delta": pl.String,
+    "block_number": pl.Int64,
+    "block_timestamp": pl.Int64,
+    "transaction_hash": pl.String,
+    "log_index": pl.Int64,
+}
 # GMX V2 genesis timestamp — filter out events before this
 GMX_V2_GENESIS_TIMESTAMP = 1690848000  # 2023-08-01 00:00:00 UTC
 
@@ -131,21 +142,10 @@ def load_and_dedup(raw_dir: Path, event_type: str) -> pl.DataFrame:
     for filepath in parquet_files:
         schema = pl.read_parquet_schema(filepath)
         projected_columns = project_raw_columns(schema, filepath, _RAW_EVENT_COLUMNS)
-        casts = {
-            "symbol": pl.String,
-            "market": pl.String,
-            "collateral_token": pl.String,
-            "is_long": pl.Boolean,
-            "delta": pl.String,
-            "block_number": pl.Int64,
-            "block_timestamp": pl.Int64,
-            "transaction_hash": pl.String,
-            "log_index": pl.Int64,
-        }
 
         scans.append(
             pl.scan_parquet(filepath).select(
-                pl.col(column).cast(casts[column]) for column in projected_columns
+                pl.col(column).cast(_RAW_EVENT_CASTS[column]) for column in projected_columns
             )
         )
     combined = pl.concat(scans).collect()
@@ -508,8 +508,11 @@ Examples:
 
     # Load raw data
     console.print("\n[bold]Loading raw event data...[/bold]")
-    ff_raw = load_and_dedup(network_dir / "raw" / "fee_per_size", "funding_fee")
-    cf_raw = load_and_dedup(network_dir / "raw" / "claimable_fee_per_size", "claimable")
+    try:
+        ff_raw = load_and_dedup(network_dir / "raw" / "fee_per_size", "funding_fee")
+        cf_raw = load_and_dedup(network_dir / "raw" / "claimable_fee_per_size", "claimable")
+    finally:
+        report_legacy_raw_columns(console)
 
     oracle_path = network_dir / "raw" / "oracle_prices" / "data.parquet"
     if not oracle_path.exists():

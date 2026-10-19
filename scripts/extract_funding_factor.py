@@ -104,7 +104,7 @@ from gmx_historical_data.atomic_parquet import atomic_write_parquet
 from gmx_historical_data.hypersync_client_factory import RotatingHypersyncClient
 from gmx_historical_data.hypersync_range import exclusive_end
 from gmx_historical_data.market_registry import fetch_markets, market_symbol
-from gmx_historical_data.raw_schema import project_raw_columns
+from gmx_historical_data.raw_schema import project_raw_columns, report_legacy_raw_columns
 
 console = Console()
 
@@ -812,8 +812,9 @@ def normalize_raw_frame(
     :returns: Raw rows projected onto the record schema, with timestamps as integers.
     """
     expected = [field.name for field in fields(record_type)]
+    projected_columns = project_raw_columns(frame.columns, filepath, expected)
     try:
-        frame = frame.select(project_raw_columns(frame.columns, filepath, expected)).with_columns(
+        frame = frame.select(projected_columns).with_columns(
             pl.col("block_timestamp").cast(pl.Int64, strict=True)
         )
     except Exception as exc:
@@ -1342,6 +1343,8 @@ Examples:
 
         traceback.print_exc()
         sys.exit(1)
+    finally:
+        report_legacy_raw_columns(console)
 
 
 if __name__ == "__main__":

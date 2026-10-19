@@ -226,7 +226,7 @@ def cmd_catchup_report(args: argparse.Namespace) -> int:
     if before is None:
         # Nothing was recorded, so nothing can be shown to have advanced.
         print("::warning::no checkpoint snapshot from before the run; nothing will be uploaded.")
-        _github_output(advanced="false", head_reached="false")
+        _github_output(head_reached="false")
         return 0
     report = funding_catchup.build_report(
         before,
@@ -239,9 +239,7 @@ def cmd_catchup_report(args: argparse.Namespace) -> int:
     if summary:
         with open(summary, "a") as handle:
             handle.write(report.markdown)
-    _github_output(
-        advanced=str(report.advanced).lower(), head_reached=str(report.head_reached).lower()
-    )
+    _github_output(head_reached=str(report.head_reached).lower())
     return 0
 
 

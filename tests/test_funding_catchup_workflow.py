@@ -114,6 +114,7 @@ def test_steps_run_in_contract_order() -> None:
 def test_progress_is_saved_whatever_happened_to_the_extraction() -> None:
     report = _step("Report catch-up")
     upload = _step("Upload advanced funding state")
+    fail = _step("Fail job if catch-up did not finish")
     assert report["if"] == "always()"
     assert report["continue-on-error"] is True
     assert report["id"] == "catchup_report"
@@ -122,6 +123,8 @@ def test_progress_is_saved_whatever_happened_to_the_extraction() -> None:
     assert "has_advanced" in upload["run"]
     # The upload decision is independent of both report and extraction outcomes.
     assert "funding_extract" not in upload["if"]
+    assert fail["env"]["REPORT_OUTCOME"] == "${{ steps.catchup_report.outcome }}"
+    assert '"${REPORT_OUTCOME}" != "success"' in fail["run"]
 
 
 def test_catchup_leaves_consumer_bundles_and_notes_alone() -> None:
@@ -372,7 +375,7 @@ def test_a_timed_out_extraction_that_advanced_is_uploaded_to_its_source_release(
         GITHUB_STEP_SUMMARY=str(summary),
     )
     assert report.returncode == 0, report.stderr
-    assert _outputs(outputs)["advanced"] == "true"
+    assert "advanced" not in _outputs(outputs)
     assert _outputs(outputs)["head_reached"] == "false"
     assert "cancelled" in summary.read_text()
 
@@ -483,4 +486,4 @@ def test_catchup_report_cli_without_a_before_file_reports_no_advance(tmp_path: P
         GITHUB_OUTPUT=str(outputs),
     )
     assert result.returncode == 0, result.stderr
-    assert _outputs(outputs) == {"advanced": "false", "head_reached": "false"}
+    assert _outputs(outputs) == {"head_reached": "false"}

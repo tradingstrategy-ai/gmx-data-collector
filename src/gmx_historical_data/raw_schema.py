@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import atexit
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -36,15 +35,16 @@ def project_raw_columns(
     return list(expected_columns)
 
 
-def report_legacy_raw_columns() -> None:
+def report_legacy_raw_columns(console: Console | None = None) -> None:
+    """Print one summary of legacy raw columns seen during this run.
+
+    :param console: Rich console for the summary, or ``None`` to use the default.
+    """
     if not _legacy_files:
         return
     columns = sorted({column for extras in _legacy_files.values() for column in extras})
-    _console.print(
+    (console or _console).print(
         f"[yellow]Ignoring legacy raw columns in {len(_legacy_files)} file(s): "
         f"{', '.join(columns)}[/yellow]"
     )
     _legacy_files.clear()
-
-
-atexit.register(report_legacy_raw_columns)

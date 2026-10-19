@@ -148,9 +148,14 @@ jobs:
         env:
           EXTRACT_OUTCOME: ${{ steps.funding_extract.outcome }}
           UPLOAD_OUTCOME: ${{ steps.state_upload.outcome }}
+          REPORT_OUTCOME: ${{ steps.catchup_report.outcome }}
         run: |
           if [ "${UPLOAD_OUTCOME}" = "failure" ]; then
             echo "::error::uploading the advanced funding state failed; progress was NOT saved."
+            exit 1
+          fi
+          if [ "${REPORT_OUTCOME}" != "success" ]; then
+            echo "::error::catch-up report ended '${REPORT_OUTCOME:-unknown}'."
             exit 1
           fi
           if [ "${EXTRACT_OUTCOME}" != "success" ]; then
