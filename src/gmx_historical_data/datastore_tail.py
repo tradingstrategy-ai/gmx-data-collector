@@ -28,6 +28,10 @@ from gmx_historical_data.funding_state import BACKFILL_CHECKPOINT
 
 __all__ = [
     "BACKFILL_CHECKPOINT",
+    "RpcDeadlineExceeded",
+    "covered_hour_count",
+    "merge_ranges",
+    "uncovered_hours",
     "TAIL_STATUS_FILE",
     "TAIL_WINDOW_DAYS",
     "BlockResolutionError",
@@ -61,6 +65,14 @@ CHECKPOINT_VERSION = 2
 
 class HistoricalStateUnavailable(RuntimeError):
     """The RPC node cannot serve state at the requested block (not an archive node)."""
+
+
+class RpcDeadlineExceeded(RuntimeError):
+    """The time budget ran out before (or while) an RPC call could be made.
+
+    Raised instead of starting a call, retry or sleep that would cross the deadline;
+    callers stop cleanly with whatever is already persisted.
+    """
 
 
 class BlockResolutionError(RuntimeError):
@@ -345,6 +357,43 @@ def describe_tail_status(status: dict[str, Any] | None, *, now: datetime) -> str
     return f"{kind} ({reason})"
 
 
+Range = tuple[int, int]
+
+
+def merge_ranges(ranges: Sequence[Sequence[int]]) -> list[list[int]]:
+    """Union of inclusive hour ranges ``[first, last]`` (epoch seconds), sorted.
+
+    Ranges that overlap or touch (next range starts within one hour of the
+    previous end) are joined.
+    """
+    merged: list[list[int]] = []
+    for first, last in sorted((int(a), int(b)) for a, b in ranges):
+        if merged and first <= merged[-1][1] + HOUR_SECONDS:
+            merged[-1][1] = max(merged[-1][1], last)
+        else:
+            merged.append([first, last])
+    return merged
+
+
+def uncovered_hours(covered: Sequence[Sequence[int]], first: int, last: int) -> list[int]:
+    """Hours in ``[first, last]`` (step one hour) that no covered range contains."""
+    ranges = merge_ranges(covered)
+    out: list[int] = []
+    idx = 0
+    for hour in range(first, last + 1, HOUR_SECONDS):
+        while idx < len(ranges) and ranges[idx][1] < hour:
+            idx += 1
+        if idx < len(ranges) and ranges[idx][0] <= hour <= ranges[idx][1]:
+            continue
+        out.append(hour)
+    return out
+
+
+def covered_hour_count(covered: Sequence[Sequence[int]]) -> int:
+    """Number of hours in a set of inclusive ranges."""
+    return sum((b - a) // HOUR_SECONDS + 1 for a, b in merge_ranges(covered))
+
+
 def write_backfill_checkpoint(
     checkpoint_dir: Path,
     *,
@@ -352,14 +401,20 @@ def write_backfill_checkpoint(
     last_hour: int,
     last_block: int,
     target_hour: int,
+    covered: Sequence[Sequence[int]] | None = None,
 ) -> dict[str, Any]:
-    """Durably record that every hour up to ``last_hour`` has been persisted.
+    """Durably record which hours have been persisted.
 
     Written (atomically) only after the hours it covers are on disk, so a killed
-    run loses at most the chunk in flight. ``last_block`` / ``last_timestamp``
-    follow the shape of the other extraction checkpoints so the catch-up report
-    can compare positions.
+    run loses at most the chunk in flight. ``covered`` is the set of inclusive
+    ``[first, last]`` hour ranges persisted so far (default: ``[first_hour,
+    last_hour]``); resuming reads only the requested hours *outside* it, so widening a
+    bounded backfill to an earlier start reads the new prefix. ``complete`` means
+    ``[first_hour, target_hour]`` is fully covered. ``last_block`` /
+    ``last_timestamp`` follow the shape of the other extraction checkpoints;
+    ``covered_hours`` is the monotone progress measure the catch-up report compares.
     """
+    ranges = merge_ranges(covered if covered is not None else [[first_hour, last_hour]])
     record = {
         "version": CHECKPOINT_VERSION,
         "symbol": "funding_datastore_backfill",
@@ -367,7 +422,9 @@ def write_backfill_checkpoint(
         "last_timestamp": last_hour,
         "first_hour": first_hour,
         "target_hour": target_hour,
-        "complete": last_hour >= target_hour,
+        "covered": ranges,
+        "covered_hours": covered_hour_count(ranges),
+        "complete": not uncovered_hours(ranges, first_hour, target_hour),
         "updated_at": datetime.now(UTC).isoformat(),
     }
     _write_json_atomic(Path(checkpoint_dir) / BACKFILL_CHECKPOINT, record)
@@ -386,4 +443,8 @@ def read_backfill_checkpoint(checkpoint_dir: Path) -> dict[str, Any] | None:
         or not isinstance(data.get("last_timestamp"), int)
     ):
         return None
+    if "covered" not in data:  # no ranges recorded: treat as one contiguous run
+        data["covered"] = [[data.get("first_hour", data["last_timestamp"]), data["last_timestamp"]]]
+    data["covered"] = merge_ranges(data["covered"])
+    data["covered_hours"] = covered_hour_count(data["covered"])
     return data

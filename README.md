@@ -652,13 +652,16 @@ nothing previous ships no companions.
   **fail-soft**: if the node says "historical state ... not available" / "missing trie node",
   or no RPC is set, the run records `datastore_tail: unavailable (<reason>)` in
   `funding_coverage.json` and the report, the stale tails stay flagged as before and the
-  release continues. A partial window (time budget, node error) is persisted chunk by chunk
+  release continues. No RPC call, retry or backoff sleep runs past the time budget (4 min, never beyond 11 min
+  into the extraction); the chunk in flight is dropped and read next run. A partial window
+  (time budget, node error) is persisted chunk by chunk
   and the next run continues from what is on disk. Opt out with `--skip-datastore-tail`.
 * **History before 2025-08-19 (#47).** Dispatch `funding-catchup.yml` with
   `datastore_backfill` to read every market hourly from GMX V2 genesis to the funding epoch
   (2025-08-19 12:00Z) into `1h_datastore.parquet`, then merge it into the canonical `1h`
   series. It runs after the HyperSync catch-up inside the same 330-minute budget, persists a
-  chunk and then writes a versioned checkpoint (`funding_datastore_backfill_checkpoint.json`),
+  chunk and then writes a versioned checkpoint (`funding_datastore_backfill_checkpoint.json`) of the
+  hour ranges covered (so widening a bounded `--from-time` run to genesis reads the earlier prefix),
   stops itself 35 minutes before the job cap, and goes red while hours remain; repeated
   dispatches continue from the checkpoint. It needs an archive RPC.
 * **One-off rollout.** After merging, dispatch `release-data.yml` once with

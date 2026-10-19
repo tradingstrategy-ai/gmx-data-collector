@@ -190,3 +190,30 @@ def test_a_run_without_a_backfill_reports_exactly_as_before(tmp_path: Path) -> N
 
     assert "datastore_backfill" not in report.markdown
     assert "backfill" not in report.markdown.lower()
+
+
+def test_widening_the_range_is_progress_even_though_the_last_block_goes_down(
+    tmp_path: Path,
+) -> None:
+    h = 3600
+    gmx_root = _gmx_root(tmp_path)
+    cp = funding_network_dir(gmx_root) / "checkpoints"
+    datastore_tail.write_backfill_checkpoint(
+        cp, first_hour=90 * h, last_hour=100 * h, last_block=9_000, target_hour=100 * h
+    )
+    before = funding_catchup.snapshot(gmx_root)
+    assert before["datastore_backfill"]["covered_hours"] == 11
+
+    datastore_tail.write_backfill_checkpoint(
+        cp,
+        first_hour=0,
+        last_hour=89 * h,
+        last_block=800,  # lower: the new chunks are earlier history
+        target_hour=100 * h,
+        covered=[[0, 89 * h], [90 * h, 100 * h]],
+    )
+    after = funding_catchup.snapshot(gmx_root)
+
+    assert after["datastore_backfill"]["covered_hours"] == 101
+    assert funding_catchup.has_advanced(before, after)
+    assert not funding_catchup.has_advanced(after, before)

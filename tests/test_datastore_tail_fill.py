@@ -15,6 +15,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+import requests
 from eth_abi import decode as abi_decode
 from eth_abi import encode as abi_encode
 
@@ -81,6 +82,7 @@ class FakeChain:
         self.state_floor = state_floor  # eth_call below this: not an archive node
         self.state_ceiling = state_ceiling  # eth_call at or above this fails (partial window)
         self.call_blocks: list[int] = []
+        self.posts = 0
         self.latest = self.B0 + 4 * (_epoch(NOW) - self.T0)
 
     def ts(self, block: int) -> int:
@@ -94,6 +96,7 @@ class FakeChain:
         return None
 
     def __call__(self, url, json, timeout):
+        self.posts += 1
         out = []
         for req in json:
             method, params = req["method"], req["params"]
@@ -131,6 +134,9 @@ class FakeChain:
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
+    # Other test modules load their own copy of the script under the same name; the
+    # tail-fill imports it by name, so pin the copy these tests patch.
+    monkeypatch.setitem(sys.modules, "extract_funding_datastore", ds)
     monkeypatch.setattr(ds.time, "sleep", lambda *_: None)
 
 
@@ -581,7 +587,9 @@ def test_backfill_writes_every_hour_from_genesis_to_the_epoch(tmp_path, monkeypa
 
 def test_backfill_resumes_from_the_checkpoint_after_a_timeout(tmp_path, monkeypatch) -> None:
     chain = _install(monkeypatch, FakeChain())
-    budget = iter([False, False, True])  # the step timeout hits before the third chunk
+    budget = iter(
+        [False, False, False, True]
+    )  # checked up front, then before each chunk: stops before the 3rd
 
     first = _backfill(tmp_path, should_stop=lambda: next(budget, True))
 
@@ -660,3 +668,180 @@ def test_backfill_on_a_non_archive_node_stops_without_inventing_history(
 
     assert result.stopped == "unavailable"
     assert not (tmp_path / "arbitrum" / "rates" / "MOO" / "1h_datastore.parquet").exists()
+
+
+# ---------------------------------------------------------------------------
+# The time budget bounds every RPC call, retry and sleep
+# ---------------------------------------------------------------------------
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+
+
+class SlowChain:
+    """Wraps a chain with a fake clock: each POST costs ``latency`` seconds, or times out."""
+
+    def __init__(self, chain: FakeChain, clock: Clock, *, latency: float = 0.0, down: bool = False):
+        self.chain, self.clock, self.latency, self.down = chain, clock, latency, down
+        self.timeouts: list[tuple[float, float]] = []  # (clock at call, timeout given)
+
+    def __call__(self, url, json, timeout):
+        self.timeouts.append((self.clock.now, timeout))
+        if self.down:
+            raise requests.exceptions.ConnectionError("rpc down")
+        if self.latency > timeout:
+            self.clock.now += timeout
+            raise requests.exceptions.Timeout("slow rpc")
+        self.clock.now += self.latency
+        return self.chain(url, json, timeout)
+
+
+def _slow(monkeypatch, **kw):
+    clock, chain = Clock(), FakeChain()
+    slow = SlowChain(chain, clock, **kw)
+    sleeps: list[float] = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock.now += seconds
+
+    monkeypatch.setattr(ds.requests, "post", slow)
+    monkeypatch.setattr(ds, "_monotonic", lambda: clock.now)
+    monkeypatch.setattr(ds.time, "sleep", sleep)
+    return clock, chain, slow, sleeps
+
+
+def test_an_expired_budget_makes_no_rpc_at_all(lake: Path, monkeypatch) -> None:
+    chain = _install(monkeypatch, FakeChain())
+
+    result = _tail_fill(lake, max_minutes=0)
+
+    assert chain.posts == 0
+    assert result.status["status"] == "partial" and "time budget" in result.status["reason"]
+    assert result.status["hours_read"] == 0
+
+
+def test_an_expired_backfill_budget_makes_no_rpc_at_all(tmp_path, monkeypatch) -> None:
+    chain = _install(monkeypatch, FakeChain())
+
+    result = _backfill(tmp_path, should_stop=lambda: True)
+
+    assert chain.posts == 0 and result.stopped == "deadline"
+
+
+def test_a_slow_rpc_near_the_deadline_stops_cleanly_with_the_partial_result(
+    lake: Path, monkeypatch
+) -> None:
+    clock, chain, slow, sleeps = _slow(monkeypatch, latency=10.0)
+    start = clock.now
+    deadline = start + 4 * 60 - uni.TAIL_PERSIST_RESERVE_SECONDS
+
+    result = _tail_fill(lake, chunk_hours=2, max_minutes=4)
+
+    status = result.status
+    assert status["status"] == "partial" and "time budget" in status["reason"]
+    assert 0 < status["hours_read"] < 6  # some chunks landed, the one in flight was dropped
+    assert clock.now <= deadline  # nothing ran past the budget
+    assert all(timeout <= deadline - at for at, timeout in slow.timeouts)  # HTTP timeouts capped
+    stored = pl.read_parquet(lake / "rates" / "MOO" / "1h_datastore.parquet")
+    assert len(stored) == status["hours_read"]  # exactly the persisted chunks, status intact
+    assert dt.read_tail_status(lake / "checkpoints")["status"] == "partial"
+    assert max(_canonical(lake)["timestamp"]) > _h(6)  # and already re-merged
+
+    # The dropped chunk is read on the next run.
+    clock.now = start
+    slow.latency = 0.0
+    again = _tail_fill(lake, chunk_hours=2)
+    assert again.status["status"] == "ok"
+    assert max(_canonical(lake)["timestamp"]) == CUTOFF
+
+
+def test_retries_never_sleep_across_the_deadline(lake: Path, monkeypatch) -> None:
+    clock, chain, slow, sleeps = _slow(monkeypatch, down=True)
+    start = clock.now
+    deadline = start + 30  # the retry backoff is 1s, 4s, 16s, 60s: the 60s must not be slept
+
+    result = _tail_fill(lake, max_minutes=(30 + uni.TAIL_PERSIST_RESERVE_SECONDS) / 60)
+
+    assert sleeps == [1, 4, 16]
+    assert clock.now <= deadline
+    assert result.status["status"] == "partial" and "time budget" in result.status["reason"]
+
+
+def test_a_budget_spent_during_the_head_request_is_not_a_failure(lake: Path, monkeypatch) -> None:
+    clock, chain, slow, sleeps = _slow(monkeypatch, latency=500.0)  # slower than the budget
+    deadline = clock.now + 2 * 60 - uni.TAIL_PERSIST_RESERVE_SECONDS
+
+    result = _tail_fill(lake, max_minutes=2)
+
+    assert result.status["status"] == "partial"
+    assert clock.now <= deadline  # timeouts are capped to the time left; no retry crosses it
+    assert sum(sleeps) < deadline - 1_000.0
+    assert all(timeout <= deadline - at for at, timeout in slow.timeouts)
+
+
+# ---------------------------------------------------------------------------
+# Resume covers the requested range, not just "after the last position"
+# ---------------------------------------------------------------------------
+
+
+def _called_hours(chain: FakeChain) -> list[int]:
+    return sorted({chain.ts(b) for b in chain.call_blocks})
+
+
+def test_widening_a_bounded_backfill_reads_the_new_prefix(tmp_path, monkeypatch) -> None:
+    chain = _install(monkeypatch, FakeChain())
+    first = FROM_HOUR + 90 * 3600
+    last = FROM_HOUR + 100 * 3600
+    ds.run_hourly_backfill(
+        RPC, MARKETS, tmp_path, from_hour=first, to_hour=last, resume=True, chunk_hours=6
+    )
+    cp_dir = tmp_path / "arbitrum" / "checkpoints"
+    assert dt.read_backfill_checkpoint(cp_dir)["covered"] == [[first, last]]
+    chain.call_blocks.clear()
+
+    result = ds.run_hourly_backfill(
+        RPC, MARKETS, tmp_path, from_hour=FROM_HOUR, to_hour=last, resume=True, chunk_hours=6
+    )
+
+    assert result.stopped is None
+    assert _called_hours(chain) == list(range(FROM_HOUR, first, 3600))  # 0h-89h, nothing again
+    stored = _stored_hours(tmp_path)
+    assert stored == [datetime.fromtimestamp(t, tz=UTC) for t in range(FROM_HOUR, last + 1, 3600)]
+    checkpoint = dt.read_backfill_checkpoint(cp_dir)
+    assert checkpoint["covered"] == [[FROM_HOUR, last]]
+    assert checkpoint["complete"] is True
+    assert checkpoint["covered_hours"] == 101
+
+
+def test_a_gap_in_the_covered_range_is_filled(tmp_path, monkeypatch) -> None:
+    chain = _install(monkeypatch, FakeChain())
+    for a, b in ((0, 10), (20, 30)):
+        ds.run_hourly_backfill(
+            RPC,
+            MARKETS,
+            tmp_path,
+            from_hour=FROM_HOUR + a * 3600,
+            to_hour=FROM_HOUR + b * 3600,
+            chunk_hours=4,
+        )
+    chain.call_blocks.clear()
+
+    ds.run_hourly_backfill(
+        RPC, MARKETS, tmp_path, from_hour=FROM_HOUR, to_hour=FROM_HOUR + 30 * 3600, chunk_hours=4
+    )
+
+    assert _called_hours(chain) == [FROM_HOUR + h * 3600 for h in range(11, 20)]
+    assert len(_stored_hours(tmp_path)) == 31
+
+
+def test_a_fully_covered_request_reads_nothing(tmp_path, monkeypatch) -> None:
+    chain = _install(monkeypatch, FakeChain())
+    _backfill(tmp_path)
+    posts = chain.posts
+
+    result = _backfill(tmp_path)
+
+    assert chain.posts == posts and result.stopped is None and result.requested == 0

@@ -293,3 +293,52 @@ def test_backfill_checkpoint_is_versioned_and_shaped_like_the_others(tmp_path: P
 def test_unversioned_backfill_checkpoint_is_refused(tmp_path: Path) -> None:
     (tmp_path / dt.BACKFILL_CHECKPOINT).write_text(json.dumps({"last_block": 5}))
     assert dt.read_backfill_checkpoint(tmp_path) is None
+
+
+def test_ranges_merge_overlapping_and_touching_hours() -> None:
+    h = 3600
+    assert dt.merge_ranges([[10 * h, 20 * h], [0, 5 * h], [6 * h, 9 * h], [15 * h, 30 * h]]) == [
+        [0, 30 * h]
+    ]
+    assert dt.merge_ranges([[0, 2 * h], [4 * h, 5 * h]]) == [[0, 2 * h], [4 * h, 5 * h]]
+
+
+def test_uncovered_hours_are_the_prefix_gaps_and_suffix() -> None:
+    h = 3600
+    covered = [[2 * h, 4 * h], [7 * h, 8 * h]]
+    assert dt.uncovered_hours(covered, 0, 10 * h) == [t * h for t in (0, 1, 5, 6, 9, 10)]
+    assert dt.uncovered_hours(covered, 2 * h, 4 * h) == []
+    assert dt.covered_hour_count(covered) == 5
+
+
+def test_checkpoint_covers_ranges_and_completeness_follows_the_requested_start(
+    tmp_path: Path,
+) -> None:
+    h = 3600
+    dt.write_backfill_checkpoint(
+        tmp_path,
+        first_hour=0,
+        last_hour=100 * h,
+        last_block=9,
+        target_hour=100 * h,
+        covered=[[90 * h, 100 * h]],
+    )
+    data = dt.read_backfill_checkpoint(tmp_path)
+    assert data["covered"] == [[90 * h, 100 * h]]
+    assert data["complete"] is False  # hours 0..89 of the requested range are not covered
+    assert data["covered_hours"] == 11
+
+
+def test_a_checkpoint_without_ranges_reads_as_one_contiguous_run(tmp_path: Path) -> None:
+    (tmp_path / dt.BACKFILL_CHECKPOINT).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "last_block": 5,
+                "last_timestamp": 7200,
+                "first_hour": 0,
+                "complete": True,
+            }
+        )
+    )
+    assert dt.read_backfill_checkpoint(tmp_path)["covered"] == [[0, 7200]]

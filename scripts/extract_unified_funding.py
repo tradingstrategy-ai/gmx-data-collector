@@ -714,6 +714,8 @@ TAIL_MAX_MINUTES = 4.0
 #: withholds every companion (B4), so the optional tail-fill yields first. What it
 #: read is kept and the next run continues.
 TAIL_CEILING_MINUTES = 11.0
+#: Of the tail-fill's budget, seconds kept free at the end for persisting and re-merging.
+TAIL_PERSIST_RESERVE_SECONDS = 45.0
 
 
 @dataclass
@@ -856,10 +858,14 @@ def tail_fill_datastore(
     if not windows:
         return record("ok", hours_requested=0, hours_read=0)
 
-    deadline = None if max_minutes is None else time.monotonic() + max_minutes * 60
-
-    def should_stop() -> bool:
-        return deadline is not None and time.monotonic() >= deadline
+    # No RPC call, retry or backoff may run past the budget (less a reserve to persist and
+    # re-merge what was read): a chunk that cannot finish in time is dropped and read
+    # again next run, never allowed to overrun the step and get the whole extraction killed.
+    deadline = (
+        None
+        if max_minutes is None
+        else ds._monotonic() + max_minutes * 60 - TAIL_PERSIST_RESERVE_SECONDS
+    )
 
     def persist(batch) -> None:
         ds.save_parquet(ds.aggregate_hourly_rates(batch), network_dir.parent)
@@ -874,7 +880,7 @@ def tail_fill_datastore(
                 symbol_of=lambda addr: symbol_of[addr.lower()],
                 persist=persist,
                 chunk_hours=chunk_hours,
-                should_stop=should_stop,
+                deadline=deadline,
             )
         finally:
             # Whatever was persisted, even by a failed run, belongs in the canonical series.

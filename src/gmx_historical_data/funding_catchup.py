@@ -62,7 +62,18 @@ def snapshot(gmx_root: Path) -> Positions:
                 "last_timestamp": int(data.get("last_timestamp") or 0),
             }
         )
+        if data is not None and (key, name) in _OPTIONAL_KEYS:
+            # Backfill progress is hours covered, not the block reached: widening the
+            # range to an earlier start adds hours without raising the last block.
+            checkpoint = read_backfill_checkpoint(checkpoints)
+            positions[key]["covered_hours"] = (
+                checkpoint["covered_hours"] if checkpoint is not None else 0
+            )
     return positions
+
+
+def _progress(position: dict[str, int]) -> tuple[int, int]:
+    return (position.get("covered_hours", 0), position["last_block"])
 
 
 def has_advanced(before: Positions, after: Positions) -> bool:
@@ -83,9 +94,9 @@ def has_advanced(before: Positions, after: Positions) -> bool:
         moved = moved or new["last_block"] > old["last_block"]
     for key, _ in _OPTIONAL_KEYS:
         new, old = after.get(key), before.get(key)
-        if old is not None and (new is None or new["last_block"] < old["last_block"]):
+        if old is not None and (new is None or _progress(new) < _progress(old)):
             return False  # an optional checkpoint that vanished or regressed is not a newer state
-        if new is not None and (old is None or new["last_block"] > old["last_block"]):
+        if new is not None and (old is None or _progress(new) > _progress(old)):
             moved = True
     return moved
 
@@ -144,10 +155,11 @@ def build_report(
     backfill = read_backfill_checkpoint(funding_network_dir(gmx_root) / "checkpoints")
     if backfill is not None:
         target = datetime.fromtimestamp(backfill["target_hour"], tz=UTC)
+        earliest = datetime.fromtimestamp(backfill["covered"][0][0], tz=UTC)
         lines.append(
             "- DataStore backfill: "
             + (
-                f"**complete** (to {target:%Y-%m-%d %H:%M} UTC)"
+                f"**complete** ({earliest:%Y-%m-%d} to {target:%Y-%m-%d %H:%M} UTC)"
                 if backfill["complete"]
                 else f"in progress, at {_stamp(after.get('datastore_backfill'))} "
                 f"of {target:%Y-%m-%d %H:%M} UTC -- re-dispatch with `datastore_backfill` to continue"
