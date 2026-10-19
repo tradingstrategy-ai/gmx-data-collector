@@ -765,10 +765,13 @@ jobs:
           tar -czf /tmp/gmx-light.tar.gz --null -T "$LIGHT_LIST"
           rm -f "$LIGHT_LIST"
 
+          PYTHONPATH=src python -m gmx_historical_data.tick_release build \
+              --root user_data/data/gmx --output /tmp
+
           ls -lh /tmp/gmx-*.tar.gz
 
           # Asset size guardrails: warn from 1.8 GiB, refuse at the 2 GiB cap.
-          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz /tmp/gmx-funding-state-*.tar.gz; do
+          for tarball in /tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz /tmp/gmx-ticks.tar.gz /tmp/gmx-funding-state-*.tar.gz; do
             [ -f "$tarball" ] || continue
             size=$(stat -c %s "$tarball")
             warn=$((1800 * 1024 * 1024))
@@ -790,40 +793,17 @@ jobs:
           TAG="data-${DATE}"
           COUNT=$(find user_data/data/gmx -type f 2>/dev/null | wc -l | tr -d ' ')
 
-          # Idempotent: if today's release already exists (re-run), replace it.
-          #
-          # Exception: when it carries a funding state asset it may hold the only
-          # resumable copy of the state (e.g. the first seeded release, and this
-          # run's own restore failed). Then it is never deleted: its assets are
-          # updated in place, and the state asset is never replaced in place -- the
-          # new one is uploaded under a new name and the old ones are removed only
-          # after the new one is confirmed present with the right size.
-          #
-          # If any inspection fails the answer is "unknown", never "no state":
-          # nothing is deleted this run.
-          state_names() { bash scripts/funding_state_assets.sh names "$1"; }
-
+          # Same-date reruns preserve all consumer assets and append only the
+          # verified funding-state successor and immutable tick revision. Never
+          # delete/recreate the release or clobber full/light/report/tick assets.
           MODE=create
           if ! TAGS=$(gh release list --repo ${{ github.repository }} --limit 100 --json tagName \
               --jq '.[].tagName'); then
-            MODE=unknown
+            echo "ERROR: could not inspect releases; refusing to publish into an unknown tag state." >&2
+            exit 1
           elif printf '%s\n' "${TAGS}" | grep -qx "${TAG}"; then
-            if ! EXISTING_STATE=$(state_names "${TAG}"); then
-              MODE=unknown
-            elif [ -n "${EXISTING_STATE}" ]; then
-              MODE=in_place
-              echo "${TAG} carries the funding state; updating it in place instead of deleting it."
-            else
-              MODE=replace
-            fi
-          fi
-          if [ "${MODE}" = "unknown" ]; then
-            echo "::warning::could not inspect today's release for the funding state; deleting nothing this run."
-          fi
-          if [ "${MODE}" = "replace" ]; then
-            gh release delete "${TAG}" --repo ${{ github.repository }} --yes 2>/dev/null || true
-            git push origin --delete "${TAG}" 2>/dev/null || true
-            MODE=create
+            MODE=in_place
+            echo "${TAG} already exists; preserving its consumer assets and adding funding/tick assets only."
           fi
 
           NOTES_FILE=$(mktemp)
@@ -836,6 +816,7 @@ jobs:
           - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, ticks/, checkpoints/, futures/ (OHLCV + 1h funding_rate + 1h mark + _cadence_manifest.json), funding_coverage.json, delisted_markets.json. The backtest bundle.
           - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, futures/*-1h-funding_rate.feather, funding_coverage.json (no OHLCV, no mark)
           - \`gmx-funding-state-<timestamp>.tar.gz\` — raw funding state carried between daily runs; not a consumer artifact
+          - \`gmx-ticks[.rN].tar.gz\` + matching manifest — Arbitrum execution tape, volume and coverage/checksums; same-date tick revisions may be newer than full/light
           - \`data_report.txt\` — collection summary
 
           Consume with \`scripts/download_gmx_data.sh\` (see repo README).
@@ -855,9 +836,12 @@ jobs:
           PYTHONPATH=src python scripts/release_funding_companions.py notes \
               --coverage user_data/data/gmx/funding_coverage.json >> "$NOTES_FILE"
 
-          CONSUMER=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
-          if [ -f data_report.txt ]; then
-            CONSUMER+=(data_report.txt)
+          CONSUMER=()
+          if [ "${MODE}" = "create" ]; then
+            CONSUMER=(/tmp/gmx-full.tar.gz /tmp/gmx-light.tar.gz)
+            if [ -f data_report.txt ]; then
+              CONSUMER+=(data_report.txt)
+            fi
           fi
           STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz 2>/dev/null | sort | tail -1 || true)
           STATE_ARGS=()
@@ -867,36 +851,13 @@ jobs:
 
           FAILED=0
           update_in_place() {
-            # Consumer assets first, one at a time so a failure names the asset. If
-            # any fails, publication stops here: no state upload, no deletion of
-            # the old state, and the body says so instead of describing new bundles.
-            BAD=""
-            for ASSET_FILE in "${CONSUMER[@]}"; do
-              gh release upload "${TAG}" --repo ${{ github.repository }} --clobber "${ASSET_FILE}" \
-                  || BAD="${BAD} $(basename "${ASSET_FILE}")"
-            done
-            if [ -n "${BAD}" ]; then
-              echo "::error::uploading release assets failed:${BAD}; stopping publication."
-              gh release edit "${TAG}" --repo ${{ github.repository }} \
-                  --notes "**Publication incomplete.** Uploading failed for:${BAD}. These assets may be missing or left over from an earlier run, and the funding state asset was not touched. Re-run the workflow." \
-                  || true
-              FAILED=1
-              return 0
-            fi
+            # Existing consumer assets and the original release body are
+            # immutable on a same-date rerun. Only the uniquely named state
+            # successor and numbered tick pair may be appended.
             if [ -n "${STATE_FILE}" ]; then
-              PUBLISH_ARGS=()
-              if [ "${MODE}" = "unknown" ]; then
-                PUBLISH_ARGS=(--no-delete)
-              fi
-              bash scripts/funding_state_assets.sh publish "${TAG}" "${STATE_FILE}" "${PUBLISH_ARGS[@]}" \
+              bash scripts/funding_state_assets.sh publish "${TAG}" "${STATE_FILE}" \
                   || FAILED=1
             fi
-            # Always refresh the body, even if a state step failed above, so the
-            # notes never describe a different publication than the assets.
-            gh release edit "${TAG}" --repo ${{ github.repository }} \
-                --title "GMX Data ${DATE}" \
-                --notes-file "$NOTES_FILE" \
-                --latest || FAILED=1
           }
 
           if [ "${MODE}" = "in_place" ]; then
@@ -907,12 +868,13 @@ jobs:
               --notes-file "$NOTES_FILE" \
               --latest \
               "${CONSUMER[@]}" "${STATE_ARGS[@]}"; then
-            if [ "${MODE}" = "unknown" ]; then
-              echo "::warning::create failed with an unknown release state; updating in place."
-              update_in_place
-            else
-              FAILED=1
-            fi
+            FAILED=1
+          fi
+
+          if [ "${FAILED}" = "0" ]; then
+            PYTHONPATH=src python -m gmx_historical_data.tick_release publish \
+                --repo ${{ github.repository }} --release "${TAG}" \
+                --archive /tmp/gmx-ticks.tar.gz --manifest /tmp/gmx-ticks.manifest.json
           fi
 
           rm -f "$NOTES_FILE"

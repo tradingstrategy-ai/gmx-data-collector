@@ -548,7 +548,9 @@ user_data/
 
 ### Data Note: OHLC vs OHLCV
 
-Candle data is **OHLC only** (no per-candle volume). Both data sources — GMX API candlesticks and Chainlink oracle price events — provide price data without trade volume. The "V" in OHLCV would require processing on-chain trade events (PositionIncrease/PositionDecrease) at per-candle granularity, which is not currently implemented.
+Price candles come from GMX API/Chainlink oracle observations. The daily snapshot and explicit tick backfill also decode Arbitrum GMX V2 PositionIncrease/PositionDecrease executions, retain daily `ticks/` tapes and aggregate perp size into candle volume. This volume exists only where execution tape was collected; zero does not prove no trades outside that coverage. `tick_volume/` separates perp executions and swap-side flow. Swap prices are oracle valuations and neither dataset is a CLOB order book.
+
+Daily releases add `gmx-ticks.tar.gz` and `gmx-ticks.manifest.json` with SHA256 hashes, schemas, actual tape ranges and explicit unknown history/finality/decode coverage. Same-date reruns preserve published full/light assets and append immutable tick revisions (`.r1`, `.r2`, …); consult the matching tick manifest rather than assuming all assets share the same collection instant. See [tick intake and deployment](docs/tick-intake.md) for staged `/srv/gmx` intake and legacy-full fallback.
 
 The daily volume snapshots collected from Subsquid (stored in `data/gmx/volumes/`) are **aggregate 24h trading volume per market**, useful for market filtering and reporting but not for per-candle volume. The file dated `D` is Subsquid's *rolling* 24h window ending at the ~02:30 UTC run that wrote it, so it covers mostly UTC day `D-1`, not calendar day `D`.
 

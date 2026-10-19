@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from gmx_historical_data import tick_release
+
 WORKFLOW = Path(".github/workflows/release-data.yml")
 
 
@@ -161,7 +163,9 @@ def _touch(path: Path, data: bytes = b"x") -> None:
 def _gmx_tree(root: Path, *, companions: bool, state: bool) -> None:
     gmx = root / "user_data" / "data" / "gmx"
     for d in ("apy", "snapshots", "tickers", "volumes", "tick_volume", "ticks"):
-        _touch(gmx / d / "f.parquet")
+        (gmx / d).mkdir(parents=True, exist_ok=True)
+        if d not in {"ticks", "tick_volume"}:
+            _touch(gmx / d / "f.parquet")
     _touch(gmx / "futures" / "BTC_USDC_USDC-1h-futures.feather")
     _touch(gmx / "futures" / "BTC_USDC_USDC-1m-futures.feather")
     if companions:
@@ -228,8 +232,18 @@ _FAKE_GH = r"""#!/usr/bin/env bash
 # rel_<tag>.assets as "name size" lines; every call is appended to calls.log.
 echo "$*" >> "$FAKE_GH/calls.log"
 reg() { echo "$FAKE_GH/rel_$1.assets"; }
-drop() { grep -v "^$2 " "$(reg "$1")" > "$(reg "$1").tmp" 2>/dev/null; mv "$(reg "$1").tmp" "$(reg "$1")"; }
-add() { echo "$2 $(stat -c %s "$3")" >> "$(reg "$1")"; }
+drop() {
+  grep -v "^$2 " "$(reg "$1")" > "$(reg "$1").tmp" 2>/dev/null
+  mv "$(reg "$1").tmp" "$(reg "$1")"
+  rm -f "$FAKE_GH/$1/$2"
+}
+add() {
+  size=$(stat -c %s "$3")
+  [ -e "$FAKE_GH/wrong_upload_size" ] && size=999
+  echo "$2 ${size}" >> "$(reg "$1")"
+  mkdir -p "$FAKE_GH/$1"
+  cp "$3" "$FAKE_GH/$1/$2"
+}
 case "$1 $2" in
   "release list")
     [ -e "$FAKE_GH/list_fail" ] && exit 1
@@ -241,18 +255,27 @@ case "$1 $2" in
       *'select(.name=='*)
         name=$(echo "$*" | sed -n 's/.*select(.name=="\([^"]*\)").*/\1/p')
         grep "^$name " "$(reg "$tag")" | cut -d' ' -f2 ;;
-      *) [ -e "$FAKE_GH/view_fail_names" ] && exit 1
+      *'--jq'*) [ -e "$FAKE_GH/view_fail_names" ] && exit 1
          cut -d' ' -f1 "$(reg "$tag")" 2>/dev/null ;;
+      *) python3 - "$(reg "$tag")" <<'PYJSON'
+import json, pathlib, sys
+rows = []
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    name, size = line.split()
+    rows.append({"name": name, "size": int(size)})
+print(json.dumps({"assets": rows}))
+PYJSON
+         ;;
     esac ;;
   "release download")
-    tag="$3"; dest=""; pattern=""
+    tag="$3"; dest=""; patterns=()
     shift 3
     while [ $# -gt 0 ]; do
-      case "$1" in --dir) dest="$2"; shift;; --pattern) pattern="$2"; shift;; esac
+      case "$1" in --dir) dest="$2"; shift;; --pattern) patterns+=("$2"); shift;; esac
       shift
     done
     [ -e "$FAKE_GH/fail_download" ] && exit 1
-    cp "$FAKE_GH/$tag/$pattern" "$dest/$pattern" ;;
+    for pattern in "${patterns[@]}"; do cp "$FAKE_GH/$tag/$pattern" "$dest/$pattern"; done ;;
   "release upload")
     tag="$3"; clobber=0; files=()
     shift 3
@@ -446,6 +469,7 @@ def _publish_tree(root: Path, *, new_state: bool) -> None:
     out.mkdir(exist_ok=True)
     for name in ("gmx-full.tar.gz", "gmx-light.tar.gz") + ((NEW_STATE,) if new_state else ()):
         (out / name).write_bytes(b"x" * 7)
+    tick_release.build(root / "user_data/data/gmx", out)
     _touch(root / "user_data/data/gmx/futures/BTC_USDC_USDC-1h-futures.feather", b"x")
 
 
@@ -464,8 +488,7 @@ def _create_release(tmp_path: Path, fake: Path, *, new_state: bool, **env: str):
 def test_same_day_rerun_does_not_delete_a_release_that_holds_the_only_state(
     tmp_path: Path,
 ) -> None:
-    """State restore failed (no new state asset) and today's release, the first
-    seeded one, carries the only copy: it must be updated in place, not deleted."""
+    """A rerun appends tick data without deleting the only funding-state copy."""
     today = _today()
     fake = _fake_gh(tmp_path, tags=[today], state_assets={today: [OLD_STATE]})
 
@@ -475,7 +498,9 @@ def test_same_day_rerun_does_not_delete_a_release_that_holds_the_only_state(
     assert _deletes(fake) == []
     assert not any(c.startswith("release create") for c in _calls(fake))
     assert OLD_STATE in _assets(fake, today)
-    assert any(c.startswith("release edit") and "--latest" in c for c in _calls(fake))
+    assert "gmx-full.tar.gz" in _assets(fake, today)
+    assert "gmx-ticks.tar.gz" in _assets(fake, today)
+    assert not any("--clobber" in c for c in _calls(fake))
 
 
 def test_state_is_uploaded_under_a_new_name_and_old_one_removed_only_after_confirming(
@@ -500,7 +525,7 @@ def test_state_is_uploaded_under_a_new_name_and_old_one_removed_only_after_confi
     assert not any(c.startswith("release delete ") for c in calls)
 
 
-def test_an_interrupted_state_upload_keeps_the_old_state_and_still_updates_notes(
+def test_an_interrupted_state_upload_keeps_the_old_state_and_skips_tick_publish(
     tmp_path: Path,
 ) -> None:
     today = _today()
@@ -512,29 +537,27 @@ def test_an_interrupted_state_upload_keeps_the_old_state_and_still_updates_notes
     assert OLD_STATE in _assets(fake, today)
     assert NEW_STATE not in _assets(fake, today)
     assert _deletes(fake) == []
-    # The consumer assets went up and the body was refreshed despite the failure.
+    # Existing consumer assets and notes are untouched; no tick pair is published
+    # after the funding-state upload fails.
     calls = _calls(fake)
-    assert any(c.startswith("release edit") for c in calls)
-    assert (fake / f"notes_{today}.md").exists()
+    assert not any(c.startswith("release edit") or c.startswith("release create") for c in calls)
+    assert not any(c.startswith("release upload") and "gmx-ticks" in c for c in calls)
 
 
 def test_an_unconfirmed_state_upload_does_not_delete_the_old_state(tmp_path: Path) -> None:
     today = _today()
     fake = _fake_gh(tmp_path, tags=[today], state_assets={today: [OLD_STATE]})
     # The registry will record the uploaded file with a wrong size.
-    wrapper = fake / "bin" / "gh"
-    wrapper.write_text(
-        wrapper.read_text().replace('add() { echo "$2 $(stat -c %s "$3")"', 'add() { echo "$2 999"')
-    )
+    (fake / "wrong_upload_size").write_text("")
 
     result = _create_release(tmp_path, fake, new_state=True)
 
     assert result.returncode != 0
-    assert _deletes(fake) == []
+    assert not any(c.startswith("release delete ") for c in _calls(fake))
     assert OLD_STATE in _assets(fake, today)
 
 
-def test_same_day_rerun_without_state_still_recreates_the_release(tmp_path: Path) -> None:
+def test_same_day_rerun_without_state_preserves_release_and_adds_ticks(tmp_path: Path) -> None:
     today = _today()
     fake = _fake_gh(tmp_path, tags=[today])
 
@@ -542,8 +565,10 @@ def test_same_day_rerun_without_state_still_recreates_the_release(tmp_path: Path
 
     assert result.returncode == 0, result.stderr
     calls = _calls(fake)
-    assert any(c.startswith("release delete ") for c in calls)
-    assert any(c.startswith("release create") for c in calls)
+    assert not any(c.startswith(("release delete ", "release create")) for c in calls)
+    assert "gmx-full.tar.gz" in _assets(fake, today)
+    assert "gmx-ticks.tar.gz" in _assets(fake, today)
+    assert not any("--clobber" in c for c in calls)
 
 
 def test_first_release_of_the_day_is_created_with_the_state(tmp_path: Path) -> None:
@@ -567,7 +592,12 @@ def test_a_failed_inspection_means_nothing_is_deleted(tmp_path: Path, failing: s
 
     assert _deletes(fake) == []
     assert OLD_STATE in _assets(fake, today)
-    assert "::warning::could not inspect" in result.stdout
+    if failing == "list_fail":
+        assert result.returncode != 0
+        assert "could not inspect releases" in result.stderr
+    else:
+        assert result.returncode != 0
+        assert "not present with the expected size" in result.stdout
 
 
 def test_a_failed_inspection_of_todays_release_falls_back_to_a_safe_update(
@@ -688,22 +718,21 @@ def test_gate_step_without_a_fresh_verdict_writes_withheld(tmp_path: Path, stub:
     assert "FUNDING_GATE=fail" in (tmp_path / "github_env").read_text()
 
 
-def test_a_failed_consumer_upload_stops_publication_and_says_so(tmp_path: Path) -> None:
+def test_same_day_rerun_never_clobbers_consumer_assets(tmp_path: Path) -> None:
     today = _today()
     fake = _fake_gh(tmp_path, tags=[today], state_assets={today: [OLD_STATE]})
 
     result = _create_release(tmp_path, fake, new_state=True, FAKE_UPLOAD_FAIL="gmx-full.tar.gz")
 
-    assert result.returncode != 0
+    assert result.returncode == 0, result.stderr
     calls = _calls(fake)
-    # No state upload, no deletion of the old state, the old state is intact.
-    assert not any(c.startswith("release upload") and "gmx-funding-state" in c for c in calls)
-    assert _deletes(fake) == []
-    assert OLD_STATE in _assets(fake, today) and NEW_STATE not in _assets(fake, today)
-    # The body does not claim the new bundles; it names what failed.
-    notes = (fake / f"notes_{today}.md").read_text()
-    assert "incomplete" in notes.lower() and "gmx-full.tar.gz" in notes
-    assert "Daily automated GMX data snapshot" not in notes
+    # The full asset is retained exactly as it stood; state and ticks are appended.
+    assert not any(c.startswith("release upload") and "gmx-full.tar.gz" in c for c in calls)
+    assert not any(c.startswith("release delete ") for c in calls)
+    assert NEW_STATE in _assets(fake, today) and OLD_STATE not in _assets(fake, today)
+    assert "gmx-full.tar.gz" in _assets(fake, today)
+    assert "gmx-ticks.tar.gz" in _assets(fake, today)
+    assert not any("--clobber" in c for c in calls)
 
 
 def test_the_unstamped_legacy_state_name_is_not_a_state_asset(tmp_path: Path) -> None:
@@ -716,8 +745,11 @@ def test_the_unstamped_legacy_state_name_is_not_a_state_asset(tmp_path: Path) ->
     tags = [_today(), _today(20)]
     _, deleted = _prune(tmp_path / "p", tags, {_today(20): [legacy]})
     assert deleted == [_today(20)]
-    # ... and a same-day rerun does not treat it as state.
+    # ... and a same-day rerun preserves the unrecognized asset rather than
+    # deleting/recreating the release that contains it.
     today = _today()
     fake = _fake_gh(tmp_path / "c", tags=[today], state_assets={today: [legacy]})
-    _create_release(tmp_path / "c", fake, new_state=False)
-    assert any(c.startswith("release delete ") for c in _calls(fake))
+    result = _create_release(tmp_path / "c", fake, new_state=False)
+    assert result.returncode == 0, result.stderr
+    assert not _deletes(fake)
+    assert legacy in _assets(fake, today)
