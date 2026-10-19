@@ -115,10 +115,12 @@ def test_progress_is_saved_whatever_happened_to_the_extraction() -> None:
     report = _step("Report catch-up")
     upload = _step("Upload advanced funding state")
     assert report["if"] == "always()"
+    assert report["continue-on-error"] is True
     assert report["id"] == "catchup_report"
     assert "always()" in upload["if"]
-    assert "steps.catchup_report.outputs.advanced == 'true'" in upload["if"]
-    # Not conditioned on the extraction outcome: a timeout is the expected case.
+    assert "steps.catchup_report.outputs.advanced" not in upload["if"]
+    assert "has_advanced" in upload["run"]
+    # The upload decision is independent of both report and extraction outcomes.
     assert "funding_extract" not in upload["if"]
 
 

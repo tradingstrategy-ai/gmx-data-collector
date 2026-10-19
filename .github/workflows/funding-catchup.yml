@@ -102,6 +102,7 @@ jobs:
       - name: Report catch-up
         id: catchup_report
         if: always()
+        continue-on-error: true
         env:
           EXTRACT_OUTCOME: ${{ steps.funding_extract.outcome }}
         run: |
@@ -115,10 +116,23 @@ jobs:
       # only after the new one is confirmed by size; a failed inspection deletes none.
       - name: Upload advanced funding state
         id: state_upload
-        if: ${{ always() && steps.catchup_report.outputs.advanced == 'true' && env.FUNDING_STATE_RELEASE != '' }}
+        if: ${{ always() && env.FUNDING_STATE_RELEASE != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ADVANCED=$(PYTHONPATH=src python - <<'PY'
+          import json
+          from pathlib import Path
+          from gmx_historical_data.funding_catchup import has_advanced, snapshot
+
+          before = json.loads(Path('/tmp/funding-checkpoints-before.json').read_text())
+          print(str(has_advanced(before, snapshot(Path('user_data/data/gmx')))).lower())
+          PY
+          )
+          if [ "${ADVANCED}" != "true" ]; then
+            echo "Funding checkpoints did not advance; skipping state upload."
+            exit 0
+          fi
           bash scripts/funding_state_assets.sh pack /tmp/
           STATE_FILE=$(ls /tmp/gmx-funding-state-*.tar.gz 2>/dev/null | sort | tail -1 || true)
           if [ -z "${STATE_FILE}" ]; then

@@ -9,6 +9,8 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+from gmx_historical_data.raw_schema import report_legacy_raw_columns
+
 
 def _load_script(name: str):
     path = Path(__file__).resolve().parents[1] / "scripts" / f"{name}.py"
@@ -55,12 +57,14 @@ def _fee_frame(legacy: bool) -> pl.DataFrame:
         "log_index": [0],
     }
     if legacy:
-        # This was carried by an older direction-enriched raw schema.
+        # Synthetic extra; the seeded fee_per_size schema already matches current.
         data["longs_pay_shorts"] = [True]
     return pl.DataFrame(data)
 
 
 def test_factor_repair_scan_drops_legacy_columns_and_matches_clean_schema(tmp_path, capsys):
+    report_legacy_raw_columns()
+    capsys.readouterr()
     clean_dir = tmp_path / "clean"
     legacy_dir = tmp_path / "legacy"
     for root, legacy in ((clean_dir, False), (legacy_dir, True)):
@@ -75,10 +79,13 @@ def test_factor_repair_scan_drops_legacy_columns_and_matches_clean_schema(tmp_pa
     repaired = pl.read_parquet(legacy_dir / "rates/ETH/1h_factor.parquet")
     assert repaired.equals(clean)
     assert "longs_pay_shorts" not in repaired.columns
-    assert "longs_pay_shorts" in capsys.readouterr().out
+    report_legacy_raw_columns()
+    assert "1 file(s): longs_pay_shorts" in capsys.readouterr().out
 
 
 def test_direction_recompute_drops_legacy_columns_and_matches_clean_schema(tmp_path, capsys):
+    report_legacy_raw_columns()
+    capsys.readouterr()
     clean_dir = tmp_path / "clean"
     legacy_dir = tmp_path / "legacy"
     touched = fee.FundingFeePerSizeRecord(
@@ -106,7 +113,8 @@ def test_direction_recompute_drops_legacy_columns_and_matches_clean_schema(tmp_p
     repaired = pl.read_parquet(legacy_dir / "direction/ETH/1h.parquet")
     assert repaired.equals(clean)
     assert repaired["longs_pay_shorts"].to_list() == [True]
-    assert "longs_pay_shorts" in capsys.readouterr().out
+    report_legacy_raw_columns()
+    assert "1 file(s): longs_pay_shorts" in capsys.readouterr().out
 
 
 def test_raw_append_rewrites_legacy_columns_for_both_extractors(tmp_path):
@@ -158,6 +166,54 @@ def test_raw_append_rewrites_legacy_columns_for_both_extractors(tmp_path):
     assert pl.read_parquet(fee_raw).height == 2
 
 
+@pytest.mark.parametrize("module", [factor, fee])
+def test_raw_append_is_idempotent_without_rewriting_parquet(tmp_path, module):
+    if module is factor:
+        record = factor.FundingFactorRecord(
+            symbol="ETH",
+            market="0xm",
+            funding_factor_per_second="1",
+            funding_rate_per_second=1.0,
+            block_number=1,
+            block_timestamp=1767225600,
+            block_datetime="2026-01-01T00:00:00+00:00",
+            transaction_hash="0x01",
+            log_index=0,
+        )
+        filepath = tmp_path / "raw/funding/ETH/partition=0/data.parquet"
+    else:
+        record = fee.FundingFeePerSizeRecord(
+            symbol="ETH",
+            market="0xm",
+            collateral_token="0xc",
+            is_long=True,
+            delta="1",
+            value="1",
+            block_number=1,
+            block_timestamp=1767225600,
+            block_datetime="2026-01-01T00:00:00+00:00",
+            transaction_hash="0x01",
+            log_index=0,
+        )
+        filepath = tmp_path / "raw/fee_per_size/ETH/data.parquet"
+
+    module.save_raw_per_symbol([record], tmp_path)
+    original = filepath.read_bytes()
+    original_mtime = filepath.stat().st_mtime_ns
+
+    module.save_raw_per_symbol([record], tmp_path)
+
+    assert filepath.read_bytes() == original
+    assert filepath.stat().st_mtime_ns == original_mtime
+
+
+@pytest.mark.parametrize("module", [factor, fee])
+def test_saving_no_raw_rows_does_not_write(tmp_path, module):
+    module.save_raw_per_symbol([], tmp_path)
+
+    assert not (tmp_path / "raw").exists()
+
+
 @pytest.mark.parametrize(
     ("module", "frame", "relative_path", "rebuild"),
     [
@@ -170,7 +226,39 @@ def test_raw_rebuild_rejects_nonpositive_timestamp(tmp_path, module, frame, rela
     raw.parent.mkdir(parents=True)
     frame.with_columns(pl.lit(0).alias("block_timestamp")).write_parquet(raw)
 
-    with pytest.raises(ValueError, match=rf"{raw}.*non-positive block_timestamp"):
+    with pytest.raises(ValueError, match=rf"{raw}.*null or non-positive block_timestamp"):
+        if rebuild == "factor":
+            module.rebuild_rates_from_raw(tmp_path)
+        else:
+            record = module.FundingFeePerSizeRecord(
+                symbol="ETH",
+                market="0xm",
+                collateral_token="0xc",
+                is_long=True,
+                delta="1",
+                value="1",
+                block_number=2,
+                block_timestamp=1767225600,
+                block_datetime="2026-01-01T00:00:00+00:00",
+                transaction_hash="0x02",
+                log_index=0,
+            )
+            module.rebuild_direction_from_raw(tmp_path, touched_records=[record])
+
+
+@pytest.mark.parametrize(
+    ("module", "frame", "relative_path", "rebuild"),
+    [
+        (factor, _factor_frame(False), "raw/funding/ETH/partition=0/data.parquet", "factor"),
+        (fee, _fee_frame(False), "raw/fee_per_size/ETH/data.parquet", "fee"),
+    ],
+)
+def test_raw_rebuild_rejects_null_timestamp(tmp_path, module, frame, relative_path, rebuild):
+    raw = tmp_path / relative_path
+    raw.parent.mkdir(parents=True)
+    frame.with_columns(pl.lit(None, dtype=pl.Int64).alias("block_timestamp")).write_parquet(raw)
+
+    with pytest.raises(ValueError, match=rf"{raw}.*null or non-positive block_timestamp"):
         if rebuild == "factor":
             module.rebuild_rates_from_raw(tmp_path)
         else:

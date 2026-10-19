@@ -1108,7 +1108,7 @@ def _tick_volume_by_symbol(
                 )
         except Exception:
             return None
-    return totals
+    return totals or None
 
 
 def _pair_symbol(pair: str) -> str | None:

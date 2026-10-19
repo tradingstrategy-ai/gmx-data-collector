@@ -18,6 +18,26 @@ class TestClassifyZeroVolume:
 
         assert findings == []
 
+    def test_custom_share_threshold_is_used(self):
+        findings = classify_zero_volume(
+            zero_share_by_pair={"AAA_USDC_USDC": (0.7, 10, 0.0)},
+            open_interest_by_pair={},
+            tick_volume_by_pair={},
+            share_threshold=0.6,
+        )
+
+        assert [finding.pair for finding in findings] == ["AAA_USDC_USDC"]
+
+    def test_share_equal_to_threshold_is_flagged(self):
+        findings = classify_zero_volume(
+            zero_share_by_pair={"AAA_USDC_USDC": (0.8, 10, 0.0)},
+            open_interest_by_pair={},
+            tick_volume_by_pair={},
+            share_threshold=0.8,
+        )
+
+        assert [finding.pair for finding in findings] == ["AAA_USDC_USDC"]
+
     def test_zero_candle_volume_with_nonzero_ticks_is_suspicious(self):
         findings = classify_zero_volume(
             zero_share_by_pair={"AAA_USDC_USDC": (1.0, 720, 0.0)},

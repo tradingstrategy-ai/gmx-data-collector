@@ -156,6 +156,22 @@ class TestZeroVolumeShares:
 
 
 class TestTickVolumeBySymbol:
+    def test_sidecar_files_with_no_rows_in_window_are_unavailable(self, tmp_path):
+        tick_dir = tmp_path / "tick_volume"
+        tick_dir.mkdir()
+        now = pd.Timestamp(datetime(2026, 9, 27, tzinfo=UTC))
+        pd.DataFrame(
+            {
+                "symbol": ["AAA"],
+                "date": [now - timedelta(days=40)],
+                "timeframe": ["1h"],
+                "kind": ["perp"],
+                "volume": [2.0],
+            }
+        ).to_parquet(tick_dir / "old.parquet", index=False)
+
+        assert _tick_volume_by_symbol(tmp_path, 30, now) is None
+
     def test_sums_only_one_hour_perp_rows_in_window(self, tmp_path):
         tick_dir = tmp_path / "tick_volume"
         tick_dir.mkdir()
