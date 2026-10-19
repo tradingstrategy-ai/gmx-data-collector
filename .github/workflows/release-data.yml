@@ -737,7 +737,7 @@ jobs:
           # The raw funding state ships as its own asset (gmx-funding-state-*), not
           # in gmx-full: it is ~0.6 GiB of parquet that does not compress and
           # would eat the 2 GiB asset cap. gmx-full keeps only the derived
-          # futures/*-1h-funding_rate and *-1h-mark feathers and the coverage
+          # futures/*-1h-funding_rate, *-1h_datastore-funding_rate and *-1h-mark feathers and the coverage
           # record. The state is packaged exactly as it is on disk, whatever the
           # gate decided -- a withheld day still carries it forward.
           tar -czf /tmp/gmx-full.tar.gz \
@@ -758,7 +758,9 @@ jobs:
           for d in apy snapshots tickers volumes tick_volume; do
             printf '%s\0' "user_data/data/gmx/${d}/" >> "$LIGHT_LIST"
           done
-          find user_data/data/gmx/futures -maxdepth 1 -name '*-1h-funding_rate.feather' -print0 >> "$LIGHT_LIST"
+          find user_data/data/gmx/futures -maxdepth 1 \
+              \( -name '*-1h-funding_rate.feather' -o -name '*-1h_datastore-funding_rate.feather' \) \
+              -print0 >> "$LIGHT_LIST"
           if [ -f user_data/data/gmx/funding_coverage.json ]; then
             printf '%s\0' user_data/data/gmx/funding_coverage.json >> "$LIGHT_LIST"
           fi
@@ -813,8 +815,8 @@ jobs:
           **Generated:** ${TIMESTAMP} UTC
 
           Contents (${COUNT} files total):
-          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, ticks/, checkpoints/, futures/ (OHLCV + 1h funding_rate + 1h mark + _cadence_manifest.json), funding_coverage.json, delisted_markets.json. The backtest bundle.
-          - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, futures/*-1h-funding_rate.feather, funding_coverage.json (no OHLCV, no mark)
+          - \`gmx-full.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, ticks/, checkpoints/, futures/ (OHLCV + 1h funding_rate + 1h_datastore funding_rate + 1h mark + _cadence_manifest.json), funding_coverage.json, delisted_markets.json. The backtest bundle.
+          - \`gmx-light.tar.gz\` — apy/, snapshots/, tickers/, volumes/, tick_volume/, futures/*-1h-funding_rate.feather, futures/*-1h_datastore-funding_rate.feather, funding_coverage.json (no OHLCV, no mark)
           - \`gmx-funding-state-<timestamp>.tar.gz\` — raw funding state carried between daily runs; not a consumer artifact
           - \`gmx-ticks[.rN].tar.gz\` + matching manifest — Arbitrum execution tape, volume and coverage/checksums; same-date tick revisions may be newer than full/light
           - \`data_report.txt\` — collection summary

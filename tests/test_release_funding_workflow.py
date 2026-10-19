@@ -170,6 +170,7 @@ def _gmx_tree(root: Path, *, companions: bool, state: bool) -> None:
     _touch(gmx / "futures" / "BTC_USDC_USDC-1m-futures.feather")
     if companions:
         _touch(gmx / "futures" / "BTC_USDC_USDC-1h-funding_rate.feather")
+        _touch(gmx / "futures" / "BTC_USDC_USDC-1h_datastore-funding_rate.feather")
         _touch(gmx / "futures" / "BTC_USDC_USDC-1h-mark.feather")
     _touch(gmx / "funding_coverage.json", b"{}")
     if state:
@@ -210,6 +211,10 @@ def test_packaging_splits_state_out_and_keeps_light_to_funding_only(
     light = _members(tmp_path / "out" / "gmx-light.tar.gz")
     funding = "user_data/data/gmx/futures/BTC_USDC_USDC-1h-funding_rate.feather"
     assert (funding in light) is companions
+    # The DataStore variant (#47) ships in light too, and in full.
+    variant = "user_data/data/gmx/futures/BTC_USDC_USDC-1h_datastore-funding_rate.feather"
+    assert (variant in light) is companions
+    assert (variant in full) is companions
     assert "user_data/data/gmx/funding_coverage.json" in light
     assert "user_data/data/gmx/volumes/f.parquet" in light
     assert not any("mark" in m or "futures.feather" in m for m in light)

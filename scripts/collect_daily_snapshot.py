@@ -906,8 +906,9 @@ def _funding_export_summary(futures_dir: Path) -> dict:
         find_stale_orphaned_funding_variants,
     )
 
+    # ``1h_datastore`` is an exported variant (#47), not a retired one.
     summary["orphans"] = find_stale_orphaned_funding_variants(
-        futures_dir, {CANONICAL_FUNDING_VARIANT}
+        futures_dir, {CANONICAL_FUNDING_VARIANT, f"{CANONICAL_FUNDING_VARIANT}_datastore"}
     )
 
     canonical: set[str] = set()

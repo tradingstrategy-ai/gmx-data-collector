@@ -41,6 +41,8 @@ import polars as pl
 NETWORK = "arbitrum"
 FACTOR_CHECKPOINT = "funding_factor_checkpoint.json"
 FEE_CHECKPOINT = "fee_per_size_checkpoint.json"
+#: Opt-in DataStore backfill (``funding-catchup.yml`` ``datastore_backfill``): optional, never required.
+BACKFILL_CHECKPOINT = "funding_datastore_backfill_checkpoint.json"
 SEED_MANIFEST = "SEED_MANIFEST.json"
 
 #: Blocks re-scanned after a seed (~7 h on Arbitrum). The raw stores dedupe on

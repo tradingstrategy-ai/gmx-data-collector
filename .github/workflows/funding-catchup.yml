@@ -8,6 +8,11 @@ name: Funding Catch-up
 # run exports and gates as usual. Re-dispatch until the report says head was reached.
 on:
   workflow_dispatch:
+    inputs:
+      datastore_backfill:
+        description: 'Also backfill hourly DataStore funding (rates/<SYM>/1h_datastore.parquet) from GMX V2 genesis to the funding epoch (2025-08-19 12:00Z), after the HyperSync catch-up and within the same 330-minute budget. Needs an archive JSON_RPC_ARBITRUM. Checkpointed after every chunk; re-dispatch with this set to continue until the report says it is complete (#47).'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -30,6 +35,10 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # The backfill below stops itself ahead of the job cap; it needs the real start.
+      - name: Record job start
+        run: echo "JOB_START_EPOCH=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -98,6 +107,33 @@ jobs:
               --output-dir user_data/data/gmx/funding \
               --output parquet \
               --resume
+
+      # Opt-in (#47): hourly DataStore reads from V2 genesis to the funding epoch. It runs
+      # after the HyperSync step and only until 325 minutes into the job, leaving the
+      # last 35 for the report and upload (the extraction above has the same 330-minute
+      # cap, so a slow HyperSync leaves it no time and it stops at once). Chunks are
+      # persisted, then checkpointed, so a timeout loses at most one chunk; the merge
+      # runs whatever happened so the canonical 1h series includes what was read. Exit
+      # 3 = stopped with hours left (the job goes red; re-dispatch to continue).
+      - name: Backfill DataStore history
+        id: datastore_backfill
+        if: ${{ github.event.inputs.datastore_backfill == 'true' }}
+        timeout-minutes: 335
+        env:
+          JSON_RPC_ARBITRUM: ${{ secrets.JSON_RPC_ARBITRUM }}
+        run: |
+          rc=0
+          PYTHONPATH=src python scripts/extract_funding_datastore.py \
+              --hourly-backfill \
+              --resume \
+              --output-dir user_data/data/gmx/funding \
+              --deadline-epoch "$((JOB_START_EPOCH + 325 * 60))" || rc=$?
+          PYTHONPATH=src python scripts/extract_unified_funding.py \
+              --network arbitrum \
+              --output-dir user_data/data/gmx/funding \
+              --output parquet \
+              --merge-only
+          exit "${rc}"
 
       - name: Report catch-up
         id: catchup_report

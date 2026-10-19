@@ -537,7 +537,7 @@ user_data/
 │   ├── rates/{SYMBOL}/
 │   │   ├── 1h.feather                        # Unified hourly rates (feather)
 │   │   ├── 1h_factor.parquet                 # HyperSync-only rates (V2.2+)
-│   │   └── 1h_datastore.parquet              # DataStore-only rates (pre-V2.2)
+│   │   └── 1h_datastore.parquet              # DataStore reads: pre-V2.2 backfill + recent tail/gap reads
 │   ├── direction/{SYMBOL}/1h.parquet
 │   └── checkpoints/
 └── borrowing/arbitrum/
@@ -625,7 +625,7 @@ and `futures/{PAIR}-1h-mark.feather` (#56). Which bundle carries what is in
 and the exported-value semantics are in [Funding data contract](#funding-data-contract).
 
 How it runs (`release-data.yml`): restore the newest stamped state asset (from the newest retained release that has one), `extract_unified_funding.py
---resume` (HyperSync only), export through the shared signed exporter into a **staging
+--resume` (HyperSync, then the DataStore tail-fill below), export through the shared signed exporter into a **staging
 directory**, grade every pair (`gmx_historical_data.series_coverage`), and copy the
 staged files over `futures/` only if the gate passes. If it does not, `futures/` keeps
 the previous release's companions unchanged, `funding_coverage.json` says `WITHHELD`
@@ -635,10 +635,35 @@ nothing previous ships no companions.
 
 * **Coverage record.** `funding_coverage.json` (also in the release notes and
   `data_report.txt`) lists every `LAGGING` (>6h) and `STALE` (>48h) market with its last
-  bar and age. Tails are never forward-filled; a quiet market's tail is reported, not
+  bar and age, plus `datastore_tail` (below) and the hours per source for every pair.
+  Tails are never forward-filled; a tail the DataStore could not extend is reported, not
   blocking (`--stale-tail-blocks` flips that).
-* **History starts 2025-08-19** (see the contract below). Earlier funding needs archive-RPC
-  DataStore reads (#47) and is not in the daily release.
+* **DataStore tail-fill (#64).** HyperSync only sees a market when it emits a `Funding`
+  event, so a quiet market's series used to stop at its last event and its silent hours were
+  carried forward (up to 13% off chain state). After the HyperSync phases
+  `extract_unified_funding.py` reads `savedFundingFactorPerSecond` from the DataStore at the
+  first block of each hour, for (a) every hour from each market's last canonical bar + 1h up
+  to the cutoff (`floor(now) - 1h`) and (b) every carried (`is_gap_filled`) hour, both within
+  the trailing 30 days, and writes them signed to `rates/<SYM>/1h_datastore.parquet`
+  (`source="datastore"`, `is_gap_filled=False`). One batch call reads every market at a block,
+  so a day of window is about 24 calls. Delisted markets (`delisted_markets.json`) are not
+  extended, and a market with no code at a block (not created yet) yields no row. It needs an
+  **archive** RPC (`JSON_RPC_ARBITRUM` in CI is one; the public arb1 RPC is not) and is
+  **fail-soft**: if the node says "historical state ... not available" / "missing trie node",
+  or no RPC is set, the run records `datastore_tail: unavailable (<reason>)` in
+  `funding_coverage.json` and the report, the stale tails stay flagged as before and the
+  release continues. No RPC call, retry or backoff sleep runs past the time budget (4 min, never beyond 11 min
+  into the extraction); the chunk in flight is dropped and read next run. A partial window
+  (time budget, node error) is persisted chunk by chunk
+  and the next run continues from what is on disk. Opt out with `--skip-datastore-tail`.
+* **History before 2025-08-19 (#47).** Dispatch `funding-catchup.yml` with
+  `datastore_backfill` to read every market hourly from GMX V2 genesis to the funding epoch
+  (2025-08-19 12:00Z) into `1h_datastore.parquet`, then merge it into the canonical `1h`
+  series. It runs after the HyperSync catch-up inside the same 330-minute budget, persists a
+  chunk and then writes a versioned checkpoint (`funding_datastore_backfill_checkpoint.json`) of the
+  hour ranges covered (so widening a bounded `--from-time` run to genesis reads the earlier prefix),
+  stops itself 35 minutes before the job cap, and goes red while hours remain; repeated
+  dispatches continue from the checkpoint. It needs an archive RPC.
 * **One-off rollout.** After merging, dispatch `release-data.yml` once with
   `seed_funding_from=data/full-history`. It copies the branch's raw funding sources,
   derives the checkpoints the branch never stored, catches up to now (step timeout 30
@@ -659,10 +684,28 @@ What a freqtrade backtest reads from `futures/{PAIR}-1h-funding_rate.feather` (#
 * **Value:** the rate is in the `open` column (other OHLCV columns are 0), as an **hourly
   fraction of position notional** (`0.0001` = 0.01% per hour), not annualised and not
   per-second.
+* **Sources and precedence.** Each hour of the canonical `rates/<SYM>/1h.parquet` has one
+  row, with `source` and `is_gap_filled`: an **event-derived HyperSync hour** (full-hour TWAP)
+  wins over a **DataStore read** (`source="datastore"`, chain state at the hour boundary),
+  which wins over a **carried gap fill** (`source="hypersync"`, `is_gap_filled=True`). DataStore
+  rows extend tails and replace carried hours; provenance stays distinct. Rows are never
+  invented: a pre-creation hour, a delisted market or an unreadable hour is simply absent.
+  `funding_coverage.json` carries `datastore_tail` and, per pair, `source_hours`
+  (`hypersync` / `datastore` / `gap_filled` hour counts). The tail age is that of the last bar
+  whatever its source, so a DataStore-extended tail is `CURRENT`.
 * **Sign:** positive = **longs pay shorts**, negative = shorts pay longs (the Freqtrade
   convention, #53). Only unsigned positive magnitudes with unknown direction are excluded rather than
   exported positive; zero, already-negative and DataStore (signed) rows pass through
   (`FreqtradeExporter._transform_funding_rate`).
+* **`{PAIR}-1h_datastore-funding_rate.feather` (#47).** The DataStore series is exported as
+  its own variant, from `rates/<SYM>/1h_datastore.parquet`, with the signed on-chain values
+  as read (no placeholders), through the same guarded merge and reconciliation, and graded
+  by the gate (`B8`: export failure, unreadable file, non-finite or unreconciled hour). It
+  ships in `gmx-full` and `gmx-light`. It holds only the hours read from the DataStore (the
+  pre-2025-08-19 backfill plus the recent tail/gap reads), so it is **not contiguous** across
+  2025-08 to ~30 days ago -- use the canonical `1h` file for a complete series. It is absent
+  for symbols with no DataStore source (no zero placeholders), and no longer reported as a
+  retired variant.
 * **Paying side only, symmetric approximation.** The exported number is the *paying* side's
   rate, and Freqtrade applies that one signed rate to both sides (a short receives what a long
   pays). GMX actually pays the receiving side `payer_rate × OI_payer / OI_receiver`, so for the
@@ -672,7 +715,8 @@ What a freqtrade backtest reads from `futures/{PAIR}-1h-funding_rate.feather` (#
   charges on top of funding (`scripts/extract_borrowing_factor.py` is a standalone tool).
   `funding_rate + borrowing_rate` is therefore not what the backtest charges.
 * **Freqtrade settings:** set `funding_fee_timeframe` and `mark_ohlcv_timeframe` to `1h`
-  (the default `8h` has no file). History starts 2025-08-19.
+  (the default `8h` has no file). Canonical `1h` history starts 2025-08-19; earlier
+  hours are in the `1h_datastore` variant once the backfill has run.
 * **Daily-snapshot API fields differ.** `snapshots/{date}.parquet` columns
   `funding_rate_long/short`, `borrowing_rate_long/short` and `net_rate_long/short` are
   GMX's live per-side values at snapshot time, stored as the API returns them: raw strings in
