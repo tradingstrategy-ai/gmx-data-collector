@@ -83,6 +83,40 @@ def test_missing_price_and_receiving_event_fail_without_replacing_output(tmp_pat
     assert output.read_bytes() == prior_bytes
 
 
+def test_load_and_dedup_accepts_mixed_legacy_raw_schemas(tmp_path):
+    from scripts import build_usd_funding_flows as builder
+
+    raw_dir = tmp_path / "raw" / "fee_per_size"
+    legacy = {
+        "symbol": ["ETH"],
+        "market": ["0xmarket"],
+        "collateral_token": ["0xtoken"],
+        "is_long": [True],
+        "delta": ["100"],
+        "value": ["100"],
+        "block_number": [1],
+        "block_timestamp": [1_760_000_000],
+        "block_datetime": ["2025-10-09T08:53:20+00:00"],
+        "transaction_hash": ["0x01"],
+        "log_index": [0],
+        "longs_pay_shorts": [True],
+    }
+    clean = {key: values for key, values in legacy.items() if key != "longs_pay_shorts"}
+    (raw_dir / "ETH").mkdir(parents=True)
+    (raw_dir / "BTC").mkdir(parents=True)
+    pl.DataFrame(legacy).write_parquet(raw_dir / "ETH" / "data.parquet")
+    pl.DataFrame(clean).with_columns(
+        pl.lit("BTC").alias("symbol"),
+        pl.lit("0xbetc").alias("market"),
+        pl.lit("0x02").alias("transaction_hash"),
+    ).write_parquet(raw_dir / "BTC" / "data.parquet")
+
+    events = builder.load_and_dedup(raw_dir, "funding_fee")
+
+    assert events.height == 2
+    assert "longs_pay_shorts" not in events.columns
+
+
 def test_complete_data_passes_and_writes_output(tmp_path, monkeypatch):
     from scripts import build_usd_funding_flows as builder
 

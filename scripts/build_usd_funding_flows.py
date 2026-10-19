@@ -63,6 +63,19 @@ except ImportError:
 
 console = Console()
 
+_RAW_EVENT_COLUMNS = (
+    "symbol",
+    "market",
+    "collateral_token",
+    "is_long",
+    "delta",
+    "block_number",
+    "block_timestamp",
+    "transaction_hash",
+    "log_index",
+)
+_LEGACY_RAW_COLUMNS_LOGGED: set[Path] = set()
+
 # GMX V2 genesis timestamp — filter out events before this
 GMX_V2_GENESIS_TIMESTAMP = 1690848000  # 2023-08-01 00:00:00 UTC
 
@@ -115,7 +128,35 @@ def load_and_dedup(raw_dir: Path, event_type: str) -> pl.DataFrame:
         console.print(f"  [yellow]No {event_type} data found in {raw_dir}[/yellow]")
         return pl.DataFrame()
 
-    combined = pl.concat([pl.scan_parquet(f) for f in parquet_files]).collect()
+    scans = []
+    for filepath in parquet_files:
+        schema = pl.read_parquet_schema(filepath)
+        missing = sorted(set(_RAW_EVENT_COLUMNS) - set(schema))
+        if missing:
+            raise ValueError(
+                f"Raw funding file {filepath} is missing required fields: {', '.join(missing)}"
+            )
+        extras = sorted(set(schema) - set(_RAW_EVENT_COLUMNS))
+        if extras and filepath not in _LEGACY_RAW_COLUMNS_LOGGED:
+            console.print(
+                f"[yellow]Ignoring legacy raw columns {', '.join(extras)} in {filepath}[/yellow]"
+            )
+            _LEGACY_RAW_COLUMNS_LOGGED.add(filepath)
+
+        scans.append(
+            pl.scan_parquet(filepath).select(
+                pl.col("symbol").cast(pl.String),
+                pl.col("market").cast(pl.String),
+                pl.col("collateral_token").cast(pl.String),
+                pl.col("is_long").cast(pl.Boolean),
+                pl.col("delta").cast(pl.String),
+                pl.col("block_number").cast(pl.Int64),
+                pl.col("block_timestamp").cast(pl.Int64),
+                pl.col("transaction_hash").cast(pl.String),
+                pl.col("log_index").cast(pl.Int64),
+            )
+        )
+    combined = pl.concat(scans).collect()
 
     # Dedup: keep latest per (market, collateral_token, is_long, transaction_hash)
     combined = combined.sort(["block_number", "log_index"], descending=True)
