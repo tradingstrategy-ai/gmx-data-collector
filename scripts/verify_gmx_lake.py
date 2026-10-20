@@ -371,6 +371,13 @@ def run(
                 continue
             newest_closed = _newest_closed(path, seconds, now)
             if newest_closed is None:
+                if active.get(sym, False):
+                    issue(
+                        out,
+                        "G4",
+                        sym,
+                        f"active market has no readable closed {tf} candle",
+                    )
                 continue
             # Fast candles are refreshed in batches during the nightly collector
             # run, so a few minutes of natural lag should not fail the daily gate.

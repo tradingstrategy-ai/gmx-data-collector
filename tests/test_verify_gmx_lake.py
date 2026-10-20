@@ -169,7 +169,10 @@ def test_exported_sign_and_open_latest_bar_are_checked_without_flagging_open_bar
     pl.DataFrame({"date": [canonical["timestamp"][-1]], "open": [1.0]}).write_ipc(
         root / "futures/BTC_USDC_USDC-1h-funding_rate.feather"
     )
-    pl.DataFrame({"date": [now - timedelta(minutes=20)], "open": [1.0]}).write_ipc(candle)
+    current_hour = now.replace(minute=0, second=0, microsecond=0)
+    pl.DataFrame(
+        {"date": [current_hour - timedelta(hours=1), current_hour], "open": [1.0, 1.0]}
+    ).write_ipc(candle)
     findings = run(root, {"G3", "G4"}, now, 0.05, 3, False)
     assert {item.check for item in findings} == {"G3"}
 
@@ -255,6 +258,22 @@ def test_g4_flags_oldest_closed_bar_not_an_open_latest_bar(tmp_path):
     findings = run(root, {"G4"}, now, 0.05, 3, False)
     assert len(findings) == 1
     assert "newest closed 1h bar" in findings[0].message
+
+
+def test_g4_fails_when_active_market_has_only_an_open_candle(tmp_path):
+    now = datetime.now(UTC)
+    root = fixture_lake(tmp_path, now)
+    candle = root / "futures/BTC_USDC_USDC-1h-futures.feather"
+    open_bar = now.replace(minute=0, second=0, microsecond=0)
+    pl.DataFrame({"date": [open_bar], "open": [1.0]}).write_ipc(candle)
+
+    findings = run(root, {"G4"}, now, 0.05, 3, False)
+
+    assert len(findings) == 1
+    assert findings[0].check == "G4"
+    assert findings[0].symbol == "BTC"
+    assert findings[0].failed
+    assert findings[0].message == "active market has no readable closed 1h candle"
 
 
 def test_report_only_and_root_hashes_are_unchanged(tmp_path):
