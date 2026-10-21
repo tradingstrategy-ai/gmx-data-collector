@@ -451,3 +451,20 @@ def test_collect_step_writes_the_prune_report_outside_the_packaged_tree(tmp_path
     assert report == "/tmp/gmx-prune-report.json"
     assert "user_data" not in report  # the release tarballs pack user_data/data/gmx/
     assert report in _step("Validate candle history integrity")["run"]
+
+
+def test_no_github_workflow_can_collect_or_publish_gmx_data() -> None:
+    import yaml
+
+    paths = [
+        Path(".github/workflows/release-data.yml"),
+        Path(".github/workflows/collect-gmx-data.yml"),
+        Path(".github/workflows/collect-volume.yml"),
+        Path(".github/workflows/collect-full-history.yml"),
+        Path(".github/workflows/funding-catchup.yml"),
+    ]
+    for path in paths:
+        workflow = yaml.safe_load(path.read_text())
+        assert "schedule" not in workflow[True]
+        assert workflow["jobs"]
+        assert all(job.get("if") == "${{ false }}" for job in workflow["jobs"].values())

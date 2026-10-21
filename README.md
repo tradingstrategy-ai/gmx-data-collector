@@ -36,7 +36,7 @@ genesis (hours). Fixed:
 
 ### 2026-04-27 — GitHub Releases migration
 
-Daily data collection now ships as **GitHub Releases** instead of the `data/daily-collection` git branch.
+Daily data collection moved to **GitHub Releases** in 2026; this section records that historical workflow.
 
 **What changed:**
 
@@ -48,7 +48,7 @@ Daily data collection now ships as **GitHub Releases** instead of the `data/dail
 | CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
 | Release assets | — | `gmx-full.tar.gz`, `gmx-light.tar.gz` (no OHLCV; 1h funding only), `gmx-funding-state-<timestamp>.tar.gz`, `data_report.txt` |
 
-**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. New consumers should use the Releases path (see [Downloading GMX historical data](#downloading-gmx-historical-data) below).
+**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Existing release assets are historical archives. Current collection runs on `vitalik8` under `/srv/gmx`; see [GMX data collection and storage](#gmx-data-collection-and-storage).
 
 ---
 
@@ -152,45 +152,35 @@ make collect-update
 
 All data is written to `./user_data` by default. Override with `DATA_DIR=./my_path`.
 
-## Downloading GMX historical data
+## GMX data collection and storage
 
-Daily snapshots are published as **GitHub Releases**. Use the helper script:
+Daily market data is collected on `vitalik8` and stored locally under
+`/srv/gmx/user_data/data/gmx/`. A separate recent-candle refresh keeps the
+GMX API's rolling OHLCV window within reach. Server collection does not fetch
+prior state from GitHub Releases or publish new data as releases. Existing
+releases and the frozen data branch are historical archives only.
+
+Deployment units, continuity checks, seed procedure, logs, and rollback steps
+are documented in [`deploy/server/README.md`](deploy/server/README.md). The
+server uses a verified copy of the accumulated dataset, including local
+checkpoints and manifests.
+
+## Historical GMX release archives
+
+Existing release assets remain available for historical consumers. They are
+not the live collection or resume path. To download an archived snapshot:
 
 ```bash
-# Latest, full snapshot (apy, snapshots, tickers, volumes, futures feathers incl. funding/mark)
 ./scripts/download_gmx_data.sh
-
-# Latest, light snapshot (no OHLCV candles, no mark — keeps 1h funding + coverage json; faster download)
 ./scripts/download_gmx_data.sh --asset light
-
-# Specific historical release
 ./scripts/download_gmx_data.sh --release data-2026-04-27
 ```
 
-Requires `gh` CLI authenticated (`gh auth login`). Releases are kept for 14 days, except that the newest release carrying a funding-state asset is retained beyond that until a newer one replaces it.
+These commands require an authenticated `gh` CLI. The collector's `-q` release
+seed option is for explicit historical/manual recovery only; the vitalik8
+services do not use it.
 
-> **Note (2026-04-27):** The previous `data/daily-collection` branch is deprecated.
-> It will not receive further updates. New consumers should use the Releases path above.
-
-### Quickstart from a release
-
-If you want to skip waiting for the first full collection, the `-q` flag on
-`collect_daily_snapshot.py` seeds `user_data/` from the latest GitHub Release,
-then runs today's snapshot on top:
-
-```bash
-# Seed + collect today in one shot
-poetry run python scripts/collect_daily_snapshot.py -q
-
-# Only seed, don't collect today
-poetry run python scripts/collect_daily_snapshot.py -q --seed-only
-```
-
-The seed is merge-only — existing local files are never overwritten, only
-missing ones are copied, so `-q` is safe to re-run and easy to undo
-(`rm -rf user_data/`).
-
-## What the daily release contains
+## Historical GitHub release contents
 
 Each `data-YYYY-MM-DD` release carries `gmx-full.tar.gz`, `gmx-light.tar.gz` and
 `data_report.txt` (the report is the authority for current symbol counts, per-timeframe

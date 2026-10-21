@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh GMX's recent candle API window twice daily
+
+[Timer]
+OnCalendar=*-*-* 00,12:00:00 UTC
+Persistent=true
+RandomizedDelaySec=2m
+Unit=gmx-ohlcv-collection.service
+
+[Install]
+WantedBy=timers.target

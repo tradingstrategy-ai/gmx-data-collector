@@ -1,8 +1,6 @@
 name: Release GMX Daily Data
 
 on:
-  schedule:
-    - cron: '0 2 * * *'  # 02:00 UTC daily
   workflow_dispatch:
     inputs:
       retention_days:
@@ -44,6 +42,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
 

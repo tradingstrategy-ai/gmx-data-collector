@@ -1,0 +1,14 @@
+[Unit]
+Description=GMX daily market data collection
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/srv/gmx/repo
+ExecStart=/usr/bin/flock -n /srv/gmx/collection.lock /srv/gmx/repo/deploy/server/gmx-daily-collection.sh
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/gmx
