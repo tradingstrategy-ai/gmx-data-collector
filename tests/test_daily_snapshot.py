@@ -384,6 +384,13 @@ class TestExpectedLastBar:
 
         now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
         got = _expected_last_bar("1h", target_date="2026-05-14", now=now)
+        assert got == pd.Timestamp("2026-05-14 16:00", tz="UTC")
+
+    def test_today_on_a_bar_boundary_is_the_bar_that_just_closed(self):
+        from scripts.collect_daily_snapshot import _expected_last_bar
+
+        now = pd.Timestamp("2026-05-14 18:00", tz="UTC")
+        got = _expected_last_bar("1h", target_date="2026-05-14", now=now)
         assert got == pd.Timestamp("2026-05-14 17:00", tz="UTC")
 
     def test_today_15m(self):
@@ -391,14 +398,14 @@ class TestExpectedLastBar:
 
         now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
         got = _expected_last_bar("15m", target_date="2026-05-14", now=now)
-        assert got == pd.Timestamp("2026-05-14 17:30", tz="UTC")
+        assert got == pd.Timestamp("2026-05-14 17:15", tz="UTC")
 
     def test_today_1d(self):
         from scripts.collect_daily_snapshot import _expected_last_bar
 
         now = pd.Timestamp("2026-05-14 17:42", tz="UTC")
         got = _expected_last_bar("1d", target_date="2026-05-14", now=now)
-        assert got == pd.Timestamp("2026-05-14", tz="UTC")
+        assert got == pd.Timestamp("2026-05-13", tz="UTC")
 
     def test_past_date_1h(self):
         """Backfill — clamps to end-of-day for the target date."""
@@ -530,7 +537,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert api.calls > 0, "stale-flat tail must force a re-fetch despite timestamp coverage"
@@ -567,7 +576,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
@@ -603,7 +614,9 @@ class TestOhlcvGateStaleDensity:
             markets,
             tmp_path,
             timeframes=["1d"],
-            target_date=dates[-1].strftime("%Y-%m-%d"),
+            # The gate only trusts a file that extends one bar past the last
+            # closed bar (the newest stored bar is always re-fetched).
+            target_date=dates[-2].strftime("%Y-%m-%d"),
         )
 
         assert coverage[(symbol, "1d")]["status"] == "SKIPPED"
@@ -799,6 +812,377 @@ class TestOhlcvIncrementalLookback:
         assert saved == 1
         repaired = set(pd.to_datetime(pd.read_feather(filepath)["date"], utc=True))
         assert hole in repaired
+
+    def test_open_bar_is_not_stored(self, tmp_path, monkeypatch):
+        """The API returns the in-progress candle; it must never reach disk.
+
+        An open bar shipped as the newest row is later frozen as a partial if
+        the market stops trading (#58: stored 1d highs 2-5% below the API).
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-10-18 07:28", tz="UTC")
+        starts = {
+            "1d": pd.date_range("2026-10-14", "2026-10-18", freq="D", tz="UTC"),
+            "1h": pd.date_range("2026-10-18 03:00", "2026-10-18 07:00", freq="h", tz="UTC"),
+        }
+
+        class OpenBarAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                dates = starts[period]
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5}
+                )
+
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            OpenBarAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d", "1h"],
+            now=now,
+        )
+        assert failed == []
+        assert saved == 2
+        last = {
+            tf: pd.to_datetime(
+                pd.read_feather(tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather")["date"],
+                utc=True,
+            ).max()
+            for tf in ("1d", "1h")
+        }
+        assert last["1d"] == pd.Timestamp("2026-10-17", tz="UTC")
+        assert last["1h"] == pd.Timestamp("2026-10-18 06:00", tz="UTC")
+        assert coverage[("ETH", "1d")]["post_merge"]["max_date"] == last["1d"]
+
+    def test_open_bar_already_on_disk_is_replaced_by_the_closed_bar_not_kept(
+        self, tmp_path, monkeypatch
+    ):
+        """The next run re-fetches the last stored bar and its closed value wins."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-10-15", "2026-10-17", freq="D", tz="UTC")
+        feather.write_feather(_make_ohlcv(stored, [1.0] * len(stored)), filepath)
+        now = pd.Timestamp("2026-10-19 02:30", tz="UTC")
+
+        class ClosedAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                dates = pd.date_range("2026-10-17", "2026-10-19", freq="D", tz="UTC")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 9.0, "low": 1.0, "close": 9.0}
+                )
+
+        cds.collect_and_save_ohlcv(
+            ClosedAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d"],
+            now=now,
+        )
+        df = pd.read_feather(filepath)
+        dates = pd.to_datetime(df["date"], utc=True)
+        assert dates.max() == pd.Timestamp("2026-10-18", tz="UTC")
+        assert df.loc[dates == pd.Timestamp("2026-10-17", tz="UTC"), "close"].iloc[0] == 9.0
+
+    def test_stored_tail_bar_is_refetched_on_the_next_run_with_target_date(
+        self, tmp_path, monkeypatch
+    ):
+        """Production call path (``target_date`` set): the last stored bar may have
+        been written before it closed, so the coverage gate must not latch onto it.
+
+        The Oct-18 02:30 release stored a partial Oct-18 1d bar (high=2); the
+        Oct-19 run expects Oct-18 as its last closed bar and must still replace
+        it with the final value (high=9).
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-04-01", "2026-10-18", freq="D", tz="UTC")
+        frame = _make_ohlcv(stored, [1.0] * len(stored))
+        frame["high"] = 2.0  # dense, not flat placeholders
+        feather.write_feather(frame, filepath)
+        now = pd.Timestamp("2026-10-19 02:30", tz="UTC")
+
+        class FinalValueAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                dates = pd.date_range("2026-10-17", "2026-10-19", freq="D", tz="UTC")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 9.0, "low": 0.5, "close": 1.0}
+                )
+
+        saved, failed, coverage = cds.collect_and_save_ohlcv(
+            FinalValueAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d"],
+            target_date="2026-10-19",
+            now=now,
+        )
+        assert failed == []
+        assert coverage[("ETH", "1d")]["status"] != "SKIPPED"
+        df = pd.read_feather(filepath)
+        dates = pd.to_datetime(df["date"], utc=True)
+        assert df.loc[dates == pd.Timestamp("2026-10-18", tz="UTC"), "high"].iloc[0] == 9.0
+        assert dates.max() == pd.Timestamp("2026-10-18", tz="UTC")
+
+    def test_open_bar_already_on_disk_is_pruned_by_a_same_day_run(self, tmp_path, monkeypatch):
+        """A repair at 07:28 on Oct-18 merges the API slice into a feather restored
+        from the prior release that already holds an Oct-18 1d row; that open row
+        must not be written back."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-10-10", "2026-10-18", freq="D", tz="UTC")
+        feather.write_feather(_make_ohlcv(stored, [1.0] * len(stored)), filepath)
+        now = pd.Timestamp("2026-10-18 07:28", tz="UTC")
+
+        class OpenBarAPI:
+            def __init__(self, dates):
+                self.dates = dates
+
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                return pd.DataFrame(
+                    {
+                        "timestamp": self.dates,
+                        "open": 1.0,
+                        "high": 2.0,
+                        "low": 0.5,
+                        "close": 1.5,
+                    }
+                )
+
+        full = pd.date_range("2026-10-08", "2026-10-18", freq="D", tz="UTC")
+        only_open = pd.date_range("2026-10-18", "2026-10-18", freq="D", tz="UTC")
+        for dates in (full, only_open):
+            feather.write_feather(_make_ohlcv(stored, [1.0] * len(stored)), filepath)
+            cds.collect_and_save_ohlcv(
+                OpenBarAPI(dates),
+                [{"name": "ETH/USD", "isListed": True}],
+                tmp_path,
+                timeframes=["1d"],
+                repair=True,
+                now=now,
+            )
+            written = pd.to_datetime(pd.read_feather(filepath)["date"], utc=True)
+            assert written.max() == pd.Timestamp("2026-10-17", tz="UTC")
+
+    def test_same_day_run_does_not_skip_a_file_whose_tail_bar_is_still_open(
+        self, tmp_path, monkeypatch
+    ):
+        """Legacy state: Oct-18 07:28, a stored Oct-18 1d row (written by a pre-fix
+        release) is still open. The gate must not wave the file through, and the
+        open row must not be retained."""
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        filepath = tmp_path / "ETH_USDC_USDC-1d-futures.feather"
+        stored = pd.date_range("2026-04-01", "2026-10-18", freq="D", tz="UTC")
+        frame = _make_ohlcv(stored, [1.0] * len(stored))
+        frame["high"] = 2.0
+        feather.write_feather(frame, filepath)
+
+        class Api:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                dates = pd.date_range("2026-10-16", "2026-10-18", freq="D", tz="UTC")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}
+                )
+
+        _saved, failed, coverage = cds.collect_and_save_ohlcv(
+            Api(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d"],
+            target_date="2026-10-18",
+            now=pd.Timestamp("2026-10-18 07:28", tz="UTC"),
+        )
+        assert failed == []
+        assert coverage[("ETH", "1d")]["status"] != "SKIPPED"
+        assert coverage[("ETH", "1d")]["pruned_open"] == ["2026-10-18T00:00:00+00:00"]
+        written = pd.to_datetime(pd.read_feather(filepath)["date"], utc=True)
+        assert written.max() == pd.Timestamp("2026-10-17", tz="UTC")
+
+    def test_selective_repair_still_prunes_open_tails_of_unselected_timeframes(
+        self, tmp_path, monkeypatch
+    ):
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-10-18 07:28", tz="UTC")
+        for tf, freq, end in (("1d", "D", "2026-10-18"), ("4h", "4h", "2026-10-18 04:00")):
+            dates = pd.date_range(end=pd.Timestamp(end, tz="UTC"), periods=60, freq=freq)
+            frame = _make_ohlcv(dates, [1.0] * len(dates))
+            frame["high"] = 2.0
+            feather.write_feather(frame, tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather")
+
+        class Api:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                end = "2026-10-18" if period == "1d" else "2026-10-18 04:00"
+                freq = "D" if period == "1d" else "4h"
+                dates = pd.date_range(end=pd.Timestamp(end, tz="UTC"), periods=5, freq=freq)
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.0}
+                )
+
+        cds.collect_and_save_ohlcv(
+            Api(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d", "4h"],
+            target_date="2026-10-18",
+            repair=True,
+            repair_timeframes=["4h"],
+            now=now,
+        )
+        last_1d = pd.to_datetime(
+            pd.read_feather(tmp_path / "ETH_USDC_USDC-1d-futures.feather")["date"], utc=True
+        ).max()
+        last_4h = pd.to_datetime(
+            pd.read_feather(tmp_path / "ETH_USDC_USDC-4h-futures.feather")["date"], utc=True
+        ).max()
+        assert last_1d == pd.Timestamp("2026-10-17", tz="UTC")
+        assert last_4h == pd.Timestamp("2026-10-18 00:00", tz="UTC")
+
+    def test_repair_timeframes_limits_the_deep_refetch(self, tmp_path, monkeypatch):
+        """``repair_timeframes`` restricts the MAX_CANDLE_LIMIT re-fetch (#58).
+
+        1d and 4h have a hole outside the incremental window; only the listed
+        timeframe is deep-refetched, the other keeps its incremental limit.
+        """
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+
+        now = pd.Timestamp("2026-10-18 02:30", tz="UTC")
+        worlds = {
+            "1d": pd.date_range(end=pd.Timestamp("2026-10-17", tz="UTC"), periods=400, freq="D"),
+            "4h": pd.date_range(
+                end=pd.Timestamp("2026-10-18 00:00", tz="UTC"), periods=2400, freq="4h"
+            ),
+        }
+        holes = {"1d": worlds["1d"][10], "4h": worlds["4h"][10]}
+        for tf, world in worlds.items():
+            existing = world[world != holes[tf]]
+            feather.write_feather(
+                _make_ohlcv(existing, [1.0] * len(existing)),
+                tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather",
+            )
+
+        requested: dict[str, int] = {}
+
+        class RollingWindowAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                requested[period] = int(limit)
+                dates = worlds[period][-int(limit) :]
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}
+                )
+
+        saved, failed, _coverage = cds.collect_and_save_ohlcv(
+            RollingWindowAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d", "4h"],
+            repair=True,
+            repair_timeframes=["1d"],
+            now=now,
+        )
+        assert failed == []
+        assert requested["1d"] == cds.MAX_CANDLE_LIMIT
+        assert requested["4h"] < cds.MAX_CANDLE_LIMIT
+        got = {
+            tf: set(
+                pd.to_datetime(
+                    pd.read_feather(tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather")["date"],
+                    utc=True,
+                )
+            )
+            for tf in worlds
+        }
+        assert holes["1d"] in got["1d"]
+        assert holes["4h"] not in got["4h"]
+
+    def test_repair_without_repair_timeframes_covers_every_timeframe(self, tmp_path, monkeypatch):
+        from scripts import collect_daily_snapshot as cds
+
+        monkeypatch.setattr(cds.time, "sleep", lambda seconds: None)
+        now = pd.Timestamp("2026-10-18 02:30", tz="UTC")
+        requested: dict[str, int] = {}
+
+        class SpyAPI:
+            def get_candlesticks_dataframe(self, symbol, period, limit):
+                requested[period] = int(limit)
+                dates = pd.date_range(end=pd.Timestamp("2026-10-17", tz="UTC"), periods=3, freq="D")
+                return pd.DataFrame(
+                    {"timestamp": dates, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}
+                )
+
+        for tf in ("1d", "4h"):
+            dates = pd.date_range(end=pd.Timestamp("2026-10-17", tz="UTC"), periods=3, freq="D")
+            feather.write_feather(
+                _make_ohlcv(dates, [1.0] * 3),
+                tmp_path / f"ETH_USDC_USDC-{tf}-futures.feather",
+            )
+        cds.collect_and_save_ohlcv(
+            SpyAPI(),
+            [{"name": "ETH/USD", "isListed": True}],
+            tmp_path,
+            timeframes=["1d", "4h"],
+            repair=True,
+            now=now,
+        )
+        assert requested == {"1d": cds.MAX_CANDLE_LIMIT, "4h": cds.MAX_CANDLE_LIMIT}
+
+
+class TestPruneReport:
+    def test_writes_only_files_with_pruned_open_bars(self, tmp_path):
+        import json
+
+        from scripts.collect_daily_snapshot import write_prune_report
+
+        coverage = {
+            ("ETH", "1d"): {"pruned_open": ["2026-10-18T00:00:00+00:00"]},
+            ("ETH", "1h"): {"pruned_open": []},
+            ("BTC", "4h"): {"status": "SKIPPED"},
+        }
+        out = tmp_path / "prune.json"
+        write_prune_report(coverage, out)
+        assert json.loads(out.read_text()) == {
+            "ETH_USDC_USDC-1d-futures.feather": ["2026-10-18T00:00:00+00:00"]
+        }
+
+
+class TestParseRepairTimeframes:
+    def test_empty_means_all(self):
+        from scripts.collect_daily_snapshot import parse_repair_timeframes
+
+        assert parse_repair_timeframes("") is None
+        assert parse_repair_timeframes(None) is None
+
+    def test_comma_list_is_split_and_trimmed(self):
+        from scripts.collect_daily_snapshot import parse_repair_timeframes
+
+        assert parse_repair_timeframes("1d, 4h") == ["1d", "4h"]
+
+    def test_unknown_timeframe_is_rejected(self):
+        import argparse
+
+        import pytest
+
+        from scripts.collect_daily_snapshot import parse_repair_timeframes
+
+        with pytest.raises(argparse.ArgumentTypeError):
+            parse_repair_timeframes("1d,2h")
 
 
 class TestReportSkippedSection:

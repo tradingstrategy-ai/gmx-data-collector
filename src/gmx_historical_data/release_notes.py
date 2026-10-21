@@ -84,14 +84,17 @@ def render_coverage_table(rows: Sequence[CoverageRow]) -> str:
     """Render a ``## Coverage`` markdown section, Apex-release style.
 
     :param rows: Rows from :func:`collect_coverage_rows`.
-    :returns: Markdown block; a placeholder line when ``rows`` is empty
-        rather than a header over an empty table.
+    :returns: Markdown block with the table inside a collapsed ``<details>``
+        (the table runs to hundreds of rows); a bare placeholder line when
+        ``rows`` is empty rather than a header over an empty table.
     """
     if not rows:
         return "## Coverage\n\n(no futures candle data in this release)\n"
 
     lines = [
         "## Coverage",
+        "",
+        f"<details><summary>Coverage ({len(rows)} asset/timeframe rows)</summary>",
         "",
         "| Asset | Timeframe | From | To | Candles |",
         "|---|---|---|---|---:|",
@@ -100,7 +103,7 @@ def render_coverage_table(rows: Sequence[CoverageRow]) -> str:
         lines.append(
             f"| {row.asset} | {row.timeframe} | {row.first} | {row.last} | {row.candles:,} |"
         )
-    lines.append("")
+    lines.extend(["", "</details>", ""])
     return "\n".join(lines)
 
 

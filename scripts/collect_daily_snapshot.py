@@ -44,9 +44,11 @@ Usage::
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -57,6 +59,7 @@ from eth_defi.gmx.api import GMXAPI
 from rich.console import Console
 
 from gmx_historical_data.atomic_parquet import atomic_write_ipc_pandas, atomic_write_parquet_pandas
+from gmx_historical_data.cadence_gate import load_exempt_symbols, symbol_from_filename
 from gmx_historical_data.candle_volume import (
     CANDLE_VOLUME_KINDS,
     apply_volume_from_tapes,
@@ -82,6 +85,15 @@ from gmx_historical_data.data_coverage import (
     assess_coverage,
     format_coverage_report,
 )
+from gmx_historical_data.depth_inversion import (
+    DEPTH_INVERSION_MIN_COHORT,
+    DEPTH_INVERSION_MIN_LAG_DAYS,
+    detect_depth_inversions,
+    largest_shared_earliest_cohort,
+)
+from gmx_historical_data.depth_inversion import (
+    TIMEFRAME_ORDER as DEPTH_TIMEFRAME_ORDER,
+)
 from gmx_historical_data.gmx_trade_ticks import PERP_KIND
 from gmx_historical_data.ohlcv_density import (
     MIN_STALE_DENSITY_SAMPLE,
@@ -92,6 +104,12 @@ from gmx_historical_data.quickstart import (
     DEFAULT_RELEASE_TAG,
     print_coverage_summary,
     seed_from_release,
+)
+from gmx_historical_data.zero_volume_check import (
+    ZERO_VOLUME_LOOKBACK_DAYS,
+    ZERO_VOLUME_SHARE_THRESHOLD,
+    classify_zero_volume,
+    suspicious_findings,
 )
 
 # `trade_tick_collector` is deliberately NOT imported here: it pulls in
@@ -145,7 +163,9 @@ def _merge_feather(
     filepath: Path,
     *,
     prefer_dense: bool = True,
-) -> None:
+    closed_before: pd.Timestamp | None = None,
+    interval: pd.Timedelta | None = None,
+) -> list[pd.Timestamp]:
     """Merge new OHLCV rows into an existing feather file (or create it).
 
     Existing historical data is never deleted. By default, overlapping
@@ -168,20 +188,31 @@ def _merge_feather(
     :param prefer_dense: Preserve dense existing rows over flat incoming rows.
         Explicit repair/force-refresh runs disable this so a corrected API row
         can replace a previously erroneous candle.
+    :param closed_before: With ``interval``, rows whose bar has not closed by
+        this instant (``date + interval > closed_before``) are dropped from the
+        persisted result too -- including ones already on disk, e.g. restored
+        from a release cut before open bars stopped being stored.
+    :param interval: Bar length used with ``closed_before``.
+    :returns: Timestamps of the open rows pruned from what was on disk (empty
+        when nothing was pruned). The release guard uses this as evidence.
     """
-    if new_df.empty:
-        return
+    prune_open = closed_before is not None and interval is not None
+    if new_df.empty and not (prune_open and filepath.exists()):
+        return []
 
-    if new_df["date"].dt.tz is None:
-        new_df["date"] = new_df["date"].dt.tz_localize("UTC")
-    new_df["date"] = new_df["date"].dt.as_unit("ns")
+    if not new_df.empty:
+        if new_df["date"].dt.tz is None:
+            new_df["date"] = new_df["date"].dt.tz_localize("UTC")
+        new_df["date"] = new_df["date"].dt.as_unit("ns")
 
     if filepath.exists():
         existing = pd.read_feather(filepath)
         if existing["date"].dt.tz is None:
             existing["date"] = existing["date"].dt.tz_localize("UTC")
         existing["date"] = existing["date"].dt.as_unit("ns")
-        if prefer_dense:
+        if new_df.empty:
+            combined = existing
+        elif prefer_dense:
             combined = merge_ohlcv_preferring_dense_pandas(existing, new_df, ts_col="date")
         else:
             combined = pd.concat([existing, new_df], ignore_index=True).drop_duplicates(
@@ -195,7 +226,15 @@ def _merge_feather(
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
     combined["date"] = combined["date"].dt.as_unit("ns")
+    pruned: list[pd.Timestamp] = []
+    if prune_open:
+        closed = combined["date"] + interval <= closed_before
+        pruned = list(combined.loc[~closed, "date"])
+        if new_df.empty and closed.all():
+            return []  # nothing new and nothing to prune: leave the file untouched
+        combined = combined[closed].reset_index(drop=True)
     atomic_write_ipc_pandas(combined, filepath, compression="zstd", compression_level=3)
+    return pruned
 
 
 def incremental_candle_limit(
@@ -245,8 +284,10 @@ def _expected_last_bar(
 ) -> pd.Timestamp:
     """Latest fully-closed bar we expect on disk for ``target_date``.
 
-    For *today's* date, returns the most recent closed bar of the timeframe
-    (e.g. ``1h`` at 17:42 UTC → ``today 17:00``).  For *past* dates,
+    For *today's* date, returns the most recent *closed* bar of the timeframe
+    (e.g. ``1h`` at 17:42 UTC → ``today 16:00``, whose bar ended at 17:00; the
+    17:00 bar is still open and is never stored, see
+    :func:`_drop_open_bars`).  For *past* dates,
     returns the last bar of that calendar day (e.g. ``1h`` and
     ``--date 2026-03-10`` → ``2026-03-10 23:00``).
 
@@ -261,6 +302,7 @@ def _expected_last_bar(
         anchor = target + pd.Timedelta(hours=23, minutes=59)
     else:
         anchor = now
+    interval = _TIMEFRAME_DELTAS[tf]
     floor_freq = {
         "1m": "1min",
         "5m": "5min",
@@ -269,7 +311,44 @@ def _expected_last_bar(
         "4h": "4h",
         "1d": "1D",
     }[tf]
-    return anchor.floor(floor_freq)
+    last = anchor.floor(floor_freq)
+    return last - interval if anchor is now else last
+
+
+def _drop_open_bars(df: pd.DataFrame, tf: str, now: pd.Timestamp | datetime) -> pd.DataFrame:
+    """Drop candles whose bar has not closed yet (``timestamp + interval > now``).
+
+    The oracle candle API returns the in-progress bar as the newest row. Stored
+    as-is it ships a partial bar labelled as closed, and it freezes if the
+    market stops trading before the next run re-fetches it (#58).
+
+    :param df: Frame with a ``timestamp`` column.
+    :param tf: Timeframe of the frame.
+    :param now: Request-time UTC clock.
+    """
+    now_ts = pd.Timestamp(now)
+    if now_ts.tzinfo is None:
+        now_ts = now_ts.tz_localize("UTC")
+    stamps = pd.to_datetime(df["timestamp"], utc=True)
+    return df[stamps + _TIMEFRAME_DELTAS[tf] <= now_ts]
+
+
+def parse_repair_timeframes(value: str | None) -> list[str] | None:
+    """Parse the ``--repair-timeframes`` CLI value.
+
+    :param value: Comma-separated timeframes (``"1d,4h"``); empty/``None`` = all.
+    :returns: List of timeframes, or ``None`` meaning every timeframe.
+    :raises argparse.ArgumentTypeError: On a timeframe not in :data:`TIMEFRAMES`.
+    """
+    if value is None or not value.strip():
+        return None
+    tfs = [t.strip() for t in value.split(",") if t.strip()]
+    unknown = [t for t in tfs if t not in TIMEFRAMES]
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unknown timeframe(s) {', '.join(unknown)}; choose from {', '.join(TIMEFRAMES)}"
+        )
+    return tfs
 
 
 def _extract_symbols(markets: list[dict]) -> list[str]:
@@ -796,11 +875,11 @@ def _feather_date_stats(filepath: Path) -> dict | None:
 def _funding_export_summary(futures_dir: Path) -> dict:
     """Summarise the funding-rate exports sitting beside the candle feathers.
 
-    Funding is not collected by this script and is not refreshed by the daily
-    release -- the files ride along inside ``gmx-full.tar.gz`` untouched. That
-    is exactly why they need reporting: without it, a funding export going
-    stale, orphaned or missing is invisible until a downstream backtest fails
-    (issue #47).
+    Funding is not collected by this script. The release workflow refreshes the
+    canonical ``1h`` companions in its own gated steps (#56, see
+    ``gmx_historical_data.series_coverage``); this summary still reports what
+    sits beside the candles, so a variant going stale, orphaned or missing is
+    visible rather than discovered by a downstream backtest (issue #47).
 
     Reports two things: how far the canonical ``1h`` export reaches, and which
     other variants are present that nothing produces any more.
@@ -827,8 +906,9 @@ def _funding_export_summary(futures_dir: Path) -> dict:
         find_stale_orphaned_funding_variants,
     )
 
+    # ``1h_datastore`` is an exported variant (#47), not a retired one.
     summary["orphans"] = find_stale_orphaned_funding_variants(
-        futures_dir, {CANONICAL_FUNDING_VARIANT}
+        futures_dir, {CANONICAL_FUNDING_VARIANT, f"{CANONICAL_FUNDING_VARIANT}_datastore"}
     )
 
     canonical: set[str] = set()
@@ -875,6 +955,323 @@ def _funding_export_summary(futures_dir: Path) -> dict:
     summary["canonical_pairs"] = len(canonical)
     summary["canonical_latest"] = latest
     return summary
+
+
+def _funding_export_warning(funding: dict) -> str | None:
+    """Build a GitHub Actions warning for a canonical funding export with
+    nothing usable in it.
+
+    Funding exports are not refreshed by this collector at all (#47), so a
+    canonical export at 0 pairs is a known, ongoing gap rather than a new
+    failure -- this fires every day until funding ships again, which is
+    intended: the point is that it is visible in the Actions UI rather than
+    buried 80 KB into ``data_report.txt``.
+
+    :param funding: Output of :func:`_funding_export_summary`.
+    :returns: Warning text (no trailing newline), or ``None`` when the
+        canonical export has pairs and a readable newest bar.
+    """
+    if funding["canonical_pairs"] > 0 and funding["canonical_latest"] is not None:
+        return None
+    newest = (
+        "none readable"
+        if funding["canonical_latest"] is None
+        else funding["canonical_latest"].strftime("%Y-%m-%d %H:%M UTC")
+    )
+    return (
+        f"::warning::funding export has no usable data — canonical "
+        f"'{CANONICAL_FUNDING_VARIANT}' export: {funding['canonical_pairs']} pairs, "
+        f"newest bar: {newest}"
+    )
+
+
+# ----------------------------------------------------------------------
+# Per-symbol candle depth check -- see gmx_historical_data.depth_inversion
+# for the detection rule and why a shared earliest date alone is not enough
+# to flag a truncated fetch. Everything below is I/O glue: read dates and
+# OI off disk into the plain dicts that module's pure functions take.
+# ----------------------------------------------------------------------
+
+
+def _earliest_dates_by_tf(futures_dir: Path) -> dict[str, dict]:
+    """Read each pair's earliest candle date per timeframe.
+
+    :param futures_dir: Directory of ``{PAIR}-{tf}-futures.feather`` files.
+    :returns: ``{timeframe: {pair: earliest_date}}``. A timeframe with no
+        readable files yields an empty dict rather than being omitted, so
+        callers never need a fallback for a missing key.
+    """
+    result: dict[str, dict] = {tf: {} for tf in TIMEFRAMES}
+    if not futures_dir.is_dir():
+        return result
+    for tf in TIMEFRAMES:
+        suffix = f"-{tf}-futures.feather"
+        for path in futures_dir.glob(f"*{suffix}"):
+            stats = _feather_date_stats(path)
+            if stats is None:
+                continue
+            pair = path.name[: -len(suffix)]
+            result[tf][pair] = stats["min_date"].date()
+    return result
+
+
+def _open_interest_usd_by_symbol(markets_df: pd.DataFrame) -> dict[str, float]:
+    """Sum today's OI (long+short, USD) per base symbol.
+
+    Multiple alt-collateral variants of one symbol are summed: the
+    zero-volume check keys off this to judge whether a *symbol* is
+    genuinely dormant, not any single variant's own book.
+
+    :param markets_df: The full markets snapshot DataFrame.
+    :returns: Upper-cased symbol -> total OI in USD. Rows with no symbol or
+        an unparsable OI are skipped rather than raising.
+    """
+    totals: dict[str, float] = {}
+    if "symbol" not in markets_df.columns or "is_swap_only" not in markets_df.columns:
+        return totals
+    perp_df = markets_df[~markets_df["is_swap_only"]]
+    for _, row in perp_df.iterrows():
+        symbol = str(row.get("symbol", "")).upper()
+        if not symbol:
+            continue
+        try:
+            oi = (int(row["open_interest_long"]) + int(row["open_interest_short"])) / _GMX_PRECISION
+        except (ValueError, TypeError, KeyError):
+            continue
+        totals[symbol] = totals.get(symbol, 0.0) + oi
+    return totals
+
+
+def _zero_volume_shares(
+    futures_dir: Path, lookback_days: int, now: pd.Timestamp
+) -> dict[str, tuple[float, int, float]]:
+    """Compute each pair's zero-volume candle share over a recent window.
+
+    :param futures_dir: Directory of ``{PAIR}-1h-futures.feather`` files.
+    :param lookback_days: Window size in days, ending at ``now``.
+    :param now: Clock (tz-aware UTC) to measure the window against.
+    :returns: Pair -> ``(zero_share, candle_count, volume_sum)``. Pairs with no candles
+        in the window, or an unreadable file, are omitted -- fail-soft.
+    """
+    result: dict[str, tuple[float, int, float]] = {}
+    if not futures_dir.is_dir():
+        return result
+    cutoff = now - pd.Timedelta(days=lookback_days)
+    for path in futures_dir.glob("*-1h-futures.feather"):
+        try:
+            df = pd.read_feather(path, columns=["date", "volume"])
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        dates = pd.to_datetime(df["date"], utc=True)
+        window = df.loc[(dates >= cutoff) & (dates <= now)]
+        if window.empty:
+            continue
+        pair = path.name[: -len("-1h-futures.feather")]
+        zero = int((window["volume"] == 0).sum())
+        result[pair] = (zero / len(window), len(window), float(window["volume"].sum()))
+    return result
+
+
+def _tick_volume_by_symbol(
+    gmx_root: Path, lookback_days: int, now: pd.Timestamp
+) -> dict[str, float] | None:
+    """Sum perp tick sidecar volume by symbol over the candle window.
+
+    :param gmx_root: GMX data directory containing ``tick_volume/``.
+    :param lookback_days: Number of days included in the sum.
+    :param now: Inclusive end of the UTC window.
+    :returns: Symbol -> volume sum, or ``None`` if the sidecar is unavailable
+        or any sidecar file cannot be read.
+    """
+    tick_dir = gmx_root / "tick_volume"
+    if not tick_dir.is_dir():
+        return None
+    cutoff = now - pd.Timedelta(days=lookback_days)
+    totals: dict[str, float] = {}
+    paths = sorted(tick_dir.glob("*.parquet"))
+    if not paths:
+        return None
+    for path in paths:
+        try:
+            frame = pd.read_parquet(path, columns=["symbol", "date", "timeframe", "kind", "volume"])
+            dates = pd.to_datetime(frame["date"], utc=True)
+            window = frame.loc[
+                (dates >= cutoff)
+                & (dates <= now)
+                & (frame["timeframe"] == "1h")
+                & (frame["kind"] == PERP_KIND)
+            ]
+            for symbol, group in window.groupby("symbol"):
+                totals[str(symbol).upper()] = totals.get(str(symbol).upper(), 0.0) + float(
+                    group["volume"].sum()
+                )
+        except Exception:
+            return None
+    return totals or None
+
+
+def _pair_symbol(pair: str) -> str | None:
+    """Extract a pair's base symbol, the same way ``cadence_gate`` does.
+
+    :param pair: Pair stem, e.g. ``BTC_USDC_USDC``.
+    :returns: Upper-cased symbol, or ``None`` if the stem doesn't match the
+        exported-candle naming convention.
+    """
+    return symbol_from_filename(f"{pair}-1h-futures.feather")
+
+
+def _append_depth_inversion_section(lines: list[str], futures_dir: Path) -> None:
+    """Append the "Per-Symbol Candle Depth" report section, in place.
+
+    Fail-soft: any failure here is logged and swallowed, since this runs at
+    the tail of an otherwise successful release.
+
+    :param lines: Report lines, appended to directly.
+    :param futures_dir: Directory of per-pair, per-timeframe feathers.
+    """
+    try:
+        earliest_by_tf = _earliest_dates_by_tf(futures_dir)
+
+        lines.append("")
+        lines.append("## Per-Symbol Candle Depth")
+        lines.append(
+            f"  Largest cohort of pairs sharing one earliest candle date, per "
+            f"timeframe. A shared date alone is normal (many GMX V2 markets "
+            f"launched together); truncation is flagged separately below for "
+            f"every pair whose coarser timeframe lags its own finer sibling by "
+            f"more than {DEPTH_INVERSION_MIN_LAG_DAYS}d, regardless of how many "
+            f"other pairs share it -- a shared cutoff of "
+            f"{DEPTH_INVERSION_MIN_COHORT}+ pairs is called out as 'systemic' "
+            f"but a smaller one is just as real a finding."
+        )
+        for tf in DEPTH_TIMEFRAME_ORDER:
+            cohort = largest_shared_earliest_cohort(earliest_by_tf.get(tf, {}))
+            if cohort.total_pairs == 0:
+                lines.append(f"  {tf:>3s}: no data")
+                continue
+            lines.append(
+                f"  {tf:>3s}: {cohort.cohort_size}/{cohort.total_pairs} pairs share "
+                f"earliest date {cohort.date.isoformat()}"
+            )
+
+        # Every transition `detect_depth_inversions` returns already has at
+        # least one genuinely lagging pair -- all of them are reported and
+        # warned on, never filtered by cohort size (that would silently drop
+        # a real truncation just because it hit only a handful of pairs).
+        inversions = detect_depth_inversions(earliest_by_tf)
+        if inversions:
+            lines.append("")
+            lines.append("  Suspected truncation (coarser lags its own finer sibling):")
+            for inv in inversions:
+                label = "systemic — " if inv.is_systemic else ""
+                lines.append(
+                    f"    {inv.finer_tf} -> {inv.coarser_tf}: {label}{inv.inverted_pairs}/"
+                    f"{inv.compared_pairs} pairs lag by >{DEPTH_INVERSION_MIN_LAG_DAYS}d "
+                    f"(largest shared cutoff: {inv.cohort.cohort_size} pairs at "
+                    f"{inv.cohort.date.isoformat()})"
+                )
+                if os.environ.get("GITHUB_ACTIONS") == "true":
+                    print(
+                        f"::warning::depth inversion: {inv.inverted_pairs}/{inv.compared_pairs} "
+                        f"pairs' {inv.coarser_tf} candles lag their {inv.finer_tf} history by "
+                        f">{DEPTH_INVERSION_MIN_LAG_DAYS}d -- looks like a truncated "
+                        f"{inv.coarser_tf} fetch (largest shared cutoff: "
+                        f"{inv.cohort.cohort_size} pairs at {inv.cohort.date.isoformat()})"
+                    )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report check
+        console.print(f"  [yellow]WARNING: depth-inversion check failed: {exc}[/yellow]")
+
+
+# ----------------------------------------------------------------------
+# Per-symbol zero-volume check -- see gmx_historical_data.zero_volume_check
+# for the classification rule (OI distinguishes a dormant market from a
+# collector bug). Everything below is I/O glue.
+# ----------------------------------------------------------------------
+
+
+def _append_zero_volume_section(
+    lines: list[str],
+    futures_dir: Path,
+    markets_df: pd.DataFrame,
+    gmx_root: Path,
+    now: pd.Timestamp,
+) -> None:
+    """Append the "Per-Symbol Zero-Volume Check" report section, in place.
+
+    Fail-soft: any failure here is logged and swallowed, since this runs at
+    the tail of an otherwise successful release.
+
+    :param lines: Report lines, appended to directly.
+    :param futures_dir: Directory of per-pair, per-timeframe feathers.
+    :param markets_df: Today's full markets snapshot.
+    :param gmx_root: The ``user_data/data/gmx`` directory (for the delisted
+        roster).
+    :param now: Clock (tz-aware UTC) to measure the lookback window against.
+    """
+    try:
+        zero_shares = _zero_volume_shares(futures_dir, ZERO_VOLUME_LOOKBACK_DAYS, now)
+        oi_by_symbol = _open_interest_usd_by_symbol(markets_df)
+        delisted = load_exempt_symbols([gmx_root / "delisted_markets.json"])
+
+        live_pairs: set[str] = set()
+        oi_by_pair: dict[str, float] = {}
+        for pair in zero_shares:
+            symbol = _pair_symbol(pair)
+            if symbol is not None and symbol in delisted:
+                continue
+            live_pairs.add(pair)
+            if symbol is not None and symbol in oi_by_symbol:
+                oi_by_pair[pair] = oi_by_symbol[symbol]
+
+        tick_volume_by_symbol = _tick_volume_by_symbol(gmx_root, ZERO_VOLUME_LOOKBACK_DAYS, now)
+        tick_volume_by_pair = (
+            None
+            if tick_volume_by_symbol is None
+            else {
+                pair: tick_volume_by_symbol.get(symbol, 0.0)
+                for pair in live_pairs
+                if (symbol := _pair_symbol(pair)) is not None
+            }
+        )
+        findings = classify_zero_volume(
+            zero_shares,
+            oi_by_pair,
+            live_pairs=live_pairs,
+            tick_volume_by_pair=tick_volume_by_pair,
+        )
+
+        lines.append("")
+        lines.append("## Per-Symbol Zero-Volume Check")
+        lines.append(
+            f"  Live pairs whose 1h candles were at least "
+            f"{ZERO_VOLUME_SHARE_THRESHOLD:.0%} zero-volume over the last "
+            f"{ZERO_VOLUME_LOOKBACK_DAYS}d. Tick volume without corresponding "
+            f"candle volume is suspicious; OI is shown as context."
+        )
+        if not findings:
+            lines.append("  (none)")
+        else:
+            for f in findings:
+                oi_str = (
+                    "unknown" if f.open_interest_usd is None else f"${f.open_interest_usd:,.0f}"
+                )
+                lines.append(
+                    f"  {f.pair:<20s} {f.zero_share:>6.1%} zero ({f.candles} candles)  "
+                    f"OI={oi_str:<14s} {f.verdict.value}"
+                )
+
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            for f in suspicious_findings(findings):
+                print(
+                    f"::warning::zero-volume cross-source mismatch: {f.pair} is "
+                    f"{f.zero_share:.0%} zero-volume over {ZERO_VOLUME_LOOKBACK_DAYS}d "
+                    f"but tick sidecar volume is non-zero (OI context: "
+                    f"${(f.open_interest_usd or 0):,.0f})"
+                )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report check
+        console.print(f"  [yellow]WARNING: zero-volume check failed: {exc}[/yellow]")
 
 
 def _tail_is_stale_density(filepath: Path, tf: str) -> bool:
@@ -936,6 +1333,366 @@ def _row_count(path: Path) -> int:
         return 0
 
 
+# ----------------------------------------------------------------------
+# Volume section refresh -- the report's volume fields are placeholders
+# when `generate_report` first runs (see the `volume_count, volume_data =
+# 0, {}` default in `main`, above): the workflow's "Collect 24h volume
+# snapshot" step is a separate, later step, so `volumes/{date}.parquet`
+# does not exist yet at report-generation time. `refresh_volume_report_section`
+# is called once that later step has run, to patch the already-written
+# report with what was actually collected -- so the *shipped* report never
+# prints a made-up zero.
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeSnapshot:
+    """24h volume data read from ``volumes/{date}.parquet``.
+
+    :param found: Whether the file existed on disk and was read successfully.
+    :param count: Number of markets with a volume entry (``0`` if not found).
+    :param by_market: Market address (lower-cased) -> 24h volume in USD.
+    :param error: Set only when the file *exists* but could not be read
+        (corrupt/unparseable) -- ``None`` both when ``found`` is ``True``
+        and when the file is simply absent. Kept distinct from a plain
+        "missing" file: an unreadable file on disk is a different, real
+        operational defect (a truncated write, a schema change) and must
+        not be reported the same way as "nothing was ever written here".
+    """
+
+    found: bool
+    count: int
+    by_market: dict[str, Decimal]
+    error: str | None = None
+
+
+def load_volume_snapshot(volumes_dir: Path, date_str: str) -> VolumeSnapshot:
+    """Read the 24h volume file the "Collect 24h volume snapshot" step writes.
+
+    Fail-soft: a missing or corrupt file is reported as not found rather
+    than raising. This is called after the substantive release work is
+    already done, so a broken read here must never take down the report.
+
+    :param volumes_dir: The ``user_data/data/gmx/volumes`` directory.
+    :param date_str: ISO date of the file to read.
+    :returns: A :class:`VolumeSnapshot` describing what was found.
+    """
+    path = volumes_dir / f"{date_str}.parquet"
+    if not path.exists():
+        return VolumeSnapshot(found=False, count=0, by_market={}, error=None)
+    try:
+        df = pd.read_parquet(path)
+    except Exception as exc:
+        return VolumeSnapshot(found=False, count=0, by_market={}, error=str(exc))
+
+    by_market: dict[str, Decimal] = {}
+    for _, row in df.iterrows():
+        addr = str(row.get("market_address", "")).lower()
+        if not addr:
+            continue
+        try:
+            by_market[addr] = Decimal(str(row.get("volume_usd", "0")))
+        except Exception:
+            continue
+    return VolumeSnapshot(found=True, count=len(by_market), by_market=by_market)
+
+
+def _volume_summary_lines(date_str: str, snapshot: VolumeSnapshot) -> tuple[str, str]:
+    """Build the two Collection-Summary lines describing 24h volume.
+
+    :param date_str: ISO date, used in the "missing"/"unreadable" explanation.
+    :param snapshot: Output of :func:`load_volume_snapshot`.
+    :returns: ``(volume entries line, total 24h volume line)``.
+    """
+    if not snapshot.found:
+        if snapshot.error is not None:
+            reason = f"not collected (volumes/{date_str}.parquet unreadable: {snapshot.error})"
+        else:
+            reason = f"not collected (volumes/{date_str}.parquet missing)"
+        return f"- Volume entries: {reason}", f"- Total 24h Volume: {reason}"
+    total = sum(snapshot.by_market.values())
+    return (
+        f"- Volume entries: {snapshot.count} markets",
+        f"- Total 24h Volume: ${total:,.0f}",
+    )
+
+
+def _split_report_sections(text: str) -> list[tuple[str | None, list[str]]]:
+    """Split a report into ``(header, body_lines)`` chunks on ``'## '`` headers.
+
+    :param text: Full report text.
+    :returns: Chunks in document order. The first chunk's header is
+        ``None`` and holds the preamble (title, "Generated:" line) that
+        precedes the first ``##`` section.
+    """
+    sections: list[tuple[str | None, list[str]]] = []
+    header: str | None = None
+    body: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            sections.append((header, body))
+            header, body = line, []
+        else:
+            body.append(line)
+    sections.append((header, body))
+    return sections
+
+
+def _join_report_sections(sections: list[tuple[str | None, list[str]]]) -> str:
+    """Inverse of :func:`_split_report_sections`.
+
+    :param sections: ``(header, body_lines)`` chunks.
+    :returns: Newline-joined report text.
+    """
+    parts: list[str] = []
+    for header, body in sections:
+        if header is not None:
+            parts.append(header)
+        parts.extend(body)
+    return "\n".join(parts)
+
+
+def _replace_line_by_prefix(
+    sections: list[tuple[str | None, list[str]]],
+    header: str,
+    prefix: str,
+    new_line: str,
+) -> tuple[list[tuple[str | None, list[str]]], bool]:
+    """Replace one line, identified by its prefix, inside a named section.
+
+    Scoping by section header avoids ambiguity between lines that share a
+    prefix in different sections (e.g. "## Date Range Summary" and
+    "## Missing Days" both have a line starting with the same label).
+
+    Never appends: if ``header`` is missing, or it is present but no line
+    there starts with ``prefix``, the sections are returned byte-for-byte
+    unchanged. Appending next to a target that could not be found would
+    leave the original, un-replaced line sitting right next to the new
+    one -- a silently contradictory pair of lines is worse than a report
+    that stayed unpatched and visibly said so (the caller surfaces
+    ``replaced=False`` as a drift warning instead).
+
+    :param sections: Output of :func:`_split_report_sections`.
+    :param header: The exact section header to look inside, e.g.
+        ``"## Collection Summary"``.
+    :param prefix: The line prefix to find within that section's body.
+    :param new_line: Replacement text for the matched line.
+    :returns: ``(sections, replaced)`` -- ``replaced`` is ``True`` only when
+        an existing line was actually found and replaced in place.
+    """
+    updated: list[tuple[str | None, list[str]]] = []
+    replaced = False
+    for sec_header, body in sections:
+        if sec_header != header:
+            updated.append((sec_header, body))
+            continue
+        new_body = list(body)
+        for i, line in enumerate(new_body):
+            if line.startswith(prefix):
+                new_body[i] = new_line
+                replaced = True
+                break
+        updated.append((sec_header, new_body))
+    return updated, replaced
+
+
+def _add_report_note(
+    sections: list[tuple[str | None, list[str]]], note_lines: list[str]
+) -> list[tuple[str | None, list[str]]]:
+    """Append lines to the report preamble, right after the "Generated:" line.
+
+    Used to surface a patch-drift warning inside the shipped report itself
+    (not just the workflow log), so anyone reading ``data_report.txt``
+    directly can see some of its fields may be stale.
+
+    :param sections: Output of :func:`_split_report_sections`. The first
+        entry (``header is None``) is always the preamble.
+    :param note_lines: Lines to append to the preamble body.
+    :returns: A new sections list with the note appended to the preamble.
+    """
+    updated = list(sections)
+    preamble_header, preamble_body = updated[0]
+    updated[0] = (preamble_header, [*preamble_body, *note_lines])
+    return updated
+
+
+def _load_markets_snapshot(snapshots_dir: Path, date_str: str) -> pd.DataFrame | None:
+    """Read today's markets snapshot, for the address -> name lookup.
+
+    :param snapshots_dir: The ``user_data/data/gmx/snapshots`` directory.
+    :param date_str: ISO date of the file to read.
+    :returns: The snapshot DataFrame, or ``None`` if missing/unreadable.
+    """
+    path = snapshots_dir / f"{date_str}.parquet"
+    if not path.exists():
+        return None
+    try:
+        return pd.read_parquet(path)
+    except Exception:
+        return None
+
+
+def _format_top_volume_lines(
+    snapshot: VolumeSnapshot, markets_df: pd.DataFrame | None
+) -> list[str]:
+    """Render the "Top 10 Markets by 24h Volume" rows.
+
+    Mirrors the address -> name lookup ``generate_report`` uses for the
+    same table when volume data is available at generation time.
+
+    :param snapshot: Output of :func:`load_volume_snapshot`.
+    :param markets_df: Today's markets snapshot, or ``None`` if unavailable
+        (rows then fall back to a truncated address).
+    :returns: Formatted row lines, without a leading or trailing blank.
+    """
+    addr_to_name: dict[str, str] = {}
+    if markets_df is not None:
+        for _, row in markets_df.iterrows():
+            addr = row.get("market_token", "")
+            if not addr:
+                continue
+            name = row.get("name") or f"{addr[:10]}..."
+            addr_to_name[str(addr).lower()] = name
+
+    vol_rows = []
+    for addr, vol in snapshot.by_market.items():
+        name = addr_to_name.get(addr, f"{addr[:10]}...")
+        vol_rows.append((name, float(vol)))
+    vol_rows.sort(key=lambda x: x[1], reverse=True)
+
+    return [
+        f"  {i:2d}. {name:<40s} ${vol:>14,.0f}" for i, (name, vol) in enumerate(vol_rows[:10], 1)
+    ]
+
+
+def _upsert_top_volume_section(
+    sections: list[tuple[str | None, list[str]]],
+    snapshot: VolumeSnapshot,
+    markets_df: pd.DataFrame | None,
+) -> list[tuple[str | None, list[str]]]:
+    """Insert or replace the "Top 10 Markets by 24h Volume" section.
+
+    Placed right after "## Top 10 Markets by Open Interest", matching where
+    ``generate_report`` puts it when volume data is available up front. If
+    that anchor section is not found, the new section is appended at the end
+    rather than dropped.
+
+    :param sections: Output of :func:`_split_report_sections`.
+    :param snapshot: Output of :func:`load_volume_snapshot`. Only called
+        when ``snapshot.found and snapshot.by_market`` is truthy.
+    :param markets_df: Today's markets snapshot, for row names.
+    :returns: A new sections list with the section inserted/replaced.
+    """
+    header = "## Top 10 Markets by 24h Volume"
+    # Every section body in this report ends with a trailing blank line
+    # that separates it from the next header -- see `generate_report`,
+    # which always does `lines.append("")` before a new "## " header. The
+    # new body must end the same way so whatever originally followed the
+    # anchor section stays correctly spaced.
+    body = [*_format_top_volume_lines(snapshot, markets_df), ""]
+
+    anchor = "## Top 10 Markets by Open Interest"
+    filtered = [(h, b) for h, b in sections if h != header]
+    result: list[tuple[str | None, list[str]]] = []
+    inserted = False
+    for h, b in filtered:
+        result.append((h, b))
+        if h == anchor:
+            result.append((header, body))
+            inserted = True
+    if not inserted:
+        result.append((header, body))
+    return result
+
+
+def refresh_volume_report_section(
+    report_path: Path,
+    volumes_dir: Path,
+    snapshots_dir: Path,
+    date_str: str,
+) -> None:
+    """Patch the volume-derived lines of an already-written data report.
+
+    Called by the release workflow right after "Collect 24h volume
+    snapshot", once real volume data exists on disk. Fail-soft throughout:
+    this runs at the tail of an otherwise successful release, and a bug
+    here must be logged and swallowed, never allowed to fail the run.
+
+    :param report_path: The ``data_report.txt`` written earlier in the run.
+    :param volumes_dir: The ``user_data/data/gmx/volumes`` directory.
+    :param snapshots_dir: The ``user_data/data/gmx/snapshots`` directory.
+    :param date_str: Today's ISO date.
+    """
+    try:
+        if not report_path.exists():
+            console.print(
+                f"  [yellow]No report at {report_path} to refresh volume data into.[/yellow]"
+            )
+            return
+
+        snapshot = load_volume_snapshot(volumes_dir, date_str)
+        sections = _split_report_sections(report_path.read_text(encoding="utf-8"))
+        drifted: list[str] = []
+
+        def _patch(header: str, prefix: str, new_line: str) -> None:
+            nonlocal sections
+            sections, ok = _replace_line_by_prefix(sections, header, prefix, new_line)
+            if not ok:
+                drifted.append(f"{header.removeprefix('## ')}: {prefix}")
+
+        entries_line, total_line = _volume_summary_lines(date_str, snapshot)
+        _patch("## Collection Summary", "- Volume entries:", entries_line)
+        _patch("## Collection Summary", "- Total 24h Volume:", total_line)
+
+        volume_info = _summarise_daily_files(volumes_dir)
+        if volume_info["count"] == 0:
+            range_line = "- Volumes: No data available"
+        else:
+            gap_note = (
+                f", {len(volume_info['missing'])} missing day(s)" if volume_info["missing"] else ""
+            )
+            range_line = (
+                f"- Volumes: {volume_info['first']} to {volume_info['last']} "
+                f"({volume_info['count']} days{gap_note})"
+            )
+        _patch("## Date Range Summary", "- Volumes:", range_line)
+
+        volume_files = list(volumes_dir.glob("*.parquet")) if volumes_dir.exists() else []
+        _patch(
+            "## Data Files",
+            "- Volume parquet files:",
+            f"- Volume parquet files: {len(volume_files)} days",
+        )
+
+        if snapshot.found and snapshot.by_market:
+            markets_df = _load_markets_snapshot(snapshots_dir, date_str)
+            sections = _upsert_top_volume_section(sections, snapshot, markets_df)
+
+        if drifted:
+            targets = ", ".join(drifted)
+            console.print(
+                f"  [yellow]WARNING: volume report patch could not find: {targets} "
+                f"-- report format may have drifted; those fields were left as-is.[/yellow]"
+            )
+            sections = _add_report_note(
+                sections,
+                [
+                    "",
+                    f"NOTE: volume refresh could not update: {targets} -- report "
+                    "format may have drifted since this section was written; "
+                    "treat those fields as possibly stale.",
+                ],
+            )
+
+        report_path.write_text(_join_report_sections(sections), encoding="utf-8")
+        reported = snapshot.count if snapshot.found else 0
+        console.print(f"  Refreshed volume section in {report_path} ({reported} markets).")
+    except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report patch
+        console.print(
+            f"  [yellow]WARNING: failed to refresh volume section in report: {exc}[/yellow]"
+        )
+
+
 def collect_and_save_ohlcv(
     api: GMXAPI,
     markets: list[dict],
@@ -945,6 +1702,7 @@ def collect_and_save_ohlcv(
     force_refresh: bool = False,
     target_date: str | None = None,
     repair: bool = False,
+    repair_timeframes: list[str] | None = None,
     now: pd.Timestamp | datetime | None = None,
 ) -> tuple[int, list[str], dict[tuple[str, str], dict]]:
     """Fetch OHLCV candles for all timeframes and append to feather files.
@@ -960,12 +1718,17 @@ def collect_and_save_ohlcv(
     ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be merged
     back in (the 2026-09-07 / 2026-09-09 1m seams).
 
+    Bars that have not closed yet (``timestamp + interval > now``) are never
+    stored.
+
     :param api: Initialised GMXAPI client.
     :param markets: Raw market dicts from ``get_markets_info()``.
     :param futures_dir: Directory for CCXT feather files.
     :param timeframes: List of timeframes to collect (default: all from TIMEFRAMES).
     :param repair: When ``True``, skip the coverage gate and request
         ``MAX_CANDLE_LIMIT`` so interior holes already on disk can be filled.
+    :param repair_timeframes: Restrict ``repair`` to these timeframes; the rest
+        run as a normal incremental collection. ``None`` repairs every timeframe.
     :param now: Request-time UTC clock. Defaults to ``datetime.now(UTC)``.
     :returns: Tuple of ``(total files saved, failed symbol/timeframe pairs,
         coverage_map)``. ``coverage_map`` is keyed by ``(symbol, tf)`` and
@@ -981,12 +1744,15 @@ def collect_and_save_ohlcv(
     saved = 0
     failed = []
     coverage: dict[tuple[str, str], dict] = {}
-    now = now if now is not None else datetime.now(UTC)
+    now = pd.Timestamp(now if now is not None else datetime.now(UTC))
+    if now.tzinfo is None:
+        now = now.tz_localize("UTC")
 
     for symbol in symbols:
         for tf in tfs:
             filepath = futures_dir / f"{symbol}_USDC_USDC-{tf}-futures.feather"
             pre_stats = _feather_date_stats(filepath)
+            repair_tf = repair and (repair_timeframes is None or tf in repair_timeframes)
 
             # Coverage gate — skip fetch entirely if on-disk feather already
             # covers today's last expected bar. ``has_ohlcv_through`` is
@@ -995,9 +1761,24 @@ def collect_and_save_ohlcv(
             # placeholder, so a gate pass is overridden when the recent tail
             # is stale-flat (see ``_tail_is_stale_density``) — otherwise a
             # bad tail would latch "current" forever, never re-fetched.
-            if target_date is not None and not repair:
-                expected_last = _expected_last_bar(tf, target_date=target_date)
-                gate = has_ohlcv_through(filepath, expected_last, force=force_refresh)
+            if target_date is not None and not repair_tf:
+                expected_last = _expected_last_bar(tf, target_date=target_date, now=now)
+                # The newest stored bar may have been written while it was still
+                # open (releases cut before open bars were dropped, a mid-bar
+                # run), so it is always re-fetched: the file only counts as
+                # current once it extends *past* the last closed bar.
+                gate = has_ohlcv_through(
+                    filepath, expected_last + _TIMEFRAME_DELTAS[tf], force=force_refresh
+                )
+                if (
+                    gate.skip
+                    and pre_stats is not None
+                    and pre_stats["max_date"] <= now < pre_stats["max_date"] + _TIMEFRAME_DELTAS[tf]
+                ):
+                    # Newest stored bar has started but not closed (a pre-fix
+                    # release, or a mid-bar run): never retain it -- collect so
+                    # it is pruned.
+                    gate = SkipDecision(False, "open_tail", gate.existing_rows, 0)
                 if gate.skip and _tail_is_stale_density(filepath, tf):
                     console.print(
                         f"    [yellow]STALE DENSITY: {symbol}/{tf} — timestamps are "
@@ -1026,12 +1807,13 @@ def collect_and_save_ohlcv(
             coverage[(symbol, tf)] = entry
 
             try:
-                if filepath.exists() and not repair:
+                if filepath.exists() and not repair_tf:
                     last_bar = pre_stats["max_date"] if pre_stats else None
                     limit = incremental_candle_limit(tf, last_bar, now)
                 else:
                     limit = MAX_CANDLE_LIMIT
                 df = _fetch_candles_with_retry(api, symbol, tf, limit)
+                df = _drop_open_bars(df, tf, now)
 
                 api_stats = _date_stats(df["timestamp"])
                 entry["api_slice"] = api_stats
@@ -1047,11 +1829,14 @@ def collect_and_save_ohlcv(
                     }
                 )
 
-                _merge_feather(
+                pruned = _merge_feather(
                     new_rows,
                     filepath,
-                    prefer_dense=not (repair or force_refresh),
+                    prefer_dense=not (repair_tf or force_refresh),
+                    closed_before=now,
+                    interval=_TIMEFRAME_DELTAS[tf],
                 )
+                entry["pruned_open"] = [pd.Timestamp(t).isoformat() for t in pruned]
                 post_stats = _feather_date_stats(filepath)
                 entry["post_merge"] = post_stats
 
@@ -1088,6 +1873,24 @@ def collect_and_save_ohlcv(
         )
     )
     return saved, failed, coverage
+
+
+def write_prune_report(coverage: dict[tuple[str, str], dict], path: Path) -> None:
+    """Record which feather files had an open bar pruned, and at which timestamps.
+
+    The release workflow's candle-history guard tolerates exactly these rows
+    shrinking a file and nothing else. Written outside the packaged data tree.
+
+    :param coverage: Coverage map from :func:`collect_and_save_ohlcv`.
+    :param path: Destination JSON file ``{feather name: [ISO timestamps]}``.
+    """
+    report = {
+        f"{sym}_USDC_USDC-{tf}-futures.feather": entry["pruned_open"]
+        for (sym, tf), entry in sorted(coverage.items())
+        if entry.get("pruned_open")
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
 
 def _summarise_daily_files(dir_path: Path) -> dict:
@@ -1350,11 +2153,6 @@ def generate_report(
         lines.append(f"    {tf}: {tf_counts[tf]} symbols")
 
     # ------------------------------------------------------------------
-    # Funding exports — not collected by this script and not refreshed by
-    # the release, so without a line here a stale, orphaned or missing
-    # funding file is invisible until a downstream backtest fails (#47).
-    # ------------------------------------------------------------------
-    # ------------------------------------------------------------------
     # Data-type coverage — so a type quietly falling out is a reported fact
     # rather than a discovery made weeks later downstream (#47, #48).
     #
@@ -1375,29 +2173,21 @@ def generate_report(
     lines.append("")
     lines.append("## Funding Rate Exports")
     lines.append(
-        "  Not collected by this script — carried forward inside the release "
-        "bundle. Listed so staleness is visible."
+        "  Funding and mark are refreshed and graded by the release; see the "
+        "'Funding & Mark Companions' section below."
     )
-    lines.append(
-        f"- Canonical '{CANONICAL_FUNDING_VARIANT}' export: {funding['canonical_pairs']} pairs"
+
+    funding_warning = _funding_export_warning(funding)
+    if funding_warning and os.environ.get("GITHUB_ACTIONS") == "true":
+        # Plain print, not console.print: the rich console can wrap or style
+        # this line, and GitHub only recognises the literal `::warning::`
+        # prefix at the start of an unstyled stdout line.
+        print(funding_warning)
+
+    _append_depth_inversion_section(lines, futures_dir)
+    _append_zero_volume_section(
+        lines, futures_dir, markets_df, futures_dir.parent, pd.Timestamp(datetime.now(UTC))
     )
-    if funding["canonical_latest"] is not None:
-        newest = funding["canonical_latest"]
-        age_days = (pd.Timestamp(datetime.now(UTC)) - newest).days
-        lines.append(
-            f"- Newest funding bar: {newest.strftime('%Y-%m-%d %H:%M')} UTC ({age_days}d old)"
-        )
-    else:
-        lines.append("- Newest funding bar: none readable")
-    if funding["unreadable"]:
-        lines.append(f"- Unreadable funding exports: {funding['unreadable']}")
-    if funding["orphans"]:
-        lines.append(
-            "- Variants present that nothing regenerates (stale; consumers "
-            f"should read '{CANONICAL_FUNDING_VARIANT}'):"
-        )
-        for variant, pairs in sorted(funding["orphans"].items(), key=lambda kv: -kv[1]):
-            lines.append(f"    {variant}: {pairs} pairs")
 
     # ------------------------------------------------------------------
     # Suspected seed regressions — surfaces the cases where the historical
@@ -1651,6 +2441,26 @@ Examples:
             "incremental lookback cannot reach (e.g. 2026-09-07 / 2026-09-09)."
         ),
     )
+    parser.add_argument(
+        "--prune-report",
+        type=Path,
+        default=None,
+        help=(
+            "Write a JSON map of feather files that had a not-yet-closed bar pruned "
+            "(and its timestamps) to this path. Used by the release integrity guard."
+        ),
+    )
+    parser.add_argument(
+        "--repair-timeframes",
+        type=parse_repair_timeframes,
+        default=None,
+        metavar="TF[,TF...]",
+        help=(
+            "Limit --repair-ohlcv to these comma-separated timeframes "
+            f"({', '.join(TIMEFRAMES)}); the others collect incrementally. "
+            "Default: all timeframes."
+        ),
+    )
 
     parser.add_argument(
         "--tick-max-blocks",
@@ -1745,7 +2555,10 @@ Examples:
         force_refresh=args.force_refresh,
         target_date=date_str,
         repair=args.repair_ohlcv,
+        repair_timeframes=args.repair_timeframes,
     )
+    if args.prune_report is not None:
+        write_prune_report(ohlcv_coverage, args.prune_report)
     console.print()
 
     # Phase 3: 24h per-market volume runs in a separate workflow (collect-volume.yml)

@@ -34,6 +34,7 @@ from gmx_historical_data.atomic_parquet import (
     atomic_write_parquet,
     is_fatal_environment_error,
 )
+from gmx_historical_data.datastore_signs import resign_from_rate
 from gmx_historical_data.ohlcv_density import merge_ohlcv_preferring_dense
 from gmx_historical_data.ohlcv_validation import (
     CadenceBreak,
@@ -58,6 +59,21 @@ logger = logging.getLogger(__name__)
 # and all of which fail this pattern because of their trailing suffix.
 _FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
 
+#: The DataStore-only funding series is exported as its own variant
+#: (``{PAIR}-1h_datastore-funding_rate``, #47): ``rates/{SYM}/1h_datastore.parquet``
+#: holds signed on-chain reads (the pre-V2.2 backfill and the daily tail-fill /
+#: gap-correction reads), which a consumer such as SigCombo A4 reads by name.
+#: It is not a timeframe -- ``list_funding_timeframes`` still excludes it -- but
+#: it *is* an exported variant, so the orphan check must not call it retired.
+DATASTORE_VARIANT_SUFFIX = "_datastore"
+DATASTORE_TIMEFRAMES = ("1h",)
+
+
+def datastore_variant(timeframe: str) -> str:
+    """The exported variant token of ``timeframe``'s DataStore series (``1h`` -> ``1h_datastore``)."""
+    return f"{timeframe}{DATASTORE_VARIANT_SUFFIX}"
+
+
 #: Matches an exported funding file, e.g.
 #: ``BTC_USDC_USDC-1h_datastore-funding_rate.feather``. The variant token is
 #: whatever sits between the pair and the ``-funding_rate`` suffix, so it
@@ -66,6 +82,20 @@ _FUNDING_TIMEFRAME_PATTERN = re.compile(r"^\d+[mhd]$")
 _FUNDING_EXPORT_PATTERN = re.compile(
     r"^(?P<pair>.+)-(?P<variant>[0-9A-Za-z_.]+)-funding_rate\.(?:feather|parquet)$"
 )
+
+
+def _drop_rejected_funding_hours(
+    frame: pl.DataFrame, rejected_hours: Iterable[datetime]
+) -> tuple[pl.DataFrame, int]:
+    """Remove destination rows whose source hours the current transform rejects."""
+    rejected = sorted(set(rejected_hours))
+    if not rejected or frame.is_empty():
+        return frame, 0
+    drop = pl.DataFrame({"date": pl.Series(rejected, dtype=pl.Datetime("ns", "UTC"))})
+    if frame.schema["date"] != drop.schema["date"]:
+        frame = frame.with_columns(pl.col("date").cast(drop.schema["date"]))
+    kept = frame.join(drop, on="date", how="anti")
+    return kept, len(frame) - len(kept)
 
 
 def find_orphaned_funding_variants(gmx_dir: Path, produced: set[str]) -> dict[str, int]:
@@ -236,6 +266,68 @@ class ExportFailure:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class FundingTransformReport:
+    """Row accounting for one funding frame passing through the signed transform.
+
+    Every source row is either exported, merged away as a duplicate, or
+    excluded for a named reason.  Nothing is dropped without being listed here.
+
+    :param finite_source_hours: Every distinct source timestamp whose rate is
+        non-null -- the hours the output is expected to cover.
+    :param null_rate_hours: Source timestamps dropped because the rate is null.
+    :param unknown_direction_hours: Source timestamps excluded because they hold
+        a nonzero *unsigned* magnitude with unknown direction (``longs_pay_shorts``
+        null).  Exporting them positive would claim longs pay.
+    :param duplicate_rows: Rows collapsed because their timestamp repeats.
+    """
+
+    finite_source_hours: tuple[datetime, ...]
+    null_rate_hours: tuple[datetime, ...]
+    unknown_direction_hours: tuple[datetime, ...]
+    duplicate_rows: int
+
+
+@dataclass(frozen=True, slots=True)
+class FundingReconciliation:
+    """Source-to-export timestamp reconciliation for one funding file.
+
+    :param symbol: Token symbol.
+    :param timeframe: Timeframe exported.
+    :param source_hours: Count of source hours with a non-null rate.
+    :param exported_hours: Count of those hours present in the published file.
+    :param missing_hours: Source hours absent from the published file.
+    :param null_rate_hours: Source rows rejected because the rate was null.
+    :param unknown_direction_hours: Source rows excluded for unknown direction.
+    :param duplicate_rows: Rows collapsed as duplicate timestamps.
+    :param removed_destination_rows: Existing destination rows removed because
+        the current source rejected their timestamps.
+    """
+
+    symbol: str
+    timeframe: str
+    source_hours: int
+    exported_hours: int
+    missing_hours: tuple[datetime, ...]
+    null_rate_hours: tuple[datetime, ...]
+    unknown_direction_hours: tuple[datetime, ...]
+    duplicate_rows: int
+    removed_destination_rows: int = 0
+
+    @property
+    def clean(self) -> bool:
+        """``True`` when nothing was missing, rejected or excluded."""
+        return not (self.missing_hours or self.null_rate_hours or self.unknown_direction_hours)
+
+
+def _format_hours(hours: Iterable[datetime], limit: int = 5) -> str:
+    """Render the first ``limit`` timestamps of ``hours`` plus a remainder count."""
+    hours = list(hours)
+    shown = ", ".join(h.strftime("%Y-%m-%dT%H:%MZ") for h in hours[:limit])
+    extra = len(hours) - limit
+    return f"{shown} (+{extra} more)" if extra > 0 else shown
+
+
 def _classify_export_failure(symbol: str, timeframe: str, exc: Exception) -> ExportFailure:
     """Build an :class:`ExportFailure` from a caught data-defect exception.
 
@@ -304,16 +396,25 @@ class FreqtradeExporter:
     :param output_dir: Output directory for Freqtrade files.
     """
 
-    def __init__(self, data_dir: Path, output_dir: Path):
+    def __init__(self, data_dir: Path, output_dir: Path, funding_dir: Path | None = None):
         """Initialize exporter.
 
         :param data_dir: Source GMX data directory.
         :param output_dir: Target directory for Freqtrade files.
+        :param funding_dir: Override for the ``rates/`` directory holding the
+            per-symbol funding parquet.  Defaults to
+            ``{data_dir}/funding/arbitrum/rates``.
         """
         self.data_dir = Path(data_dir)
         self.storage = ParquetStorage(self.data_dir)
         self.output_dir = Path(output_dir)
-        self.funding_dir = self.data_dir / "funding" / "arbitrum" / "rates"
+        self.funding_dir = (
+            Path(funding_dir)
+            if funding_dir is not None
+            else self.data_dir / "funding" / "arbitrum" / "rates"
+        )
+        #: Source-to-export reconciliations recorded by the last funding exports.
+        self.funding_reconciliations: list[FundingReconciliation] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -595,6 +696,7 @@ class FreqtradeExporter:
         available_variants: set[str] = set()
         for symbol in sorted(funding_symbols):
             available_variants.update(self.list_funding_timeframes(symbol))
+            available_variants.update(self.list_datastore_variants(symbol))
         for symbol in export_symbols:
             funding_files = 0
             funding_tfs = set(self.list_funding_timeframes(symbol))
@@ -603,6 +705,15 @@ class FreqtradeExporter:
                 if timeframes
                 else sorted(funding_tfs)
             )
+            # The DataStore series rides along with its timeframe: selecting
+            # ``1h`` (the release's call) exports ``1h`` and ``1h_datastore``.
+            export_tfs += [
+                v
+                for v in self.list_datastore_variants(symbol)
+                if timeframes is None
+                or v in timeframes
+                or v.removesuffix("_datastore") in timeframes
+            ]
             symbol_failed = False
 
             for tf in export_tfs:
@@ -610,29 +721,24 @@ class FreqtradeExporter:
                     funding_df = self._read_funding_rate(symbol, tf)
                     if funding_df is None or funding_df.is_empty():
                         continue
-                    ft_funding = validate_ohlcv(
-                        self._transform_funding_rate(funding_df),
-                        timestamp_column="date",
-                        location=f"export_funding({symbol}/{tf})",
-                        allow_nonpositive_prices=True,
+                    if tf.endswith(DATASTORE_VARIANT_SUFFIX) and "longs_pay_shorts" in (
+                        funding_df.columns
+                    ):
+                        # Signed on-chain values: export them as read. Without a
+                        # direction column the transform passes the rate through
+                        # unchanged (no ``-0.0`` for a genuine zero, no re-derived sign).
+                        funding_df = funding_df.drop("longs_pay_shorts")
+                    funding_files += self.export_funding_frame(
+                        symbol,
+                        tf,
+                        funding_df,
+                        gmx_dir=gmx_dir,
+                        output_format=output_format,
+                        trading_mode=trading_mode,
+                        quote_currency=quote_currency,
+                        overwrite=overwrite,
+                        unsafe_overwrite=unsafe_overwrite,
                     )
-                    self._write(
-                        ft_funding,
-                        gmx_dir
-                        / self._get_freqtrade_filename(
-                            symbol,
-                            tf,
-                            "feather" if output_format == "both" else output_format,
-                            trading_mode,
-                            quote_currency,
-                            candle_type="funding_rate",
-                        ),
-                        output_format,
-                        overwrite,
-                        unsafe_overwrite,
-                        allow_nonpositive_prices=True,
-                    )
-                    funding_files += 2 if output_format == "both" else 1
                 except DATA_DEFECT_ERRORS as e:
                     if is_fatal_environment_error(e):
                         raise
@@ -696,6 +802,249 @@ class FreqtradeExporter:
             )
 
         return results, failed_symbols, failures
+
+    def export_mark_from_futures(
+        self,
+        futures_dir: Path,
+        symbols: list[str] | None = None,
+        timeframes: tuple[str, ...] | list[str] = ("1h",),
+        *,
+        out_dir: Path | None = None,
+        quote_currency: str = "USDC",
+    ) -> tuple[dict[str, int], list[ExportFailure]]:
+        """Write ``-mark`` feathers derived from already-shipped ``-futures`` feathers.
+
+        The daily release writes final ``-futures.feather`` files directly, so
+        there is no ``candles/arbitrum`` parquet for :meth:`export_candles` to
+        read.  This is the same proxy ``export_candles`` produces
+        (:meth:`_transform_mark_price`: the candle OHLC with ``volume`` 0, since
+        GMX has no separate mark feed), taken from the futures feather instead.
+        It never touches the futures files.
+
+        :param futures_dir: Directory holding ``{SYMBOL}_{Q}_{Q}-{tf}-futures.feather``.
+        :param symbols: Symbols to write (default: every futures file found).
+        :param timeframes: Timeframes to write.
+        :param out_dir: Destination (default ``futures_dir``).  Existing mark
+            files there are merged with, never shrunk.
+        :param quote_currency: Quote/settlement currency of the filenames.
+        :returns: ``(symbol -> files written, failures)``.  A defective futures
+            file is reported as an :class:`ExportFailure`, not raised.
+        :raises OSError: On a fatal environment condition -- see :meth:`export_candles`.
+        """
+        futures_dir = Path(futures_dir)
+        out_dir = Path(out_dir) if out_dir is not None else futures_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        written: dict[str, int] = {}
+        failures: list[ExportFailure] = []
+
+        for tf in timeframes:
+            suffix = f"_{quote_currency}_{quote_currency}-{tf}-futures.feather"
+            found = {
+                p.name[: -len(suffix)]: p
+                for p in futures_dir.glob(f"*{suffix}")
+                if not p.name.startswith("._")
+            }
+            wanted = sorted(set(symbols) & found.keys()) if symbols else sorted(found)
+            for symbol in wanted:
+                try:
+                    source = pl.read_ipc(found[symbol], memory_map=False)
+                    if source["date"].dtype.time_zone is None:
+                        source = source.with_columns(pl.col("date").dt.replace_time_zone("UTC"))
+                    mark_df = validate_ohlcv(
+                        self._transform_mark_price(source.rename({"date": "timestamp"})),
+                        timestamp_column="date",
+                        location=f"export_mark_from_futures({symbol}/{tf})",
+                    )
+                    self._write(
+                        mark_df,
+                        out_dir
+                        / self._get_freqtrade_filename(
+                            symbol, tf, "feather", "futures", quote_currency, candle_type="mark"
+                        ),
+                        "feather",
+                        prefer_dense=True,
+                    )
+                except DATA_DEFECT_ERRORS as e:
+                    if is_fatal_environment_error(e):
+                        raise
+                    logger.error(
+                        "export_mark_from_futures(%s/%s): skipping after read/write failure: %s",
+                        symbol,
+                        tf,
+                        e,
+                    )
+                    failures.append(_classify_export_failure(symbol, tf, e))
+                    continue
+                written[symbol] = written.get(symbol, 0) + 1
+
+        return written, failures
+
+    def export_funding_frame(
+        self,
+        symbol: str,
+        timeframe: str,
+        funding_df: pl.DataFrame,
+        *,
+        gmx_dir: Path,
+        output_format: str = "feather",
+        trading_mode: str = "futures",
+        quote_currency: str = "USDC",
+        overwrite: bool = False,
+        unsafe_overwrite: bool = False,
+    ) -> int:
+        """Sign, validate, merge-write and reconcile one funding frame.
+
+        The single path from a unified-rates frame to a published
+        ``-funding_rate`` file: ``export_funding`` and the legacy
+        ``scripts/extract_unified_funding.py`` feather export both call it, so
+        they cannot disagree on sign, unit or destination-history handling.
+
+        :param symbol: Token symbol.
+        :param timeframe: Timeframe token, e.g. ``'1h'``.
+        :param funding_df: Unified rates frame (``timestamp`` plus rate columns).
+        :param gmx_dir: Destination directory (``.../gmx/futures``).
+        :param output_format: ``'feather'``, ``'parquet'`` or ``'both'``.
+        :param trading_mode: ``'futures'`` or ``'spot'``.
+        :param quote_currency: Quote/settlement currency.
+        :param overwrite: Backward-compat alias; merges with history guard.
+        :param unsafe_overwrite: Bypass the history guard.
+        :returns: Number of files written.
+        :raises ExportValidationError: If no row survives the transform.
+        """
+        transformed, report = self._transform_funding_rate_with_report(funding_df)
+        primary_fmt = "feather" if output_format == "both" else output_format
+        path = gmx_dir / self._get_freqtrade_filename(
+            symbol,
+            timeframe,
+            primary_fmt,
+            trading_mode,
+            quote_currency,
+            candle_type="funding_rate",
+        )
+        rejected_hours = set(report.unknown_direction_hours) | set(report.null_rate_hours)
+        removed_destination_rows = 0
+        destinations = (
+            (path.with_suffix(".feather"), path.with_suffix(".parquet"))
+            if output_format == "both"
+            else (path,)
+        )
+        for destination in destinations:
+            if not rejected_hours or not destination.is_file():
+                continue
+            existing = (
+                pl.read_ipc(destination, memory_map=False)
+                if destination.suffix == ".feather"
+                else pl.read_parquet(destination)
+            )
+            kept, removed = _drop_rejected_funding_hours(existing, rejected_hours)
+            if removed:
+                if destination.suffix == ".feather":
+                    atomic_write_ipc(kept, destination)
+                else:
+                    atomic_write_parquet(kept, destination)
+                removed_destination_rows = max(removed_destination_rows, removed)
+        if transformed.is_empty():
+            # Nothing exportable: account for the rejected rows, then let the
+            # validator raise as it always has so the symbol counts as failed.
+            self._record_reconciliation(
+                symbol,
+                timeframe,
+                report,
+                published=None,
+                removed_destination_rows=removed_destination_rows,
+            )
+        ft_funding = validate_ohlcv(
+            transformed,
+            timestamp_column="date",
+            location=f"export_funding({symbol}/{timeframe})",
+            allow_nonpositive_prices=True,
+        )
+        self._write(
+            ft_funding,
+            path,
+            output_format,
+            overwrite,
+            unsafe_overwrite,
+            allow_nonpositive_prices=True,
+        )
+        published = (
+            pl.read_ipc(path, memory_map=False)
+            if primary_fmt == "feather"
+            else pl.read_parquet(path)
+        )
+        self._record_reconciliation(
+            symbol,
+            timeframe,
+            report,
+            published=published,
+            removed_destination_rows=removed_destination_rows,
+        )
+        return 2 if output_format == "both" else 1
+
+    def _record_reconciliation(
+        self,
+        symbol: str,
+        timeframe: str,
+        report: FundingTransformReport,
+        *,
+        published: pl.DataFrame | None,
+        removed_destination_rows: int = 0,
+    ) -> FundingReconciliation:
+        """Compare source hours with the published file, record and warn.
+
+        :param published: The file as written, or ``None`` when nothing was
+            written (every row rejected).
+        """
+        out_hours: set[datetime] = (
+            set(published["date"].dt.convert_time_zone("UTC").dt.cast_time_unit("ns").to_list())
+            if published is not None and not published.is_empty()
+            else set()
+        )
+        source = report.finite_source_hours
+        missing = tuple(h for h in source if h not in out_hours)
+        rec = FundingReconciliation(
+            symbol=symbol,
+            timeframe=timeframe,
+            source_hours=len(source),
+            exported_hours=len(source) - len(missing),
+            missing_hours=missing,
+            null_rate_hours=report.null_rate_hours,
+            unknown_direction_hours=report.unknown_direction_hours,
+            duplicate_rows=report.duplicate_rows,
+            removed_destination_rows=removed_destination_rows,
+        )
+        self.funding_reconciliations.append(rec)
+        if rec.null_rate_hours:
+            logger.warning(
+                "export_funding(%s/%s): %d source row(s) rejected for a null rate: %s",
+                symbol,
+                timeframe,
+                len(rec.null_rate_hours),
+                _format_hours(rec.null_rate_hours),
+            )
+        if rec.unknown_direction_hours:
+            logger.warning(
+                "export_funding(%s/%s): %d source row(s) excluded -- nonzero unsigned rate "
+                "with unknown direction (longs_pay_shorts is null), so the sign cannot be "
+                "exported: %s",
+                symbol,
+                timeframe,
+                len(rec.unknown_direction_hours),
+                _format_hours(rec.unknown_direction_hours),
+            )
+        explained = set(rec.unknown_direction_hours)
+        unexplained = tuple(h for h in rec.missing_hours if h not in explained)
+        if unexplained:
+            logger.warning(
+                "export_funding(%s/%s): reconciliation failed -- %d of %d finite source "
+                "hour(s) are absent from the published output: %s",
+                symbol,
+                timeframe,
+                len(unexplained),
+                rec.source_hours,
+                _format_hours(unexplained),
+            )
+        return rec
 
     def export(
         self,
@@ -905,6 +1254,19 @@ class FreqtradeExporter:
     # Data readers
     # ------------------------------------------------------------------
 
+    def list_datastore_variants(self, symbol: str) -> list[str]:
+        """DataStore-only variants (``1h_datastore``) that have a non-hidden source parquet.
+
+        :param symbol: Token symbol.
+        :returns: Sorted variant tokens, e.g. ``['1h_datastore']``.
+        """
+        symbol_dir = self.funding_dir / symbol
+        return [
+            datastore_variant(tf)
+            for tf in DATASTORE_TIMEFRAMES
+            if (symbol_dir / f"{datastore_variant(tf)}.parquet").is_file()
+        ]
+
     def _read_funding_rate(self, symbol: str, timeframe: str) -> pl.DataFrame | None:
         """Read funding rate parquet for a symbol/timeframe.
 
@@ -918,6 +1280,9 @@ class FreqtradeExporter:
         df = pl.read_parquet(path)
         if df.is_empty():
             return None
+        if timeframe.endswith(DATASTORE_VARIANT_SUFFIX):
+            # Legacy (pre-#69) files hold an inverted fee sign on negative rows.
+            df = resign_from_rate(df)
         return df
 
     # ------------------------------------------------------------------
@@ -943,9 +1308,44 @@ class FreqtradeExporter:
     def _transform_funding_rate(self, df: pl.DataFrame) -> pl.DataFrame:
         """Transform GMX funding rate dataframe to Freqtrade format.
 
+        See :meth:`_transform_funding_rate_with_report` for the rules; this
+        returns only the frame.
+
+        :param df: Funding rate Polars dataframe from parquet.
+        :returns: Freqtrade-compatible Polars dataframe with exactly
+            six columns: ``date, open, high, low, close, volume``.
+        """
+        return self._transform_funding_rate_with_report(df)[0]
+
+    def _transform_funding_rate_with_report(
+        self, df: pl.DataFrame
+    ) -> tuple[pl.DataFrame, FundingTransformReport]:
+        """Transform a funding frame to Freqtrade format, accounting for every row.
+
         FreqTrade stores funding rate in the ``open`` column with other
-        OHLCV columns set to 0.  Uses ``funding_rate_hourly`` as the
-        rate value (falls back to ``funding_rate`` if hourly is missing).
+        OHLCV columns set to 0.  The rate is **per hour**: ``funding_rate_hourly``
+        when present, otherwise the per-second ``funding_rate`` multiplied by
+        3600.
+
+        The rate is exported signed.  The rates parquet stores a magnitude
+        and keeps the direction in ``longs_pay_shorts``, while Freqtrade
+        reads a positive rate as longs paying shorts (it charges longs and
+        credits shorts).  So a row with a known direction exports
+        ``+|rate|`` when longs pay and ``-|rate|`` when shorts pay, the same
+        convention as ``funding_fee_long``.
+
+        A row whose direction is ``null`` is one of:
+
+        - a genuine zero -- exported as ``0``;
+        - a negative value -- already signed, exported unchanged;
+        - a positive DataStore row (``source == 'datastore'``) -- DataStore
+          values are signed on-chain reads, exported unchanged;
+        - any other positive value -- an unsigned magnitude whose direction is
+          unknown.  It is **excluded** and listed in the report, because
+          exporting it positive would claim longs pay.
+
+        A frame without a ``longs_pay_shorts`` column (an already-signed
+        source) passes through unchanged.
 
         The output is restricted to the canonical Freqtrade schema
         (``date, open, high, low, close, volume``).  Earlier versions of
@@ -955,26 +1355,72 @@ class FreqtradeExporter:
         keeps merges into older feathers compatible.
 
         :param df: Funding rate Polars dataframe from parquet.
-        :returns: Freqtrade-compatible Polars dataframe with exactly
-            six columns: ``date, open, high, low, close, volume``.
+        :returns: ``(frame, report)`` -- the six-column frame and the row
+            accounting (null-rate, unknown-direction and duplicate rows).
         """
-        col = "funding_rate_hourly" if "funding_rate_hourly" in df.columns else "funding_rate"
-        df = df.rename({"timestamp": "date", col: "open"})
-        df = df.with_columns(
-            [
-                pl.col("open").cast(pl.Float64),
-                pl.lit(0).cast(pl.Float64).alias("high"),
-                pl.lit(0).cast(pl.Float64).alias("low"),
-                pl.lit(0).cast(pl.Float64).alias("close"),
-                pl.lit(0).cast(pl.Float64).alias("volume"),
-                pl.col("date").dt.convert_time_zone("UTC").dt.cast_time_unit("ns"),
-            ]
+        if "funding_rate_hourly" in df.columns:
+            rate = pl.col("funding_rate_hourly").cast(pl.Float64)
+        else:
+            rate = pl.col("funding_rate").cast(pl.Float64) * 3600.0
+        work = df.select(
+            pl.col("timestamp").dt.convert_time_zone("UTC").dt.cast_time_unit("ns").alias("date"),
+            rate.alias("rate"),
+            (
+                pl.col("longs_pay_shorts").cast(pl.Boolean)
+                if "longs_pay_shorts" in df.columns
+                else pl.lit(None, dtype=pl.Boolean)
+            ).alias("longs_pay"),
+            (
+                (pl.col("source") == "datastore").fill_null(False)
+                if "source" in df.columns
+                else pl.lit(False)
+            ).alias("is_datastore"),
         )
-        df = df.drop_nulls(subset=["open"])
-        df = df.select(["date", "open", "high", "low", "close", "volume"])
-        return (
-            df.sort("date").unique(subset=["date"], keep="first", maintain_order=False).sort("date")
+        has_direction = "longs_pay_shorts" in df.columns
+        if has_direction:
+            unknown = (
+                pl.col("longs_pay").is_null()
+                & pl.col("rate").is_finite()
+                & (pl.col("rate") > 0)
+                & ~pl.col("is_datastore")
+            )
+            signed = (
+                pl.when(pl.col("longs_pay").is_null())
+                .then(pl.col("rate"))
+                .when(pl.col("longs_pay"))
+                .then(pl.col("rate").abs())
+                .otherwise(-pl.col("rate").abs())
+            )
+        else:
+            unknown = pl.lit(False)
+            signed = pl.col("rate")
+        work = work.with_columns(unknown.alias("unknown"), signed.alias("open"))
+
+        null_rate = work.filter(pl.col("rate").is_null()).get_column("date")
+        unknown_dir = work.filter(pl.col("unknown") & pl.col("rate").is_not_null()).get_column(
+            "date"
         )
+        finite_source = work.filter(pl.col("rate").is_not_null()).get_column("date").unique().sort()
+
+        kept = (
+            work.filter(pl.col("rate").is_not_null() & ~pl.col("unknown"))
+            .select("date", "open")
+            .sort("date")
+        )
+        deduped = kept.unique(subset=["date"], keep="first", maintain_order=True)
+        report = FundingTransformReport(
+            finite_source_hours=tuple(finite_source.to_list()),
+            null_rate_hours=tuple(null_rate.sort().to_list()),
+            unknown_direction_hours=tuple(unknown_dir.sort().to_list()),
+            duplicate_rows=kept.height - deduped.height,
+        )
+        frame = deduped.with_columns(
+            pl.lit(0).cast(pl.Float64).alias("high"),
+            pl.lit(0).cast(pl.Float64).alias("low"),
+            pl.lit(0).cast(pl.Float64).alias("close"),
+            pl.lit(0).cast(pl.Float64).alias("volume"),
+        ).select(["date", "open", "high", "low", "close", "volume"])
+        return frame, report
 
     def _transform_mark_price(self, df: pl.DataFrame) -> pl.DataFrame:
         """Generate mark price feather from OHLCV candle data.

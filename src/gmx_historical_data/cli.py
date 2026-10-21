@@ -2874,6 +2874,19 @@ def export_funding_command(
         f"\n[green]✓[/green] {total} funding feathers written to [cyan]{output_dir / 'gmx'}[/cyan]"
     )
 
+    unreconciled = [r for r in exporter.funding_reconciliations if not r.clean]
+    if unreconciled:
+        console.print(
+            f"\n[yellow]⚠ {len(unreconciled)} funding file(s) did not reconcile with their "
+            "source (see warnings for the hours):[/yellow]"
+        )
+        for rec in unreconciled:
+            console.print(
+                f"  {rec.symbol}/{rec.timeframe}: {len(rec.missing_hours)} source hour(s) "
+                f"missing, {len(rec.null_rate_hours)} null-rate, "
+                f"{len(rec.unknown_direction_hours)} unknown-direction"
+            )
+
     if failed_symbols:
         console.print()
         console.print(

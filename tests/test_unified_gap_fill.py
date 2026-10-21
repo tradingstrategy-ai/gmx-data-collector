@@ -126,6 +126,15 @@ def test_single_row_returns_one_hour():
     assert out["funding_rate"].to_list() == [5e-9]
 
 
+def test_gap_flag_is_preserved_even_when_update_count_is_present():
+    base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)
+    df = _factor_df([(base, 1e-9, 0)]).with_columns(pl.lit(True).alias("is_gap_filled"))
+
+    out = forward_fill_hourly_grid(df)
+
+    assert out["is_gap_filled"].to_list() == [True]
+
+
 def test_fill_does_not_extend_beyond_last_event():
     """Grid stops at max(timestamp). No zombie-fill past the last on-chain event."""
     base = datetime(2026, 1, 1, 0, 0, tzinfo=UTC)

@@ -105,7 +105,9 @@ class TradeTick:
     :param size_tokens: Fill size in base tokens.
     :param size_usd: Fill size in USD.
     :param is_long: Position side; ``None`` for swaps.
-    :param price_impact_usd: Signed price impact in USD.
+    :param price_impact_usd: Optional signed impact in USD (NaN when absent).
+        Newer increases expose pendingPriceImpactUsd; other events use
+        priceImpactUsd. These fields are not a verified realized-impact series.
     :param side: ``in``/``out`` for the two halves of a swap, ``None`` for a
         perp fill. Both halves carry the full notional, so summing swap
         ``size_usd`` protocol-wide double-counts by 2x; filter to one side
@@ -240,14 +242,20 @@ def ticks_from_event_data(
                 size_tokens=size_tokens,
                 size_usd=size_usd,
                 is_long=(event.bool_items or {}).get("isLong"),
-                price_impact_usd=_scale_usd(ints.get("priceImpactUsd", 0)),
+                price_impact_usd=(
+                    _scale_usd(ints["pendingPriceImpactUsd"])
+                    if name == "PositionIncrease" and "pendingPriceImpactUsd" in ints
+                    else _scale_usd(ints["priceImpactUsd"])
+                    if "priceImpactUsd" in ints
+                    else float("nan")
+                ),
                 side=None,
             )
         ]
 
     if name == SWAP_EVENT:
         market_address = addresses.get("market") or ""
-        impact = _scale_usd(ints.get("priceImpactUsd", 0))
+        impact = _scale_usd(ints["priceImpactUsd"]) if "priceImpactUsd" in ints else float("nan")
         ticks: list[TradeTick] = []
 
         for token_key, amount_key, price_key, side in (

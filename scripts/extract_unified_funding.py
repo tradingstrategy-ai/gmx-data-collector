@@ -16,6 +16,11 @@ Phases:
        by comparing delta sums. Covers full V2 history.
     4. **Merge**: Combines all sources into a single ``1h.parquet`` per symbol
        with correct direction applied to V2.2+ data.
+    5. **DataStore tail-fill** (default when an RPC is configured; fail-soft, #64):
+       reads ``savedFundingFactorPerSecond`` at hourly boundaries for each market's
+       stale tail and for every carried (``is_gap_filled``) hour of the last 30
+       days, writes ``1h_datastore.parquet`` and re-merges. Per hour the merge
+       prefers an event-derived HyperSync hour, then a DataStore read, then a carried value.
 
 QUICK START
 -----------
@@ -41,6 +46,9 @@ OPTIONS
     --market             Filter by market symbol (e.g., "ETH/USD")
     --include-datastore  Include Phase 1 DataStore extraction (~200 batched HTTP requests, requires archive node)
     --skip-direction     Skip Phase 3 direction detection
+    --skip-datastore-tail  Skip the DataStore tail-fill / gap correction
+    --tail-window-days   Trailing days the tail-fill reaches (default: 30)
+    --tail-max-minutes   Time budget of the tail-fill (default: 4); partial work is kept
     --merge-only         Only run merge step, skip all extraction
     --resume             Resume each phase from its checkpoint
     --checkpoint-dir     Override checkpoint directory
@@ -54,13 +62,17 @@ import json
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 from rich.console import Console
 
+from gmx_historical_data import datastore_tail
 from gmx_historical_data.atomic_parquet import atomic_write_ipc, atomic_write_parquet
+from gmx_historical_data.cadence_gate import load_exempt_symbols
+from gmx_historical_data.datastore_signs import repair_datastore_file, resign_from_rate
 
 console = Console()
 
@@ -299,6 +311,10 @@ def build_datastore_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.refresh_markets:
@@ -324,6 +340,10 @@ def build_factor_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.checkpoint_dir:
@@ -351,6 +371,10 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
     ]
     if args.market:
         cmd.extend(["--market", args.market])
+    if args.from_block is not None:
+        cmd.extend(["--from-block", str(args.from_block)])
+    if args.to_block is not None:
+        cmd.extend(["--to-block", str(args.to_block)])
     if args.resume:
         cmd.append("--resume")
     if args.checkpoint_dir:
@@ -363,35 +387,6 @@ def build_direction_cmd(args: argparse.Namespace) -> list[str]:
 # =============================================================================
 # POST-PHASE RENAME
 # =============================================================================
-
-
-def rename_factor_outputs(network_dir: Path) -> None:
-    """Rename 1h.parquet -> 1h_factor.parquet to avoid collision with merge output.
-
-    The ``extract_funding_factor.py`` script writes to ``rates/{SYM}/1h.parquet``.
-    The merge step also writes to ``rates/{SYM}/1h.parquet`` as the canonical
-    unified output. This function renames the factor output to a distinct
-    filename before the merge.
-
-    :param network_dir: Network-specific directory (e.g., ``data/funding/arbitrum``).
-    """
-    rates_dir = network_dir / "rates"
-    if not rates_dir.exists():
-        return
-    renamed = 0
-    for sym_dir in rates_dir.iterdir():
-        if not sym_dir.is_dir():
-            continue
-        src = sym_dir / "1h.parquet"
-        dst = sym_dir / "1h_factor.parquet"
-        if src.exists():
-            # Always overwrite: the factor script may have appended new data
-            if dst.exists():
-                dst.unlink()
-            src.rename(dst)
-            renamed += 1
-    if renamed:
-        console.print(f"  Renamed {renamed} factor output(s) to 1h_factor.parquet")
 
 
 # =============================================================================
@@ -521,9 +516,13 @@ def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
     merged = grid.join(rates, on="timestamp", how="left")
 
     # Flag filled rows BEFORE forward-fill (otherwise we lose the signal).
-    merged = merged.with_columns(
-        pl.col("update_count").is_null().alias("is_gap_filled"),
-    )
+    missing_row = pl.col("update_count").is_null()
+    if "is_gap_filled" in merged.columns:
+        merged = merged.with_columns(
+            pl.col("is_gap_filled").fill_null(missing_row).alias("is_gap_filled")
+        )
+    else:
+        merged = merged.with_columns(missing_row.alias("is_gap_filled"))
 
     # Forward-fill rate columns and identifiers. update_count is filled with 0
     # (not forward-filled — a filled hour has zero events by definition).
@@ -544,6 +543,79 @@ def forward_fill_hourly_grid(rates: pl.DataFrame) -> pl.DataFrame:
     return merged.sort("timestamp")
 
 
+def _precedence() -> pl.Expr:
+    """Row preference: an event-derived HyperSync hour, a DataStore read, a carried gap fill."""
+    return (
+        pl.when((pl.col("source") == "hypersync") & ~pl.col("is_gap_filled"))
+        .then(0)
+        .when(pl.col("source") == "datastore")
+        .then(1)
+        .otherwise(2)
+    )
+
+
+def _resolve_hours(
+    unified: pl.DataFrame | None,
+    existing: pl.DataFrame | None,
+    symbol: str,
+    raw_window: tuple[datetime, datetime] | None = None,
+) -> pl.DataFrame:
+    """Pick one row per hour from the re-derived sources and the existing canonical file.
+
+    Among re-derived rows: an event-derived HyperSync hour, then a DataStore read (chain
+    state at the hour boundary), then a carried gap fill. Existing canonical rows never
+    compete with fresh sources: every one inside the raw coverage window, or at an hour a
+    fresh DataStore read covers, is obsolete and dropped. Only hours outside the coverage
+    of the fresh sources (history before a truncated raw store, genuinely uncovered hours)
+    are kept, provenance intact, with a per-symbol warning. DataStore rows among them
+    are re-signed from their rate.
+
+    :param unified: Re-derived rows (``source`` and ``is_gap_filled`` present), or ``None``.
+    :param existing: The current canonical frame, or ``None``.
+    :param symbol: Symbol, for the warning.
+    :param raw_window: First and last hour the raw-derived factor rows cover.
+    :returns: One row per hour, sorted by ``timestamp``.
+    """
+    if unified is not None:
+        unified = (
+            unified.with_columns(_precedence().alias("_precedence"))
+            .sort(["timestamp", "_precedence"], maintain_order=True)
+            .unique(subset=["timestamp"], keep="first", maintain_order=True)
+            .drop("_precedence")
+        )
+    if existing is None or existing.is_empty():
+        return existing if unified is None else unified.sort("timestamp")
+
+    old = existing
+    if "is_gap_filled" not in old.columns:
+        old = old.with_columns(pl.lit(False).alias("is_gap_filled"))
+    else:
+        old = old.with_columns(pl.col("is_gap_filled").fill_null(False))
+    if "source" not in old.columns:
+        old = old.with_columns(pl.lit("unknown").alias("source"))
+    # A canonical DataStore row written by the buggy merge has an inverted fee sign.
+    is_ds = pl.col("source") == "datastore"
+    old = pl.concat(
+        [resign_from_rate(old.filter(is_ds)), old.filter(~is_ds | is_ds.is_null())],
+        how="diagonal_relaxed",
+    )
+    if unified is None:
+        return old.sort("timestamp")
+
+    obsolete = pl.col("timestamp").is_in(unified["timestamp"].implode())
+    if raw_window is not None:
+        obsolete = obsolete | pl.col("timestamp").is_between(*raw_window)
+    kept = old.filter(~obsolete)
+    if not kept.is_empty():
+        first_new = raw_window[0] if raw_window else unified["timestamp"].min()
+        console.print(
+            f"  [yellow]{symbol}: raw coverage starts {first_new}; keeping "
+            f"{kept.height} pre-coverage hours from canonical "
+            f"({kept['timestamp'].min()} .. {kept['timestamp'].max()})[/yellow]"
+        )
+    return pl.concat([unified, kept], how="diagonal_relaxed").sort("timestamp")
+
+
 def merge_symbol(
     symbol: str,
     rates_dir: Path,
@@ -562,45 +634,72 @@ def merge_symbol(
     :returns: Number of rows in the unified output, or ``None`` if no data.
     """
     frames = []
+    raw_window = None
 
-    # --- Source 1: DataStore (pre-V2.2, signed, direction built-in) ---
+    # --- Source 1: DataStore (pre-V2.2, signed rate) ---
+    # Legacy files (pre-#69) carry an inverted ``funding_fee_long`` on negative-rate
+    # rows: fee and direction are re-derived from the signed rate, never read as stored.
     datastore_path = rates_dir / symbol / "1h_datastore.parquet"
     if datastore_path.exists():
-        ds_df = pl.read_parquet(datastore_path)
+        repair_datastore_file(datastore_path)
+        ds_df = resign_from_rate(pl.read_parquet(datastore_path))
         ds_df = ds_df.with_columns(pl.lit("datastore").alias("source"))
         frames.append(ds_df)
 
     # --- Source 2: HyperSync Funding Factor (V2.2+, unsigned) ---
     factor_path = rates_dir / symbol / "1h_factor.parquet"
-    if factor_path.exists():
+    raw_factor_path = rates_dir.parent / "raw" / "funding" / symbol / "partition=0" / "data.parquet"
+    if factor_path.exists() and raw_factor_path.exists():
         hs_df = pl.read_parquet(factor_path)
-        hs_df = forward_fill_hourly_grid(hs_df)
+        # Legacy unified companions carry a source label and can contain
+        # DataStore rows. Never reinterpret them as unsigned factor input.
+        if "source" not in hs_df.columns:
+            hs_df = forward_fill_hourly_grid(hs_df)
+            if not hs_df.is_empty():
+                raw_window = (hs_df["timestamp"].min(), hs_df["timestamp"].max())
 
-        # --- Source 3: Direction correction (forward-filled, see helper) ---
-        direction_path = direction_dir / symbol / "1h.parquet"
-        dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
-        hs_df = apply_direction_to_rates(hs_df, dir_df)
+            # --- Source 3: Direction correction (forward-filled, see helper) ---
+            direction_path = direction_dir / symbol / "1h.parquet"
+            dir_df = pl.read_parquet(direction_path) if direction_path.exists() else None
+            hs_df = apply_direction_to_rates(hs_df, dir_df)
 
-        hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
-        frames.append(hs_df)
-
-    if not frames:
-        return None
+            hs_df = hs_df.with_columns(pl.lit("hypersync").alias("source"))
+            frames.append(hs_df)
 
     # Concatenate with schema alignment
-    unified = pl.concat(frames, how="diagonal_relaxed")
+    unified = pl.concat(frames, how="diagonal_relaxed") if frames else None
 
-    # DataStore rows predate is_gap_filled; they are real hourly RPC reads, never filled.
-    unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
-
-    # Deduplicate by timestamp (prefer later source — hypersync appended second)
-    unified = unified.unique(subset=["timestamp"], keep="last")
-    unified = unified.sort("timestamp")
+    # Older DataStore files lack provenance columns; make their meaning explicit.
+    if unified is not None:
+        if "is_gap_filled" not in unified.columns:
+            unified = unified.with_columns(pl.lit(False).alias("is_gap_filled"))
+        else:
+            unified = unified.with_columns(pl.col("is_gap_filled").fill_null(False))
+        if "source" not in unified.columns:
+            unified = unified.with_columns(pl.lit("unknown").alias("source"))
 
     # Write unified output
     ext = "feather" if output_format == "feather" else "parquet"
     unified_path = rates_dir / symbol / f"1h.{ext}"
+    existing = None
+    if unified_path.exists():
+        existing = (
+            pl.read_ipc(unified_path)
+            if output_format == "feather"
+            else pl.read_parquet(unified_path)
+        )
+    if unified is None and existing is None:
+        return None
     unified_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # A rebuild never shrinks history. The raw event store can be truncated (it may start
+    # long after the canonical series does), and a polluted companion is discarded, so
+    # the hours the fresh sources above do not cover are kept from the existing canonical
+    # file, provenance intact. Existing rows inside fresh coverage are obsolete and dropped.
+    unified = _resolve_hours(unified, existing, symbol, raw_window)
+
+    if existing is not None and existing.equals(unified):
+        return len(unified)
     if output_format == "feather":
         atomic_write_ipc(unified, unified_path)
     else:
@@ -613,12 +712,14 @@ def merge_unified_rates(
     network_dir: Path,
     market_filter: str | None = None,
     output_format: str = "parquet",
+    only_symbols: set[str] | None = None,
 ) -> None:
     """Merge DataStore, HyperSync Factor, and Direction data into unified rates.
 
     For each symbol:
 
-    1. Read ``rates/{SYM}/1h_datastore.parquet`` (pre-V2.2, already signed)
+    1. Read ``rates/{SYM}/1h_datastore.parquet`` (pre-V2.2, signed rate; fee and
+       direction columns are re-derived from it, legacy files repaired in place)
     2. Read ``rates/{SYM}/1h_factor.parquet`` (V2.2+, unsigned)
     3. Read ``direction/{SYM}/1h.parquet`` (direction from fee-per-size)
     4. Correct V2.2+ direction using fee-per-size data
@@ -627,6 +728,8 @@ def merge_unified_rates(
     :param network_dir: Network-specific directory (e.g., ``data/funding/arbitrum``).
     :param market_filter: Optional symbol filter (e.g., ``'ETH/USD'``).
     :param output_format: Output format: ``'parquet'`` or ``'feather'``.
+    :param only_symbols: Merge just these symbols (the DataStore tail-fill re-merges
+        what it touched).
     """
     console.print(f"\n{'=' * 70}")
     console.print("  Phase 4: Merge Unified Rates")
@@ -648,6 +751,8 @@ def merge_unified_rates(
     if market_filter:
         filter_sym = market_symbol_from_filter(market_filter)
         symbols = {s for s in symbols if s == filter_sym}
+    if only_symbols is not None:
+        symbols &= only_symbols
 
     if not symbols:
         console.print("  [yellow]No symbols found to merge[/yellow]")
@@ -668,6 +773,208 @@ def merge_unified_rates(
             )
 
     console.print(f"\n  Merge complete: {merged_count} symbols, {total_rows:,} total hours")
+
+
+# =============================================================================
+# DATASTORE TAIL-FILL (#64)
+# =============================================================================
+
+#: Default time budget of the tail-fill.
+TAIL_MAX_MINUTES = 4.0
+#: The tail-fill never runs past this many minutes after the process started: the
+#: daily release caps the whole extraction at 15 minutes, and a cancelled extraction
+#: withholds every companion (B4), so the optional tail-fill yields first. What it
+#: read is kept and the next run continues.
+TAIL_CEILING_MINUTES = 11.0
+#: Of the tail-fill's budget, seconds kept free at the end for persisting and re-merging.
+TAIL_PERSIST_RESERVE_SECONDS = 45.0
+
+
+@dataclass
+class TailFillResult:
+    """Outcome of :func:`tail_fill_datastore`.
+
+    :ivar status: The record written for the gate (``status``: ok / partial /
+        unavailable / failed, plus ``reason`` and hour counts).
+    :ivar touched: Symbols whose ``1h_datastore.parquet`` gained rows.
+    """
+
+    status: dict
+    touched: set[str] = field(default_factory=set)
+
+
+def _load_datastore_script():
+    """Import ``extract_funding_datastore`` (a sibling script, not a package module)."""
+    import importlib
+
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    return importlib.import_module("extract_funding_datastore")
+
+
+def _read_hours(path: Path) -> set[datetime]:
+    if not path.exists():
+        return set()
+    try:
+        return set(pl.read_parquet(path, columns=["timestamp"])["timestamp"].to_list())
+    except Exception:  # noqa: BLE001 - an unreadable datastore file just means "read it again"
+        return set()
+
+
+def tail_fill_datastore(
+    network_dir: Path,
+    *,
+    now: datetime | None = None,
+    rpc_config: str | None = None,
+    market_filter: str | None = None,
+    window_days: int = datastore_tail.TAIL_WINDOW_DAYS,
+    max_minutes: float | None = None,
+    chunk_hours: int = 48,
+    checkpoint_dir: Path | None = None,
+    output_format: str = "parquet",
+) -> TailFillResult:
+    """Extend quiet markets' tails and correct carried hours from the DataStore.
+
+    Run after the HyperSync phases and the first merge, so the canonical
+    ``rates/<SYM>/1h.parquet`` shows each market's last bar and its
+    ``is_gap_filled`` hours. For each market the window is (last bar + 1h ..
+    ``floor(now) - 1h``) plus every carried hour, both limited to the trailing
+    ``window_days``; the DataStore is read at the first block of each hour and the
+    rows are appended to ``1h_datastore.parquet`` (signed, ``source="datastore"``).
+    Markets on the delisted roster are not touched; markets that did not exist yet
+    produce no rows.
+
+    Never raises for an RPC problem: a node without historical state, a missing RPC,
+    a time budget or any other failure is recorded in the status file the gate reports
+    (``datastore_tail: unavailable (<reason>)``), whatever was read is already
+    persisted, and the release carries on with the tails flagged as before.
+
+    :param network_dir: ``<output-dir>/arbitrum``.
+    :param now: Run time (defaults to the current time).
+    :param rpc_config: RPC URL(s); defaults to ``JSON_RPC_ARBITRUM``.
+    :param market_filter: Optional symbol filter (``'ETH/USD'``).
+    :param window_days: Trailing window.
+    :param max_minutes: Time budget; ``None`` means unlimited.
+    :param chunk_hours: Hours persisted per chunk.
+    :param checkpoint_dir: Where the status file goes (default ``network_dir/checkpoints``).
+    :param output_format: Format of the canonical file the touched symbols are re-merged into.
+    :returns: A :class:`TailFillResult`; the symbols it touched are already re-merged.
+    """
+    now = now or datetime.now(UTC)
+    cutoff = datastore_tail.tail_cutoff(now)
+    cp_dir = checkpoint_dir or (network_dir / "checkpoints")
+    result = TailFillResult(status={})
+
+    def record(status: str, reason: str | None = None, **counts) -> TailFillResult:
+        result.status = datastore_tail.write_tail_status(
+            cp_dir,
+            status=status,
+            reason=reason,
+            window_start=cutoff - timedelta(days=window_days),
+            window_end=cutoff,
+            now=now,
+            **counts,
+        )
+        console.print(
+            f"  datastore_tail: {datastore_tail.describe_tail_status(result.status, now=now)}"
+        )
+        return result
+
+    console.print(f"\n{'=' * 70}")
+    console.print("  Phase 5: DataStore Tail-Fill (archive RPC, fail-soft)")
+    console.print(f"{'=' * 70}")
+
+    try:
+        ds = _load_datastore_script()
+    except Exception as exc:  # noqa: BLE001 - e.g. a missing optional dependency
+        return record("unavailable", f"datastore reader unavailable: {type(exc).__name__}: {exc}")
+    if rpc_config is None:
+        try:
+            rpc_config = ds.get_rpc_config()
+        except ValueError:
+            return record("unavailable", "no archive RPC configured (JSON_RPC_ARBITRUM)")
+
+    rates_dir = network_dir / "rates"
+    frames: dict[str, pl.DataFrame] = {}
+    already: dict[str, set[datetime]] = {}
+    filter_sym = market_symbol_from_filter(market_filter) if market_filter else None
+    if rates_dir.exists():
+        for sym_dir in sorted(rates_dir.iterdir()):
+            canonical = sym_dir / "1h.parquet"
+            if not sym_dir.is_dir() or not canonical.exists():
+                continue
+            if filter_sym and sym_dir.name != filter_sym:
+                continue
+            try:
+                frames[sym_dir.name] = pl.read_parquet(canonical)
+            except Exception as exc:  # noqa: BLE001 - one unreadable file must not stop the rest
+                console.print(f"  [yellow]{sym_dir.name}: unreadable 1h.parquet ({exc})[/yellow]")
+                continue
+            already[sym_dir.name] = _read_hours(sym_dir / "1h_datastore.parquet")
+
+    delisted = load_exempt_symbols([network_dir.parent.parent / "delisted_markets.json"])
+    windows = datastore_tail.compute_tail_windows(
+        frames, cutoff=cutoff, delisted=delisted, already_read=already, window_days=window_days
+    )
+    by_hour: dict[int, list[str]] = {}
+    symbol_of: dict[str, str] = {}
+    for window in windows.values():
+        symbol_of[window.market] = window.symbol
+        for hour in window.hours:
+            by_hour.setdefault(int(hour.timestamp()), []).append(window.market)
+    requested = len(by_hour)
+    console.print(
+        f"  Markets with a window: {len(windows)}; hours to read: {requested}; "
+        f"cutoff {cutoff:%Y-%m-%d %H:%M}Z"
+    )
+    if not windows:
+        return record("ok", hours_requested=0, hours_read=0)
+
+    # No RPC call, retry or backoff may run past the budget (less a reserve to persist and
+    # re-merge what was read): a chunk that cannot finish in time is dropped and read
+    # again next run, never allowed to overrun the step and get the whole extraction killed.
+    deadline = (
+        None
+        if max_minutes is None
+        else ds._monotonic() + max_minutes * 60 - TAIL_PERSIST_RESERVE_SECONDS
+    )
+
+    def persist(batch) -> None:
+        ds.save_parquet(ds.aggregate_hourly_rates(batch), network_dir.parent)
+        result.touched.update(r.symbol for r in batch)
+
+    try:
+        try:
+            outcome = ds.extract_funding_hours(
+                rpc_config,
+                sorted(by_hour),
+                wanted=lambda hour: by_hour[hour],
+                symbol_of=lambda addr: symbol_of[addr.lower()],
+                persist=persist,
+                chunk_hours=chunk_hours,
+                deadline=deadline,
+            )
+        finally:
+            # Whatever was persisted, even by a failed run, belongs in the canonical series.
+            if result.touched:
+                merge_unified_rates(
+                    network_dir, market_filter, output_format, only_symbols=result.touched
+                )
+    except Exception as exc:  # noqa: BLE001 - fail-soft: record it and let the release go on
+        return record(
+            "failed",
+            f"{type(exc).__name__}: {exc}",
+            hours_requested=requested,
+            hours_read=len(result.touched),
+        )
+
+    counts = {"hours_requested": requested, "hours_read": outcome.read}
+    if outcome.stopped == "unavailable":
+        kind = "partial" if outcome.read else "unavailable"
+        return record(kind, outcome.reason, **counts)
+    if outcome.stopped == "deadline":
+        return record("partial", outcome.reason, **counts)
+    return record("ok", **counts)
 
 
 # =============================================================================
@@ -696,22 +1003,37 @@ def export_feather(
     console.print("  Feather Export (FreqTrade format)")
     console.print(f"{'=' * 70}")
 
+    from gmx_historical_data.freqtrade_exporter import FreqtradeExporter
+
     rates_dir = network_dir / "rates"
     if not rates_dir.exists():
         console.print("  [yellow]No rates directory found[/yellow]")
         return
 
-    gmx_dir = feather_dir / "data" / "gmx" / "futures"
+    gmx_dir = feather_dir / "gmx" / "futures"
     gmx_dir.mkdir(parents=True, exist_ok=True)
+
+    # The same exporter that backs ``make export-funding``: one signed hourly
+    # transformation and one guarded merge writer, so the two entry points
+    # cannot drift apart (issue #60).
+    exporter = FreqtradeExporter(network_dir, feather_dir, funding_dir=rates_dir)
 
     symbols: dict[str, Path] = {}
     for d in rates_dir.iterdir():
         if not d.is_dir():
             continue
-        if (d / "1h.feather").exists():
-            symbols[d.name] = d / "1h.feather"
-        elif (d / "1h.parquet").exists():
+        # ``1h.parquet`` is the single authoritative source -- the file
+        # ``export_funding`` reads -- so both entry points agree whatever
+        # stale ``1h.feather`` is lying around. A feather-only lake predates
+        # that convention; read it, but say so.
+        if (d / "1h.parquet").exists():
             symbols[d.name] = d / "1h.parquet"
+        elif (d / "1h.feather").exists():
+            console.print(
+                f"  [yellow]{d.name}: no 1h.parquet, falling back to legacy 1h.feather "
+                "-- re-run the merge to regenerate parquet[/yellow]"
+            )
+            symbols[d.name] = d / "1h.feather"
 
     if market_filter:
         filter_sym = market_symbol_from_filter(market_filter)
@@ -721,43 +1043,37 @@ def export_feather(
     for symbol in sorted(symbols):
         unified_path = symbols[symbol]
         df = (
-            pl.read_ipc(unified_path)
+            pl.read_ipc(unified_path, memory_map=False)
             if unified_path.suffix == ".feather"
             else pl.read_parquet(unified_path)
         )
         if df.is_empty():
             continue
 
-        # open = per-settlement funding rate (per 1h for GMX continuous accrual)
-        #      = funding_rate_per_second × 3600 (same unit as Hyperliquid 1h settlement).
-        rate_expr = (
-            pl.col("funding_rate_hourly")
-            if "funding_rate_hourly" in df.columns
-            else pl.col("funding_rate") * 3600
+        n_before = len(exporter.funding_reconciliations)
+        written = exporter.export_funding_frame(
+            symbol,
+            "1h",
+            df,
+            gmx_dir=gmx_dir,
+            output_format="feather",
+            quote_currency=quote_currency,
         )
-
-        result = (
-            df.select(
-                pl.col("timestamp").cast(pl.Datetime("ns", "UTC")).alias("date"),
-                rate_expr.cast(pl.Float64).alias("open"),
-            )
-            .with_columns(
-                pl.lit(0.0).alias("high"),
-                pl.lit(0.0).alias("low"),
-                pl.lit(0.0).alias("close"),
-                pl.lit(0.0).alias("volume"),
-            )
-            .select(["date", "open", "high", "low", "close", "volume"])
-            .sort("date")
-            .unique(subset=["date"], keep="first", maintain_order=True)
-            .drop_nulls(subset=["open"])
-        )
-
-        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
-        filepath = gmx_dir / filename
-        atomic_write_ipc(result, filepath)
+        for rec in exporter.funding_reconciliations[n_before:]:
+            if not rec.clean:
+                console.print(
+                    f"  [yellow]{symbol:<12}[/yellow] {len(rec.missing_hours)} source hour(s) "
+                    f"missing, {len(rec.null_rate_hours)} null-rate, "
+                    f"{len(rec.unknown_direction_hours)} unknown-direction row(s) excluded"
+                )
+        if not written:
+            continue
         exported += 1
-        console.print(f"  [green]{symbol:<12}[/green] {len(result):>8,} hours -> {filepath}")
+        filename = f"{symbol}_{quote_currency}_{quote_currency}-1h-funding_rate.feather"
+        console.print(
+            f"  [green]{symbol:<12}[/green] {exporter.funding_reconciliations[-1].exported_hours:>8,}"
+            f" source hours -> {gmx_dir / filename}"
+        )
 
     console.print(f"\n  Exported {exported} feather file(s) to {gmx_dir}")
 
@@ -822,6 +1138,12 @@ Examples:
         default=None,
         help="Filter by market symbol (e.g., 'ETH/USD')",
     )
+    parser.add_argument(
+        "--from-block", type=int, default=None, help="Start block for bounded extraction"
+    )
+    parser.add_argument(
+        "--to-block", type=int, default=None, help="End block for bounded extraction"
+    )
 
     # Phase control
     parser.add_argument(
@@ -837,6 +1159,27 @@ Examples:
         "--skip-direction",
         action="store_true",
         help="Skip direction detection phase",
+    )
+    parser.add_argument(
+        "--skip-datastore-tail",
+        action="store_true",
+        help=(
+            "Skip the DataStore tail-fill / gap correction (it runs whenever an archive RPC "
+            "is configured, never fails the run, and records datastore_tail: unavailable "
+            "when the node has no historical state)"
+        ),
+    )
+    parser.add_argument(
+        "--tail-window-days",
+        type=int,
+        default=datastore_tail.TAIL_WINDOW_DAYS,
+        help="Trailing days the DataStore tail-fill reaches (default: 30)",
+    )
+    parser.add_argument(
+        "--tail-max-minutes",
+        type=float,
+        default=TAIL_MAX_MINUTES,
+        help="Time budget of the DataStore tail-fill; partial work is kept (default: 4)",
     )
     parser.add_argument(
         "--merge-only",
@@ -931,6 +1274,8 @@ def main():
         if not args.skip_direction:
             phases.append("Direction (HyperSync)")
     phases.append("Merge")
+    if not args.merge_only and not args.skip_datastore_tail and args.network == "arbitrum":
+        phases.append("DataStore Tail-Fill")
     if args.feather_dir:
         phases.append("Feather Export")
 
@@ -958,15 +1303,28 @@ def main():
     if not args.merge_only:
         run_phase("Phase 2: Funding Factor (HyperSync)", build_factor_cmd(args))
 
-        # Rename 1h.parquet -> 1h_factor.parquet before merge
-        rename_factor_outputs(network_dir)
-
     # Phase 3: Direction (async, HyperSync) - full range
     if not args.skip_direction and not args.merge_only:
         run_phase("Phase 3: Direction (HyperSync)", build_direction_cmd(args))
 
     # Phase 4: Merge all sources into unified rates
     merge_unified_rates(network_dir, args.market, args.output)
+
+    # Phase 5: DataStore tail-fill (fail-soft). Reads what HyperSync cannot see --
+    # the chain state after a quiet market's last event and under carried hours --
+    # then re-merges just the symbols it wrote.
+    if not args.merge_only and not args.skip_datastore_tail and args.network == "arbitrum":
+        elapsed_minutes = (time.monotonic() - t_start) / 60
+        tail_fill_datastore(
+            network_dir,
+            market_filter=args.market,
+            window_days=args.tail_window_days,
+            max_minutes=min(
+                args.tail_max_minutes, max(0.0, TAIL_CEILING_MINUTES - elapsed_minutes)
+            ),
+            checkpoint_dir=cp_dir,
+            output_format=args.output,
+        )
 
     # Phase 5: Feather export (optional)
     if args.feather_dir:

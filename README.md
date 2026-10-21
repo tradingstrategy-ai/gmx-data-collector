@@ -1,12 +1,12 @@
 # GMX Historical Data Collection
 
-Collect historical price data for all 118 GMX V2 tokens with smart incremental updates.
+Collect historical price data for every listed GMX V2 perp market with smart incremental updates.
 
 ## Features
 
 - **Smart Incremental Updates** — Only fetches data you don't have (10-30x faster for daily updates)
 - **Dual Data Sources** — GMX API (recent ~6 months) + Chainlink (historical)
-- **118 GMX V2 Tokens** — 34 Chainlink markets + 84 non-Chainlink markets
+- **GMX V2 Markets** — Chainlink-feed markets plus non-Chainlink markets; the set is whatever GMX lists (see `delisted_markets.json` and the per-release `data_report.txt` for the current counts)
 - **6 Timeframes** — 1min, 5min, 15min, 1h, 4h, 1d
 - **Freqtrade Compatible** — Direct export to Feather format (OHLCV + funding rate + mark price)
 - **Concurrent Collection** — Parallel symbol processing and RPC batch requests
@@ -36,7 +36,7 @@ genesis (hours). Fixed:
 
 ### 2026-04-27 — GitHub Releases migration
 
-Daily data collection moved to **GitHub Releases** in 2026; this remains a historical record of that workflow.
+Daily data collection moved to **GitHub Releases** in 2026; this section records that historical workflow.
 
 **What changed:**
 
@@ -46,19 +46,20 @@ Daily data collection moved to **GitHub Releases** in 2026; this remains a histo
 | Consumer download | `git clone --depth 1 --branch data/daily-collection` | `scripts/download_gmx_data.sh` or `gh release download` |
 | Quickstart (`-q` flag) | `seed_from_branch()` — shallow git clone | `seed_from_release()` — `gh release download` + tar extract |
 | CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
-| Release assets | — | `gmx-full.tar.gz` (~100 MB), `gmx-light.tar.gz` (no futures/), `data_report.txt` |
+| Release assets | — | `gmx-full.tar.gz`, `gmx-light.tar.gz` (no OHLCV; 1h funding only), `gmx-funding-state-<timestamp>.tar.gz`, `data_report.txt` |
 
-**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. Release assets are historical archives only. Current collection runs on `vitalik8` and writes under `/srv/gmx`; see [GMX data collection and storage](#gmx-data-collection-and-storage) and [`deploy/server/README.md`](deploy/server/README.md).
+**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Existing release assets are historical archives. Current collection runs on `vitalik8` under `/srv/gmx`; see [GMX data collection and storage](#gmx-data-collection-and-storage).
 
 ---
 
 ## ⚠️ Data depth: where full history lives, and two residual limits
 
-**Status (2026-06-12, after a full recovery pass.)** All **117 tradeable tokens**
-(`wstETH` excluded — ETH-denominated feed only, not tradeable) have full **1d / 4h**
-history to genesis, and are FreqTrade-readable in **both feather and parquet**
-(`gmx/futures/{PAIR}-{tf}-futures.{feather,parquet}`). Two limitations remain — see
-below.
+**Status.** `wstETH` is excluded (ETH-denominated feed only, not tradeable). The
+**daily release ships feather only** (`gmx/futures/{PAIR}-{tf}-futures.feather`); parquet
+copies (`.parquet`) exist only in locally exported trees (`make export-candles-both`).
+Depth is per timeframe and per source, not "genesis" — see
+[What the daily release contains](#what-the-daily-release-contains). Two limitations
+remain — see below.
 
 > **The Freqtrade feather export is NOT broken.** Its history-preservation merge
 > guard (`FreqtradeExporter._write` → `_assert_history_preserved`) is what kept the
@@ -73,7 +74,7 @@ below.
 | Store | Path | Schema | Role |
 |-------|------|--------|------|
 | Source candles | `candles/arbitrum/{TOKEN}/{tf}.parquet` | `timestamp,…,symbol` | collector output |
-| FreqTrade exports | `gmx/futures/{PAIR}-{tf}-futures.{feather,parquet}` | `date,o,h,l,c,volume` | what FreqTrade reads |
+| FreqTrade exports | `gmx/futures/{PAIR}-{tf}-futures.feather` (`.parquet` too in locally exported trees; the release ships feather only) | `date,o,h,l,c,volume` | what FreqTrade reads |
 
 The **FreqTrade exports are the deepest copy** for non-Chainlink tokens — the source
 candles are *not*. Treat `gmx/futures/` as the source of truth for those.
@@ -84,18 +85,20 @@ The GMX API only serves a shallow rolling window (`limit=10000`, ~7 days of 1m).
 Deep history needs a backfill source:
 
 - **Chainlink-backed tokens** rebuild full history from Chainlink RPC on a
-  `--force` collect (all timeframes, to genesis). This works — verified.
+  `--force` collect of a local tree (all timeframes, to genesis). This works — verified. It does not change what the daily release ships; see [Candle depth](#candle-depth).
 - **Non-Chainlink tokens cannot be rebuilt by the collector.**
   `collect_non_chainlink_markets()` only layers a thin oracle-event pass on top of
   the GMX window (≈10–11k 1m rows), **not** a genesis backfill. Their deep history
   exists **only in the feathers** (captured by an earlier, more complete run).
   So the source `candles/` parquets for these tokens remain shallow by design; the
-  deep data is preserved in `gmx/futures/` (feather + parquet).
+  deep data is preserved in `gmx/futures/` (feather; parquet too in locally exported trees).
 
-### Limit 2 — intraday (1m/5m/15m/1h) truncated for ~47 non-Chainlink tokens
+### Limit 2 — intraday (1m/5m/15m/1h) truncated for many non-Chainlink tokens
 
-For ~47 non-Chainlink pairs (e.g. `ADA, DOT, BCH, TRX, FIL, INJ, XLM, ICP, SUI`),
-**1d / 4h reach 2022 but 1m/5m/15m/1h only start ~2024-11** (their deep daily came
+For a subset of non-Chainlink pairs (e.g. `ADA, DOT, BCH, TRX, FIL, INJ, XLM, ICP, SUI`)
+in the local deep-history trees (as of the 2026-06 recovery pass; the daily release's 1d/4h
+depth is the API contract in [Candle depth](#candle-depth)),
+**1d / 4h reached 2022 but 1m/5m/15m/1h only start ~2024-11** (their deep daily came
 from a coarse CEX backfill that never pulled fine-resolution data). Not yet fixed.
 The only fix is the **CEX gap-fill at fine resolution** (`make fill-gaps-cex`,
 Binance/Bybit have deep 1m) followed by a re-export.
@@ -137,11 +140,11 @@ poetry install
 export JSON_RPC_ARBITRUM="https://arb-mainnet.g.alchemy.com/v2/YOUR_KEY"
 export HYPERSYNC_API_TOKEN="your_token_here"  # Free from https://envio.dev
 
-# Collect full historical data for 34 Chainlink-feed tokens (no HyperSync needed)
-make collect-full ARGS="--chainlink-only"
+# Collect full historical data for the Chainlink-feed tokens (no HyperSync needed)
+make collect-candles ARGS="--chainlink-only"
 
-# Initial collection: all 118 tokens (~4-5 hours)
-make collect-full
+# Initial collection: all tokens (~4-5 hours)
+make full-data
 
 # Daily incremental update (~10-30 minutes for all tokens)
 make collect-update
@@ -152,16 +155,85 @@ All data is written to `./user_data` by default. Override with `DATA_DIR=./my_pa
 ## GMX data collection and storage
 
 Daily market data is collected on `vitalik8` and stored locally under
-`/srv/gmx/user_data/data/gmx/`. The server runs a daily snapshot and a separate
-recent-candle refresh to keep the GMX API's rolling OHLCV window within reach.
-Collection does not fetch prior state from GitHub Releases or publish new data
-as releases. Existing releases and the frozen data branch are historical
-archives only.
+`/srv/gmx/user_data/data/gmx/`. A separate recent-candle refresh keeps the
+GMX API's rolling OHLCV window within reach. Server collection does not fetch
+prior state from GitHub Releases or publish new data as releases. Existing
+releases and the frozen data branch are historical archives only.
 
-The deployment units, continuity checks, seed procedure, logs, and rollback
-steps are documented in [`deploy/server/README.md`](deploy/server/README.md).
-The first server run must use a verified copy of the accumulated dataset,
-including local checkpoints and manifests.
+Deployment units, continuity checks, seed procedure, logs, and rollback steps
+are documented in [`deploy/server/README.md`](deploy/server/README.md). The
+server uses a verified copy of the accumulated dataset, including local
+checkpoints and manifests.
+
+## Historical GMX release archives
+
+Existing release assets remain available for historical consumers. They are
+not the live collection or resume path. To download an archived snapshot:
+
+```bash
+./scripts/download_gmx_data.sh
+./scripts/download_gmx_data.sh --asset light
+./scripts/download_gmx_data.sh --release data-2026-04-27
+```
+
+These commands require an authenticated `gh` CLI. The collector's `-q` release
+seed option is for explicit historical/manual recovery only; the vitalik8
+services do not use it.
+
+## Historical GitHub release contents
+
+Each `data-YYYY-MM-DD` release carries `gmx-full.tar.gz`, `gmx-light.tar.gz` and
+`data_report.txt` (the report is the authority for current symbol counts, per-timeframe
+date ranges and freshness), plus `gmx-funding-state-<YYYYMMDDTHHMMSSZ>.tar.gz` when funding state exists.
+Candles ship as **feather only** — there are no `.parquet` candle files in the release.
+
+| Asset | Contents |
+|---|---|
+| `gmx-full.tar.gz` | Everything under `user_data/data/gmx/` except the raw funding state: `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, `ticks/`, `checkpoints/`, `futures/` (OHLCV `-futures` feathers for 1m/5m/15m/1h/4h/1d, plus `1h` `-funding_rate` and `1h` `-mark` feathers and `_cadence_manifest.json`), `funding_coverage.json` and `delisted_markets.json`. The backtest bundle. |
+| `gmx-light.tar.gz` | `apy/`, `snapshots/`, `tickers/`, `volumes/`, `tick_volume/`, the `futures/*-1h-funding_rate.feather` files and `funding_coverage.json`. **No OHLCV candles and no mark** (mark is derived from the candles). |
+| `gmx-funding-state-<YYYYMMDDTHHMMSSZ>.tar.gz` | Raw funding state the next daily run resumes from. Stamped name, never replaced in place; the newest stamp in the newest release that carries one is restored. Shipped only when funding state exists on the runner. Not a consumer artifact. |
+| `gmx-ticks.tar.gz`, `gmx-ticks.manifest.json` | Trade-tick intake assets; present only when the tick intake publishes them. |
+
+The release notes list a per-asset/timeframe **Coverage** table inside a collapsed
+`<details>` block (one row per candle file).
+
+### Candle depth
+
+Depth is set by what the GMX candles API serves per timeframe, plus whatever earlier
+daily runs accumulated; it is not "genesis" history.
+
+* **1m / 5m / 15m:** the API window plus history accumulated since each file was seeded.
+* **1h:** the API caps a request at **4320 bars** (~180 days), so 1h depth beyond that exists
+  only where earlier runs already stored it.
+* **4h / 1d:** the contract is *API depth*. After a `release-data.yml` dispatch with
+  `repair_ohlcv=true` and `repair_timeframes=1d,4h` (#72), each file reaches as far back as the
+  API serves for that timeframe — for 1d, 2021-10 for the longest-listed majors (BTC, ETH,
+  SOL), shorter for newer markets. Releases cut before that dispatch (e.g. `data-2026-10-18`)
+  still start 1d at 2026-03-08 for most pairs.
+* The newest candle in each candle file is a **closed** bar; in-progress candles are no longer
+  stored (#72). The newest funding hour is provisional: the exporter extends the latest funding
+  event through the hour end, and the next run revises that hour as needed.
+
+### Market-specific caveats
+
+* **Delisted pairs are frozen history.** Markets named in `delisted_markets.json` keep their
+  `futures/` files but stop growing at delisting; a relisted market resumes after one
+  legitimate seam. The cadence gate and the funding staleness grading exempt them.
+* **Thin markets (#59).** Several live markets trade only a handful of fills per day (e.g.
+  OKB, OP, ORDI, 0G, CHZ, LINEA when audited), so ≥90% of their 1h candles legitimately have
+  `volume == 0`. The report grades such pairs `expected (thin market)` and flags
+  `suspicious (source mismatch)` only when the tick-volume sidecar shows volume the candles
+  lack. Open interest is context, not evidence of a collector gap.
+* **`APE` vs `APE_deprecated`.** GMX metadata carries both, so `tickers/`, `snapshots/` and
+  `apy/` have rows for each. `APE_deprecated` is excluded from candle collection
+  (`EXCLUDED_SYMBOLS`); use `APE`.
+* **Un-backfillable days.** `snapshots/`, `tickers/`, `apy/` and `volumes/` are point-in-time
+  reads taken on the run date, so a day on which no run succeeded cannot be reconstructed
+  later. `data_report.txt` lists them under *Missing Days (daily-stamped sources)* (as of
+  `data-2026-10-18`: 8 days for snapshots/tickers/apy, 7 for volumes). Candle gaps are tracked
+  separately in `futures/_cadence_manifest.json`.
+* **`volumes/{date}.parquet`** is a rolling 24h window ending at the ~02:30 UTC run, i.e.
+  mostly the previous UTC day (see [Volume Data](#volume-data)).
 
 ## Installation
 
@@ -182,11 +254,11 @@ All targets write to `./user_data` by default. Configuration variables can be ov
 ### Candle Collection
 
 ```bash
-make collect-full                           # Full historical backfill (all symbols)
-make collect-full SYMBOL=ETH               # Single symbol only
-make collect-full ARGS="--chainlink-only"  # 34 Chainlink markets only (no HyperSync)
-make collect-full CONCURRENCY=15           # Tune parallelism (default: 4)
-make collect-full DATA_DIR=./data          # Override output directory
+make collect-candles                       # Full candle backfill (all symbols)
+make collect-candles SYMBOL=ETH            # Single symbol only
+make collect-candles ARGS="--chainlink-only" # Chainlink-feed markets only (no HyperSync)
+make collect-candles CONCURRENCY=15        # Tune parallelism (default: 5)
+make collect-candles DATA_DIR=./data       # Override output directory
 
 make collect-update                        # Incremental update (only missing data)
 make collect-update SYMBOL=BTC             # Incremental for one symbol
@@ -195,7 +267,7 @@ make collect-update SYMBOL=BTC             # Incremental for one symbol
 ### Combined Updates
 
 ```bash
-make update-gmx-data                       # Candles + funding (recommended for daily runs)
+make refresh-data                          # Candles + funding (recommended for daily runs)
 make extract-all                           # OI + pool liquidity (full history)
 make extract-all-resume                    # OI + pool liquidity (incremental)
 ```
@@ -248,10 +320,10 @@ All `make` targets run under `nice -n 10` by default, giving the OS permission t
 
 ```bash
 # Disable (run at normal priority)
-make collect-full NICE=""
+make collect-candles NICE=""
 
 # Run at even lower priority (background-only)
-make collect-full NICE="nice -n 19"
+make collect-candles NICE="nice -n 19"
 ```
 
 Tip: create a `.env` file — it is auto-loaded by the Makefile:
@@ -267,11 +339,23 @@ CONCURRENCY=8
 | Command | Description |
 |---------|-------------|
 | `collect --full` | Full historical collection |
-| `collect --full --chainlink-only` | Collect only 34 Chainlink-feed markets (no HyperSync needed) |
+| `collect --full --chainlink-only` | Collect only Chainlink-feed markets (no HyperSync needed) |
 | `collect --update` | Incremental update — only fetches new data |
 | `verify` | Verify data quality |
 | `export-freqtrade` | Export OHLCV + funding rate + mark price to Freqtrade feather format |
 | `debug-oracle` | Debug oracle events |
+
+### Host deployment guards
+
+After a host refreshes funding and exports the Freqtrade files, run the read-only lake verifier. It checks the source parquet lake and stages any funding export checks in a system temporary directory:
+
+```sh
+make funding-unified-resume DATA=/srv/gmx
+make export-funding DATA=/srv/gmx
+make verify-lake DATA=/srv/gmx ARGS='--max-checkpoint-age-hours 30 --max-tail-status-age-hours 48'
+```
+
+The age limits default to 6 hours for checkpoints and 36 hours for tail status. A daily job should allow for the elapsed time before its own resume, for example 30 hours for checkpoints; choose the tail-status limit to match the expected tail-fill cadence. The 8h sign check is opt-in with `--check-8h` because the orchestrator normalizer maintains those files. For a shadow rollout, add `--report-only` to `ARGS`; the verifier prints findings but exits successfully. To write a JSON report, pass `--json /var/tmp/gmx-lake-report.json` in `ARGS` (the report path must remain outside the data root).
 
 ### Common Options
 
@@ -279,7 +363,7 @@ CONCURRENCY=8
 |--------|-------------|---------|
 | `--output-dir PATH` | Output directory | `./user_data` |
 | `--symbol TEXT` | Token(s) — comma-separated for `collect`, repeatable for `export-freqtrade` | All tokens |
-| `--chainlink-only` | Only collect 34 Chainlink markets (no HyperSync needed) | Off |
+| `--chainlink-only` | Only collect Chainlink markets (no HyperSync needed) | Off |
 | `--concurrency INT` | Parallelism level | `4` |
 
 ### Concurrency
@@ -295,18 +379,18 @@ CONCURRENCY=8
 
 **Initial collection (`--full`):**
 - Single Chainlink token: ~2-3 minutes
-- All 118 tokens: ~4-5 hours
+- All tokens: ~4-5 hours
 
 **Incremental updates (`--update`):**
 - Single token (daily): ~10-30 seconds
-- All 118 tokens (daily): ~10-30 minutes
+- All tokens (daily): ~10-30 minutes
 
 ## Automated Updates
 
 ```bash
 # Cron job: update daily at 2 AM
 0 2 * * * cd /path/to/gmx_historical_data && \
-  make update-gmx-data >> /var/log/gmx-update.log 2>&1
+  make refresh-data >> /var/log/gmx-update.log 2>&1
 ```
 
 ## Export for Freqtrade
@@ -381,9 +465,9 @@ Contract notes:
   was checked by the run that stamped it.
 - `breaks_total` and `missing_bars_total` are always exact. When `truncated` is `true`
   the `breaks` list is capped at 200 entries (1m series can carry thousands).
-- Only candle (`-futures`) files are covered. `-funding_rate` files are deliberately not
-  cadence-checked: the funding transform drops null rates by design, so holes there are
-  expected.
+- Only candle (`-futures`) files appear in this cadence manifest. Funding holes are checked
+  separately by series coverage: recent holes block release (B3, #76), while older holes can
+  remain when the raw source cannot backfill them.
 - Timestamps are ISO-8601 UTC. `before` is the last bar present before the hole, `after`
   the next one present.
 - A gap listed here is a known upstream outage, not corruption. GMX retains raw data for
@@ -447,7 +531,7 @@ user_data/
 │   │   ├── pool_liquidity_daily.parquet      # Daily pool depth snapshots
 │   │   └── checkpoints/
 │   └── volumes/
-│       └── {YYYY-MM-DD}.parquet              # Daily 24h volume per market
+│       └── {YYYY-MM-DD}.parquet              # Rolling 24h volume per market (see below)
 ├── funding/arbitrum/
 │   ├── raw/
 │   │   ├── funding/{SYMBOL}/partition=0/data.parquet
@@ -455,7 +539,7 @@ user_data/
 │   ├── rates/{SYMBOL}/
 │   │   ├── 1h.feather                        # Unified hourly rates (feather)
 │   │   ├── 1h_factor.parquet                 # HyperSync-only rates (V2.2+)
-│   │   └── 1h_datastore.parquet              # DataStore-only rates (pre-V2.2)
+│   │   └── 1h_datastore.parquet              # DataStore reads: pre-V2.2 backfill + recent tail/gap reads
 │   ├── direction/{SYMBOL}/1h.parquet
 │   └── checkpoints/
 └── borrowing/arbitrum/
@@ -466,9 +550,11 @@ user_data/
 
 ### Data Note: OHLC vs OHLCV
 
-Candle data is **OHLC only** (no per-candle volume). Both data sources — GMX API candlesticks and Chainlink oracle price events — provide price data without trade volume. The "V" in OHLCV would require processing on-chain trade events (PositionIncrease/PositionDecrease) at per-candle granularity, which is not currently implemented.
+Price candles come from GMX API/Chainlink oracle observations. The daily snapshot and explicit tick backfill also decode Arbitrum GMX V2 PositionIncrease/PositionDecrease executions, retain daily `ticks/` tapes and aggregate perp size into candle volume. This volume exists only where execution tape was collected; zero does not prove no trades outside that coverage. `tick_volume/` separates perp executions and swap-side flow. Swap prices are oracle valuations and neither dataset is a CLOB order book.
 
-The daily volume snapshots collected from Subsquid (stored in `data/gmx/volumes/`) are **aggregate 24h trading volume per market**, useful for market filtering and reporting but not for per-candle volume.
+Daily releases add `gmx-ticks.tar.gz` and `gmx-ticks.manifest.json` with SHA256 hashes, schemas, actual tape ranges and explicit unknown history/finality/decode coverage. Same-date reruns preserve published full/light assets and append immutable tick revisions (`.r1`, `.r2`, …); consult the matching tick manifest rather than assuming all assets share the same collection instant. See [tick intake and deployment](docs/tick-intake.md) for staged `/srv/gmx` intake and legacy-full fallback.
+
+The daily volume snapshots collected from Subsquid (stored in `data/gmx/volumes/`) are **aggregate 24h trading volume per market**, useful for market filtering and reporting but not for per-candle volume. The file dated `D` is Subsquid's *rolling* 24h window ending at the ~02:30 UTC run that wrote it, so it covers mostly UTC day `D-1`, not calendar day `D`.
 
 ### Volume Data
 
@@ -532,6 +618,117 @@ The DataStore phase uses fully-batched JSON-RPC — all network I/O completes be
 0 2 * * * cd /path/to/gmx_historical_data && \
   make funding-unified-resume >> logs/unified_funding.log 2>&1
 ```
+
+### Funding and mark in the daily release
+
+The daily `data-YYYY-MM-DD` release ships hourly `futures/{PAIR}-1h-funding_rate.feather`
+and `futures/{PAIR}-1h-mark.feather` (#56). Which bundle carries what is in
+[What the daily release contains](#what-the-daily-release-contains); the freqtrade settings
+and the exported-value semantics are in [Funding data contract](#funding-data-contract).
+
+How it runs (`release-data.yml`): restore the newest stamped state asset (from the newest retained release that has one), `extract_unified_funding.py
+--resume` (HyperSync, then the DataStore tail-fill below), export through the shared signed exporter into a **staging
+directory**, grade every pair (`gmx_historical_data.series_coverage`), and copy the
+staged files over `futures/` only if the gate passes. If it does not, `futures/` keeps
+the previous release's companions unchanged, `funding_coverage.json` says `WITHHELD`
+with the last good bar per pair, the release notes say funding was **not refreshed**, and
+the job ends red -- the rest of the release still publishes. The first-ever run with
+nothing previous ships no companions.
+
+* **Coverage record.** `funding_coverage.json` (also in the release notes and
+  `data_report.txt`) lists every `LAGGING` (>6h) and `STALE` (>48h) market with its last
+  bar and age, plus `datastore_tail` (below) and the hours per source for every pair.
+  Tails are never forward-filled; a tail the DataStore could not extend is reported, not
+  blocking (`--stale-tail-blocks` flips that).
+* **DataStore tail-fill (#64).** HyperSync only sees a market when it emits a `Funding`
+  event, so a quiet market's series used to stop at its last event and its silent hours were
+  carried forward (up to 13% off chain state). After the HyperSync phases
+  `extract_unified_funding.py` reads `savedFundingFactorPerSecond` from the DataStore at the
+  first block of each hour, for (a) every hour from each market's last canonical bar + 1h up
+  to the cutoff (`floor(now) - 1h`) and (b) every carried (`is_gap_filled`) hour, both within
+  the trailing 30 days, and writes them signed to `rates/<SYM>/1h_datastore.parquet`
+  (`source="datastore"`, `is_gap_filled=False`). One batch call reads every market at a block,
+  so a day of window is about 24 calls. Delisted markets (`delisted_markets.json`) are not
+  extended, and a market with no code at a block (not created yet) yields no row. It needs an
+  **archive** RPC (`JSON_RPC_ARBITRUM` in CI is one; the public arb1 RPC is not) and is
+  **fail-soft**: if the node says "historical state ... not available" / "missing trie node",
+  or no RPC is set, the run records `datastore_tail: unavailable (<reason>)` in
+  `funding_coverage.json` and the report, the stale tails stay flagged as before and the
+  release continues. No RPC call, retry or backoff sleep runs past the time budget (4 min, never beyond 11 min
+  into the extraction); the chunk in flight is dropped and read next run. A partial window
+  (time budget, node error) is persisted chunk by chunk
+  and the next run continues from what is on disk. Opt out with `--skip-datastore-tail`.
+* **History before 2025-08-19 (#47).** Dispatch `funding-catchup.yml` with
+  `datastore_backfill` to read every market hourly from GMX V2 genesis to the funding epoch
+  (2025-08-19 12:00Z) into `1h_datastore.parquet`, then merge it into the canonical `1h`
+  series. It runs after the HyperSync catch-up inside the same 330-minute budget, persists a
+  chunk and then writes a versioned checkpoint (`funding_datastore_backfill_checkpoint.json`) of the
+  hour ranges covered (so widening a bounded `--from-time` run to genesis reads the earlier prefix),
+  stops itself 35 minutes before the job cap, and goes red while hours remain; repeated
+  dispatches continue from the checkpoint. It needs an archive RPC.
+* **One-off rollout.** After merging, dispatch `release-data.yml` once with
+  `seed_funding_from=data/full-history`. It copies the branch's raw funding sources,
+  derives the checkpoints the branch never stored, catches up to now (step timeout 30
+  min) and publishes the state asset. It never replaces an existing state. Without a
+  seed every run withholds the companions.
+* **Catch-up.** When the daily 15-minute extraction cannot close a long gap (HyperSync
+  throttling), dispatch `funding-catchup.yml`: the same `--resume` extraction for up to
+  330 minutes, then the advanced state is uploaded as a new stamped asset to the release
+  it was restored from (even after a timeout). It shares the `gmx-funding-state`
+  concurrency group with `release-data.yml`, leaves the bundles and notes alone, and its
+  step summary says whether head was reached. Re-dispatch until it is; the next daily
+  release then exports and gates as usual.
+
+### Funding data contract
+
+What a freqtrade backtest reads from `futures/{PAIR}-1h-funding_rate.feather` (#57):
+
+* **Value:** the rate is in the `open` column (other OHLCV columns are 0), as an **hourly
+  fraction of position notional** (`0.0001` = 0.01% per hour), not annualised and not
+  per-second.
+* **Sources and precedence.** Each hour of the canonical `rates/<SYM>/1h.parquet` has one
+  row, with `source` and `is_gap_filled`: an **event-derived HyperSync hour** (full-hour TWAP)
+  wins over a **DataStore read** (`source="datastore"`, chain state at the hour boundary),
+  which wins over a **carried gap fill** (`source="hypersync"`, `is_gap_filled=True`). DataStore
+  rows extend tails and replace carried hours; provenance stays distinct. Rows are never
+  invented: a pre-creation hour, a delisted market or an unreadable hour is simply absent.
+  `funding_coverage.json` carries `datastore_tail` and, per pair, `source_hours`
+  (`hypersync` / `datastore` / `gap_filled` hour counts). The tail age is that of the last bar
+  whatever its source, so a DataStore-extended tail is `CURRENT`.
+* **Sign:** positive = **longs pay shorts**, negative = shorts pay longs (the Freqtrade
+  convention, #53). Only unsigned positive magnitudes with unknown direction are excluded rather than
+  exported positive; zero, already-negative and DataStore (signed) rows pass through
+  (`FreqtradeExporter._transform_funding_rate`).
+* **`{PAIR}-1h_datastore-funding_rate.feather` (#47).** The DataStore series is exported as
+  its own variant, from `rates/<SYM>/1h_datastore.parquet`, with the signed on-chain values
+  as read (no placeholders), through the same guarded merge and reconciliation, and graded
+  by the gate (`B8`: export failure, unreadable file, non-finite or unreconciled hour). It
+  ships in `gmx-full` and `gmx-light`. It holds only the hours read from the DataStore (the
+  pre-2025-08-19 backfill plus the recent tail/gap reads), so it is **not contiguous** across
+  2025-08 to ~30 days ago -- use the canonical `1h` file for a complete series. It is absent
+  for symbols with no DataStore source (no zero placeholders), and no longer reported as a
+  retired variant.
+* **Paying side only, symmetric approximation.** The exported number is the *paying* side's
+  rate, and Freqtrade applies that one signed rate to both sides (a short receives what a long
+  pays). GMX actually pays the receiving side `payer_rate × OI_payer / OI_receiver`, so for the
+  receiving side the export is an approximation that is wrong whenever long and short open
+  interest are imbalanced.
+* **Borrowing fees are not included** anywhere in the export; they are a separate cost GMX
+  charges on top of funding (`scripts/extract_borrowing_factor.py` is a standalone tool).
+  `funding_rate + borrowing_rate` is therefore not what the backtest charges.
+* **Freqtrade settings:** set `funding_fee_timeframe` and `mark_ohlcv_timeframe` to `1h`
+  (the default `8h` has no file). Canonical `1h` history starts 2025-08-19; earlier
+  hours are in the `1h_datastore` variant once the backfill has run.
+* **Daily-snapshot API fields differ.** `snapshots/{date}.parquet` columns
+  `funding_rate_long/short`, `borrowing_rate_long/short` and `net_rate_long/short` are
+  GMX's live per-side values at snapshot time, stored as the API returns them: raw strings in
+  1e30 fixed point, **annualised** (÷1e30 for the annual fraction, ÷8766 for an hourly one).
+  They are a point-in-time sample, not an hourly series, and are not what the feather exports.
+
+**Future work (not implemented):** exact per-side funding (receiver rate) and borrowing costs
+would need side-aware historical schema, extraction and downstream Freqtrade support; a single
+signed rate cannot represent two positive borrowing costs. Until then treat funding backtests
+as an approximation.
 
 ## Borrowing Rate Extraction
 
