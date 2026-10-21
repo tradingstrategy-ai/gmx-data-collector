@@ -453,7 +453,6 @@ def test_collect_step_writes_the_prune_report_outside_the_packaged_tree(tmp_path
     assert report in _step("Validate candle history integrity")["run"]
 
 
-
 def test_no_github_workflow_can_collect_or_publish_gmx_data() -> None:
     import yaml
 

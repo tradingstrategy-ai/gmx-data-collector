@@ -35,9 +35,7 @@ def audit_recent_candles(
         if frame.is_empty():
             continue
         ordered = frame.sort("date")
-        recent = ordered.filter(
-            pl.col("date").is_between(window_start, window_end, closed="both")
-        )
+        recent = ordered.filter(pl.col("date").is_between(window_start, window_end, closed="both"))
         before = ordered.filter(pl.col("date") < window_start).tail(1)
         after = ordered.filter(pl.col("date") > window_end).head(1)
         recent = pl.concat([before, recent, after]).unique().sort("date")

@@ -87,7 +87,9 @@ def main() -> int:
         }
         for gap in gaps
     ]
-    print(f"Saved/merged {saved} OHLCV files; {len(failures)} failed pairs; {len(gaps)} recent gaps")
+    print(
+        f"Saved/merged {saved} OHLCV files; {len(failures)} failed pairs; {len(gaps)} recent gaps"
+    )
     if failures or gaps:
         incident = _write_incident(args.incident_dir, failures=failures, gaps=gap_records)
         print(f"Unresolved candle continuity issue recorded: {incident}", file=sys.stderr)
