@@ -1,0 +1,17 @@
+[Unit]
+Description=GMX recent candle collection and continuity audit
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=avik
+Group=data
+WorkingDirectory=/srv/gmx/repo
+EnvironmentFile=-/srv/gmx/collector.env
+ExecStart=/usr/bin/flock -n /srv/gmx/collection.lock /srv/gmx/repo/deploy/server/gmx-ohlcv-collection.sh
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/srv/gmx

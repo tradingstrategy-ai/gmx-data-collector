@@ -258,3 +258,19 @@ def test_collect_step_has_the_credentials_the_tick_phase_needs() -> None:
 
     assert "HYPERSYNC_API_TOKEN" in collect["env"]
     assert "JSON_RPC_ARBITRUM" in collect["env"]
+
+
+def test_no_github_workflow_can_collect_or_publish_gmx_data() -> None:
+    import yaml
+
+    paths = [
+        Path(".github/workflows/release-data.yml"),
+        Path(".github/workflows/collect-gmx-data.yml"),
+        Path(".github/workflows/collect-volume.yml"),
+        Path(".github/workflows/collect-full-history.yml"),
+    ]
+    for path in paths:
+        workflow = yaml.safe_load(path.read_text())
+        assert "schedule" not in workflow[True]
+        assert workflow["jobs"]
+        assert all(job.get("if") == "${{ false }}" for job in workflow["jobs"].values())

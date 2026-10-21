@@ -36,7 +36,7 @@ genesis (hours). Fixed:
 
 ### 2026-04-27 — GitHub Releases migration
 
-Daily data collection now ships as **GitHub Releases** instead of the `data/daily-collection` git branch.
+Daily data collection moved to **GitHub Releases** in 2026; this remains a historical record of that workflow.
 
 **What changed:**
 
@@ -48,7 +48,7 @@ Daily data collection now ships as **GitHub Releases** instead of the `data/dail
 | CI workflows | `collect-gmx-data.yml` + `collect-volume.yml` (two separate scheduled jobs) | `release-data.yml` (single job, 02:00 UTC) |
 | Release assets | — | `gmx-full.tar.gz` (~100 MB), `gmx-light.tar.gz` (no futures/), `data_report.txt` |
 
-**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. New consumers should use the Releases path (see [Downloading GMX historical data](#downloading-gmx-historical-data) below).
+**`data/daily-collection` branch** is frozen as of 2026-04-27 — no further updates. Historical data remains accessible for existing consumers. Release assets are historical archives only. Current collection runs on `vitalik8` and writes under `/srv/gmx`; see [GMX data collection and storage](#gmx-data-collection-and-storage) and [`deploy/server/README.md`](deploy/server/README.md).
 
 ---
 
@@ -149,43 +149,19 @@ make collect-update
 
 All data is written to `./user_data` by default. Override with `DATA_DIR=./my_path`.
 
-## Downloading GMX historical data
+## GMX data collection and storage
 
-Daily snapshots are published as **GitHub Releases**. Use the helper script:
+Daily market data is collected on `vitalik8` and stored locally under
+`/srv/gmx/user_data/data/gmx/`. The server runs a daily snapshot and a separate
+recent-candle refresh to keep the GMX API's rolling OHLCV window within reach.
+Collection does not fetch prior state from GitHub Releases or publish new data
+as releases. Existing releases and the frozen data branch are historical
+archives only.
 
-```bash
-# Latest, full snapshot (apy, snapshots, tickers, volumes, futures feathers)
-./scripts/download_gmx_data.sh
-
-# Latest, light snapshot (skip futures/ feathers — faster download)
-./scripts/download_gmx_data.sh --asset light
-
-# Specific historical release
-./scripts/download_gmx_data.sh --release data-2026-04-27
-```
-
-Requires `gh` CLI authenticated (`gh auth login`). Releases are kept for 14 days.
-
-> **Note (2026-04-27):** The previous `data/daily-collection` branch is deprecated.
-> It will not receive further updates. New consumers should use the Releases path above.
-
-### Quickstart from a release
-
-If you want to skip waiting for the first full collection, the `-q` flag on
-`collect_daily_snapshot.py` seeds `user_data/` from the latest GitHub Release,
-then runs today's snapshot on top:
-
-```bash
-# Seed + collect today in one shot
-poetry run python scripts/collect_daily_snapshot.py -q
-
-# Only seed, don't collect today
-poetry run python scripts/collect_daily_snapshot.py -q --seed-only
-```
-
-The seed is merge-only — existing local files are never overwritten, only
-missing ones are copied, so `-q` is safe to re-run and easy to undo
-(`rm -rf user_data/`).
+The deployment units, continuity checks, seed procedure, logs, and rollback
+steps are documented in [`deploy/server/README.md`](deploy/server/README.md).
+The first server run must use a verified copy of the accumulated dataset,
+including local checkpoints and manifests.
 
 ## Installation
 
