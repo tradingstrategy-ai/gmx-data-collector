@@ -1,16 +1,7 @@
-"""Write traded volume onto the candle feathers, and track how far we have read.
+"""Retain trade tapes/aggregates separately from zero-volume oracle candles.
 
-Volume is derived from on-chain fills (see
-:mod:`gmx_historical_data.gmx_trade_ticks`) by both the daily snapshot and
-the historical backfill, so the write path, the per-UTC-day tick tape and the
-checkpoint bookkeeping all live here rather than in either script. Both
-callers must file a fill under the same day and compute a bar the same way,
-and the only way to guarantee that is a single implementation.
-
-The feather schema is locked to
-:data:`~gmx_historical_data.ohlcv_validation.EXPORT_COLUMNS` because
-Freqtrade reads those six columns positionally. USD notional therefore never
-enters the feather -- it goes to the ``tick_volume/`` sidecar instead.
+The API has no candle volume. Legacy overlay entry points now enforce literal
+zero in candle exports; actual token/USD traded amounts remain in tick_volume.
 """
 
 from __future__ import annotations
@@ -36,44 +27,20 @@ logger = logging.getLogger(__name__)
 #: Timeframes that have candle files, in filename form.
 CANDLE_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "1d"]
 
-# Which on-chain flows count toward a candle's ``volume``.
-#
-# Perp fills only. A candle for BTC describes the BTC perpetual, so its
-# volume is the perp size traded on BTC markets (``PositionIncrease`` +
-# ``PositionDecrease``) -- what GMX itself reports as ``marginVolumeUsd``.
-# GM-pool swaps are collateral movement rather than perp trading, so folding
-# them in would inflate the number a strategy reads as perp liquidity.
-#
-# Swap fills are still decoded and stored in the tick tape and broken out in
-# the sidecar, so switching to ``(PERP_KIND, SWAP_KIND)`` changes the
-# published definition without needing a re-collection.
+# Legacy flow-filter name retained for existing callers. Oracle candle volume
+# is always zero; decoded perp/swap volumes remain in separate sidecars.
 CANDLE_VOLUME_KINDS: tuple[str, ...] = (PERP_KIND,)
 
 
 def restore_cleared_volume(combined: pd.DataFrame, existing: pd.DataFrame) -> pd.DataFrame:
-    """Put back any non-zero volume that a merge replaced with a zero.
+    """Enforce zero oracle-candle volume at the legacy merge boundary.
 
-    :param combined: Merged frame after ``drop_duplicates(keep='last')``.
-    :param existing: Frame as it was on disk before the merge.
-    :returns: ``combined`` with previously-known volume restored.
+    :param combined: Merged candle frame.
+    :param existing: Prior frame, retained for caller compatibility.
+    :returns: Frame with literal zero candle volume.
     """
-    if "volume" not in combined.columns or "volume" not in existing.columns:
-        return combined
-
-    prior = (
-        existing.dropna(subset=["date"])
-        .drop_duplicates(subset=["date"], keep="last")
-        .set_index("date")["volume"]
-    )
-    if prior.empty:
-        return combined
-
-    cleared = combined["volume"].fillna(0) == 0
-    if not cleared.any():
-        return combined
-
-    recovered = combined.loc[cleared, "date"].map(prior)
-    combined.loc[cleared, "volume"] = recovered.fillna(0.0).to_numpy()
+    if "volume" in combined.columns:
+        combined = combined.assign(volume=0.0)
     return combined
 
 
@@ -82,11 +49,11 @@ def apply_volume_to_candles(
     futures_dir: Path,
     timeframe: str,
 ) -> int:
-    """Write per-symbol traded volume onto the bars of one timeframe.
+    """Clear candle volume for symbols covered by the separate trade-volume input.
 
-    Only the ``volume`` column is touched -- OHLC values and every bar
-    without a matching volume row are left exactly as they were, so this is
-    safe to re-run.
+    The legacy function name is retained for existing collector callers.
+    Oracle candle volume is always zero; traded amounts stay in the sidecar.
+    OHLC and candle timestamps are preserved.
 
     :param volume_df: Frame from
         :func:`~gmx_historical_data.gmx_trade_ticks.aggregate_tick_volume`,
@@ -119,7 +86,7 @@ def apply_volume_to_candles(
         if matched.notna().sum() == 0:
             continue
 
-        candles["volume"] = matched.fillna(candles["volume"]).astype(float)
+        candles["volume"] = 0.0
         atomic_write_ipc_pandas(candles, filepath, compression="zstd", compression_level=3)
         updated += 1
 
@@ -207,13 +174,12 @@ def apply_volume_from_tapes(
     dates: Sequence[str] | None = None,
     volume_kinds: Sequence[str] = CANDLE_VOLUME_KINDS,
 ) -> int:
-    """Recompute volume for whole UTC days and write it onto the candles.
+    """Recompute separate trade-volume sidecars and clear touched candle volume.
 
     Always aggregates a day from its *complete* tape, never from the slice a
-    single scan happened to see. Writing a partial sum would be wrong twice
-    over: :func:`apply_volume_to_candles` replaces a bar rather than adding to
-    it, so the last run of a day would win, and the 02:00 UTC cron's window
-    straddles midnight, so a bar is routinely filled by two different runs.
+    single scan happened to see. A scan can straddle midnight and two runs can
+    contribute fills to the same UTC day. The sidecar therefore replaces its
+    daily aggregate from the deduplicated tape; candle volume stays zero.
 
     Re-running is safe: the tape is deduplicated and the bar is recomputed
     from scratch, so a repeated scan cannot inflate a day.
@@ -223,7 +189,7 @@ def apply_volume_from_tapes(
     :param futures_dir: Directory of candle feathers to update.
     :param timeframes: Candle timeframes to fill.
     :param dates: ISO dates to process; ``None`` processes every tape on disk.
-    :param volume_kinds: Which tick kinds count toward candle ``volume``.
+    :param volume_kinds: Legacy flow selection for identifying touched candle symbols; their volume stays zero.
     :returns: Number of candle files written.
     """
     ticks_dir = Path(ticks_dir)

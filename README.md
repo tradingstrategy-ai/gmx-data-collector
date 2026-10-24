@@ -219,11 +219,10 @@ daily runs accumulated; it is not "genesis" history.
 * **Delisted pairs are frozen history.** Markets named in `delisted_markets.json` keep their
   `futures/` files but stop growing at delisting; a relisted market resumes after one
   legitimate seam. The cadence gate and the funding staleness grading exempt them.
-* **Thin markets (#59).** Several live markets trade only a handful of fills per day (e.g.
-  OKB, OP, ORDI, 0G, CHZ, LINEA when audited), so ≥90% of their 1h candles legitimately have
-  `volume == 0`. The report grades such pairs `expected (thin market)` and flags
-  `suspicious (source mismatch)` only when the tick-volume sidecar shows volume the candles
-  lack. Open interest is context, not evidence of a collector gap.
+* **Oracle candle volume is always zero.** GMX's price API supplies no candle
+  volume. The candle field is literal `0.0` for active and thin markets alike.
+  Onchain traded amounts remain in the separate `ticks/` and `tick_volume/`
+  datasets; their coverage does not alter the candle field.
 * **`APE` vs `APE_deprecated`.** GMX metadata carries both, so `tickers/`, `snapshots/` and
   `apy/` have rows for each. `APE_deprecated` is excluded from candle collection
   (`EXCLUDED_SYMBOLS`); use `APE`.
@@ -550,7 +549,24 @@ user_data/
 
 ### Data Note: OHLC vs OHLCV
 
-Price candles come from GMX API/Chainlink oracle observations. The daily snapshot and explicit tick backfill also decode Arbitrum GMX V2 PositionIncrease/PositionDecrease executions, retain daily `ticks/` tapes and aggregate perp size into candle volume. This volume exists only where execution tape was collected; zero does not prove no trades outside that coverage. `tick_volume/` separates perp executions and swap-side flow. Swap prices are oracle valuations and neither dataset is a CLOB order book.
+Price candles come from GMX API/Chainlink oracle observations and always carry
+`volume = 0.0`. The daily snapshot and tick backfill retain actual executions in
+`ticks/` and their aggregates in `tick_volume/`; those amounts are never overlaid
+onto oracle candles. Candle volume does not describe trading activity.
+
+The native collector wrappers run a zero-volume audit after collection. For an
+explicit repair of legacy exports, use the following under the collector lock:
+
+```sh
+PYTHONPATH=src .venv/bin/python -m gmx_historical_data.zero_candle_volume \
+  --futures-dir /srv/gmx/futures --backup-dir /srv/gmx/volume-backups/unique-run
+```
+
+The backup retains each original timestamp/volume column, its checksum and source
+file checksum before mutation. The repair verifies that every other column and row
+is unchanged and that restoring the saved volume reconstructs the original logical
+frame. Omitting `--backup-dir` is read-only and fails if nonzero or null volume exists.
+
 
 Daily releases add `gmx-ticks.tar.gz` and `gmx-ticks.manifest.json` with SHA256 hashes, schemas, actual tape ranges and explicit unknown history/finality/decode coverage. Same-date reruns preserve published full/light assets and append immutable tick revisions (`.r1`, `.r2`, …); consult the matching tick manifest rather than assuming all assets share the same collection instant. See [tick intake and deployment](docs/tick-intake.md) for staged `/srv/gmx` intake and legacy-full fallback.
 

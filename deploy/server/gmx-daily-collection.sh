@@ -12,4 +12,6 @@ if [[ -r "$ROOT/collector.env" ]]; then
     source "$ROOT/collector.env"
     set +a
 fi
-exec "$ROOT/venv/bin/python" scripts/collect_daily_snapshot.py --output-dir "$ROOT/user_data"
+"$ROOT/venv/bin/python" scripts/collect_daily_snapshot.py --output-dir "$ROOT/user_data"
+
+"$ROOT/venv/bin/python" -m gmx_historical_data.zero_candle_volume --futures-dir "$ROOT/futures"

@@ -345,48 +345,15 @@ def _classify_export_failure(symbol: str, timeframe: str, exc: Exception) -> Exp
 
 
 def _restore_cleared_volume(merged: pl.DataFrame, existing: pl.DataFrame) -> pl.DataFrame:
-    """Put back any non-zero ``volume`` the merge replaced with a zero.
+    """Enforce zero oracle-candle volume after merging an existing export.
 
-    ``_transform_dataframe`` always emits ``volume=0`` -- GMX's oracle
-    candles carry no volume of their own. Exporting on top of a
-    ``--output-dir`` that already has real collected volume (the daily
-    snapshot and backfill write the exact same ``futures/*.feather`` files
-    this exporter does, per the README) would silently zero it out on every
-    matching date, since ``unique(keep="last")`` prefers the freshly
-    exported row. Mirrors
-    :func:`~gmx_historical_data.candle_volume.restore_cleared_volume`
-    (pandas) for this file's Polars pipeline.
-
-    A no-op for funding-rate exports: their ``volume`` column is always 0
-    by design (:meth:`FreqtradeExporter._transform_funding_rate`), so
-    ``existing`` never has anything non-zero to restore.
-
-    :param merged: Frame after ``concat().unique(keep="last")``.
-    :param existing: Frame as it was on disk before the merge.
-    :returns: ``merged`` with previously-known volume restored where the
-        merge cleared it.
+    :param merged: Merged candle frame.
+    :param existing: Prior frame, retained for caller compatibility.
+    :returns: Frame with zero volume and unchanged price/timestamp columns.
     """
-    if "volume" not in merged.columns or "volume" not in existing.columns:
+    if "volume" not in merged.columns:
         return merged
-
-    prior = (
-        existing.select(["date", "volume"])
-        .filter(pl.col("volume").fill_null(0) != 0)
-        .unique(subset=["date"], keep="last")
-    )
-    if prior.is_empty():
-        return merged
-
-    return (
-        merged.join(prior, on="date", how="left", suffix="_prior")
-        .with_columns(
-            pl.when(pl.col("volume").fill_null(0) == 0)
-            .then(pl.col("volume_prior").fill_null(0.0))
-            .otherwise(pl.col("volume"))
-            .alias("volume")
-        )
-        .select(merged.columns)
-    )
+    return merged.with_columns(pl.lit(0.0).alias("volume"))
 
 
 class FreqtradeExporter:

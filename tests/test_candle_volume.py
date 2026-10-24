@@ -1,11 +1,4 @@
-"""Tests for writing real traded volume into the candle feathers.
-
-The daily OHLCV fetch builds its rows with ``volume=0.0`` because the oracle
-candle API carries no size. ``_merge_feather`` resolves overlapping dates
-with ``keep="last"``, so without care the next day's re-fetch of an
-overlapping window silently wipes volume that a previous run computed --
-the bug this suite exists to prevent.
-"""
+"""Oracle candle volume stays zero while separate trade-volume data is retained."""
 
 import pandas as pd
 import pyarrow.feather as feather
@@ -28,8 +21,8 @@ def _write_candles(path, dates, volumes=None):
     return frame
 
 
-class TestMergePreservesVolume:
-    def test_zero_volume_refetch_does_not_wipe_real_volume(self, tmp_path):
+class TestMergeEnforcesZeroVolume:
+    def test_refetch_clears_legacy_candle_volume(self, tmp_path):
         """The exact daily-cron sequence: volume gets computed, then the next
         run re-fetches the same bars from an API that reports no volume."""
         from scripts.collect_daily_snapshot import _merge_feather
@@ -52,11 +45,10 @@ class TestMergePreservesVolume:
         _merge_feather(refetched, path)
 
         result = pd.read_feather(path)
-        assert result["volume"].tolist() == [12.5, 8.25]
+        assert result["volume"].tolist() == [0.0, 0.0]
 
-    def test_real_volume_still_overwrites_older_real_volume(self, tmp_path):
-        """A later run with actual size must win -- preservation only guards
-        against zeros, it does not freeze the column."""
+    def test_nonzero_incoming_volume_is_cleared(self, tmp_path):
+        """Neither existing nor incoming traded size may enter oracle candles."""
         from scripts.collect_daily_snapshot import _merge_feather
 
         path = tmp_path / "BTC_USDC_USDC-1h-futures.feather"
@@ -74,10 +66,10 @@ class TestMergePreservesVolume:
         )
         _merge_feather(updated, path)
 
-        assert pd.read_feather(path)["volume"].tolist() == [99.0]
+        assert pd.read_feather(path)["volume"].tolist() == [0.0]
 
     def test_ohlc_is_still_refreshed_by_the_merge(self, tmp_path):
-        """Preserving volume must not accidentally freeze the price columns."""
+        """Zero-volume normalisation must still refresh price columns."""
         from scripts.collect_daily_snapshot import _merge_feather
 
         path = tmp_path / "BTC_USDC_USDC-1h-futures.feather"
@@ -97,7 +89,7 @@ class TestMergePreservesVolume:
 
         result = pd.read_feather(path)
         assert result["close"].tolist() == [200.5]
-        assert result["volume"].tolist() == [12.5]
+        assert result["volume"].tolist() == [0.0]
 
 
 class TestApplyVolumeToCandles:
@@ -124,7 +116,7 @@ class TestApplyVolumeToCandles:
         updated = apply_volume_to_candles(volume, tmp_path, timeframe="1h")
 
         result = pd.read_feather(path)
-        assert result["volume"].tolist() == [5.0, 0.0, 7.0]
+        assert result["volume"].tolist() == [0.0, 0.0, 0.0]
         assert result["close"].tolist() == [100.5, 100.5, 100.5]
         assert updated == 1
 

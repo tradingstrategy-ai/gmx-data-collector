@@ -675,7 +675,7 @@ def _ohlcv_frame(dates: list[str], volumes: list[float]) -> pl.DataFrame:
     )
 
 
-class TestRestoreClearedVolume:
+class TestZeroVolumeExportMerge:
     """``_transform_dataframe`` always emits ``volume=0`` (GMX's oracle
     candles carry no volume). Exporting on top of a directory the daily
     collector already wrote real volume into -- the README documents
@@ -683,7 +683,7 @@ class TestRestoreClearedVolume:
     collector fills -- must not silently zero it out.
     """
 
-    def test_zeroed_incoming_volume_is_restored_from_existing(self):
+    def test_legacy_volume_is_cleared_from_existing_export(self):
         from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
 
         existing = _ohlcv_frame(["2026-09-10T00:00", "2026-09-10T01:00"], [12.5, 8.25])
@@ -692,11 +692,10 @@ class TestRestoreClearedVolume:
 
         result = _restore_cleared_volume(merged, existing)
 
-        assert result["volume"].to_list() == [12.5, 8.25]
+        assert result["volume"].to_list() == [0.0, 0.0]
 
-    def test_real_incoming_volume_still_wins(self):
-        """Restoration only guards against zeros -- a later run with real
-        size must not be frozen at the old value."""
+    def test_nonzero_incoming_volume_is_cleared(self):
+        """Incoming traded size must not alter the zero candle-volume contract."""
         from gmx_historical_data.freqtrade_exporter import _restore_cleared_volume
 
         existing = _ohlcv_frame(["2026-09-10T00:00"], [12.5])
@@ -704,7 +703,7 @@ class TestRestoreClearedVolume:
 
         result = _restore_cleared_volume(merged, existing)
 
-        assert result["volume"].to_list() == [99.0]
+        assert result["volume"].to_list() == [0.0]
 
     def test_noop_when_existing_volume_was_already_zero(self):
         """A funding-rate export's ``volume`` column is always 0 by design
@@ -728,11 +727,10 @@ class TestRestoreClearedVolume:
 
         result = _restore_cleared_volume(merged, existing)
 
-        assert result["volume"].to_list() == [12.5, 0.0]
+        assert result["volume"].to_list() == [0.0, 0.0]
 
-    def test_export_merge_preserves_real_volume_end_to_end(self, tmp_path: Path):
-        """The actual bug: exporting on top of a directory the daily
-        collector already wrote volume into must not zero it out."""
+    def test_export_merge_enforces_zero_volume_end_to_end(self, tmp_path: Path):
+        """A full export clears legacy nonzero candle volume without losing rows."""
         data_dir = tmp_path / "data"
         storage = ParquetStorage(data_dir)
         storage.save_candles(_gapped_candles("BTC", [0, 1]), "1h", "BTC")
@@ -747,4 +745,4 @@ class TestRestoreClearedVolume:
 
         exporter.export_candles(symbols=["BTC"], timeframes=["1h"])
 
-        assert pl.read_ipc(path)["volume"].to_list() == [42.0, 42.0]
+        assert pl.read_ipc(path)["volume"].to_list() == [0.0, 0.0]

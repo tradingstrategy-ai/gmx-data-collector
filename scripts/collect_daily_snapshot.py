@@ -107,9 +107,6 @@ from gmx_historical_data.quickstart import (
 )
 from gmx_historical_data.zero_volume_check import (
     ZERO_VOLUME_LOOKBACK_DAYS,
-    ZERO_VOLUME_SHARE_THRESHOLD,
-    classify_zero_volume,
-    suspicious_findings,
 )
 
 # `trade_tick_collector` is deliberately NOT imported here: it pulls in
@@ -177,11 +174,8 @@ def _merge_feather(
     new value wins -- preserving ``keep='last'`` semantics for genuine
     updates. Output is always sorted by date.
 
-    One exception to that tiebreak: a zero volume never overwrites a
-    non-zero one. The OHLCV fetch builds its rows with ``volume=0.0``
-    because the oracle candle API carries no size, so without this guard
-    each daily run would wipe the real volume a previous run computed from
-    on-chain fills for every bar in the overlap window.
+    Oracle candle volume is always zero. Separate tick tapes and trade-volume
+    aggregates retain traded amounts without changing the candle field.
 
     :param new_df: New rows with columns ``[date, open, high, low, close, volume]``.
     :param filepath: Path to the feather file (created if missing).
@@ -222,6 +216,7 @@ def _merge_feather(
     else:
         combined = new_df
 
+    combined["volume"] = 0.0
     combined = combined.sort_values("date").reset_index(drop=True)
     if combined["date"].dtype == "object":
         combined["date"] = pd.to_datetime(combined["date"], utc=True)
@@ -1212,65 +1207,23 @@ def _append_zero_volume_section(
     """
     try:
         zero_shares = _zero_volume_shares(futures_dir, ZERO_VOLUME_LOOKBACK_DAYS, now)
-        oi_by_symbol = _open_interest_usd_by_symbol(markets_df)
         delisted = load_exempt_symbols([gmx_root / "delisted_markets.json"])
-
-        live_pairs: set[str] = set()
-        oi_by_pair: dict[str, float] = {}
-        for pair in zero_shares:
+        lines.extend(
+            [
+                "",
+                "## Per-Symbol Zero-Volume Check",
+                "  GMX oracle candle volume must be 0.0; trade volume is stored separately.",
+            ]
+        )
+        for pair, (share, count, _total) in sorted(zero_shares.items()):
             symbol = _pair_symbol(pair)
-            if symbol is not None and symbol in delisted:
+            if symbol in delisted:
                 continue
-            live_pairs.add(pair)
-            if symbol is not None and symbol in oi_by_symbol:
-                oi_by_pair[pair] = oi_by_symbol[symbol]
-
-        tick_volume_by_symbol = _tick_volume_by_symbol(gmx_root, ZERO_VOLUME_LOOKBACK_DAYS, now)
-        tick_volume_by_pair = (
-            None
-            if tick_volume_by_symbol is None
-            else {
-                pair: tick_volume_by_symbol.get(symbol, 0.0)
-                for pair in live_pairs
-                if (symbol := _pair_symbol(pair)) is not None
-            }
-        )
-        findings = classify_zero_volume(
-            zero_shares,
-            oi_by_pair,
-            live_pairs=live_pairs,
-            tick_volume_by_pair=tick_volume_by_pair,
-        )
-
-        lines.append("")
-        lines.append("## Per-Symbol Zero-Volume Check")
-        lines.append(
-            f"  Live pairs whose 1h candles were at least "
-            f"{ZERO_VOLUME_SHARE_THRESHOLD:.0%} zero-volume over the last "
-            f"{ZERO_VOLUME_LOOKBACK_DAYS}d. Tick volume without corresponding "
-            f"candle volume is suspicious; OI is shown as context."
-        )
-        if not findings:
-            lines.append("  (none)")
-        else:
-            for f in findings:
-                oi_str = (
-                    "unknown" if f.open_interest_usd is None else f"${f.open_interest_usd:,.0f}"
-                )
-                lines.append(
-                    f"  {f.pair:<20s} {f.zero_share:>6.1%} zero ({f.candles} candles)  "
-                    f"OI={oi_str:<14s} {f.verdict.value}"
-                )
-
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            for f in suspicious_findings(findings):
-                print(
-                    f"::warning::zero-volume cross-source mismatch: {f.pair} is "
-                    f"{f.zero_share:.0%} zero-volume over {ZERO_VOLUME_LOOKBACK_DAYS}d "
-                    f"but tick sidecar volume is non-zero (OI context: "
-                    f"${(f.open_interest_usd or 0):,.0f})"
-                )
-    except Exception as exc:  # noqa: BLE001 - fail-soft: never abort the release over a report check
+            verdict = "expected zero" if share == 1.0 else "INVALID nonzero candle volume"
+            lines.append(f"  {pair}: {share:.1%} zero ({count} candles), {verdict}")
+            if share != 1.0 and os.environ.get("GITHUB_ACTIONS") == "true":
+                print(f"::warning::nonzero GMX oracle candle volume: {pair}")
+    except Exception as exc:  # noqa: BLE001 - report is observational
         console.print(f"  [yellow]WARNING: zero-volume check failed: {exc}[/yellow]")
 
 
@@ -2643,7 +2596,7 @@ Examples:
     else:
         console.print(
             f"  Ticks:     {tick_result['ticks']} fills → "
-            f"{tick_result['files_updated']} candle files got volume"
+            f"{tick_result['files_updated']} candle files checked for zero volume"
         )
     console.print("[green]Done.[/green]")
 
