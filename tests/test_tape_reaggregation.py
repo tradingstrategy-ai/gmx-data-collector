@@ -77,7 +77,7 @@ class TestTwoScansSplittingOneBar:
         dates = write_tick_tapes([_tick(BEFORE_CRON, 10.0, "0xa")], ticks_dir)
         apply_volume_from_tapes(ticks_dir, sidecar, futures, ["1d"], dates=sorted(dates))
         assert pd.read_feather(futures / "BTC_USDC_USDC-1d-futures.feather")["volume"].tolist() == [
-            10.0
+            0.0
         ]
 
         # Run B, the next day, sees the rest of that same UTC day.
@@ -85,7 +85,9 @@ class TestTwoScansSplittingOneBar:
         apply_volume_from_tapes(ticks_dir, sidecar, futures, ["1d"], dates=sorted(dates))
 
         volume = pd.read_feather(futures / "BTC_USDC_USDC-1d-futures.feather")["volume"].tolist()
-        assert volume == [100.0], "second scan replaced the bar instead of completing it"
+        assert volume == [0.0], "trade sums must stay in the separate sidecar"
+        aggregate = pd.read_parquet(sidecar / "2026-09-09.parquet")
+        assert aggregate.loc[aggregate["kind"].eq("perp"), "volume"].sum() == 100.0
 
     def test_rerunning_the_same_scan_does_not_inflate_the_bar(self, tmp_path):
         """Re-aggregating from the tape must be idempotent, or a retried run
@@ -102,7 +104,7 @@ class TestTwoScansSplittingOneBar:
             apply_volume_from_tapes(ticks_dir, sidecar, futures, ["1d"], dates=sorted(dates))
 
         assert pd.read_feather(futures / "BTC_USDC_USDC-1d-futures.feather")["volume"].tolist() == [
-            100.0
+            0.0
         ]
 
     def test_tapes_are_keyed_by_utc_fill_date_not_run_date(self, tmp_path):

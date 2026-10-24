@@ -355,7 +355,7 @@ class TestReportDepthAndVolumeSections:
         assert "BUGGY" in content
         out = capsys.readouterr().out
         assert "::warning::" in out
-        assert "BUGGY" in out
+        assert "nonzero GMX oracle candle volume: BUGGY" not in out
 
     def test_delisted_pairs_are_excluded_from_zero_volume_check(
         self, tmp_path, capsys, monkeypatch
